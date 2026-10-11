@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v2)
+   Smart Shopper — Cloudflare Worker Proxy (v3)
+   Supports: search, smart-match (with device_id), link.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -14,13 +15,16 @@ export default {
 
     try {
       if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 2 }, env);
+        return json({ ok: true, service: "smart-shopper-proxy", version: 3 }, env);
       }
       if (url.pathname === "/api/search" && request.method === "POST") {
         return await handleSearch(request, env);
       }
       if (url.pathname === "/api/smart-match" && request.method === "POST") {
         return await handleSmartMatch(request, env);
+      }
+      if (url.pathname === "/api/hot-products" && request.method === "POST") {
+        return await handleHotProducts(request, env);
       }
       if (url.pathname === "/api/link" && request.method === "POST") {
         return await handleLink(request, env);
@@ -31,6 +35,10 @@ export default {
     }
   },
 };
+
+/* ═══════════════════════════════════════════════════════
+   HANDLERS
+   ═══════════════════════════════════════════════════════ */
 
 async function handleSearch(request, env) {
   const body = await request.json();
@@ -47,16 +55,21 @@ async function handleSearch(request, env) {
     keywords: keyword,
     page_no: String(page),
     page_size: String(pageSize),
-    currency,
+    currency: currency,
     target_currency: currency,
     target_language: "EN",
     ship_to_country: "US",
     tracking_id: env.ALI_TRACKING_ID,
   };
+
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
 
+/**
+ * ⭐ Smart Match — Find the SAME product from different sellers.
+ * Requires: device_id + device_type (mandatory per AliExpress).
+ */
 async function handleSmartMatch(request, env) {
   const body = await request.json();
   const { productId, imageUrl, productTitle, currency = "USD" } = body;
@@ -76,6 +89,9 @@ async function handleSmartMatch(request, env) {
     target_language: "EN",
     ship_to_country: "US",
     tracking_id: env.ALI_TRACKING_ID,
+    // ⭐ المعاملات الإلزامية
+    device_id: "smart-shopper-ext",
+    device_type: "web",
   };
 
   if (productId) params.product_id = String(productId);
@@ -86,12 +102,39 @@ async function handleSmartMatch(request, env) {
   return json({ ok: true, data: result }, env);
 }
 
+async function handleHotProducts(request, env) {
+  const body = await request.json();
+  const { categoryId, page = 1, pageSize = 20, currency = "USD" } = body;
+
+  const params = {
+    method: "aliexpress.affiliate.hotproduct.query",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    category_ids: categoryId || "",
+    page_no: String(page),
+    page_size: String(pageSize),
+    currency: currency,
+    target_currency: currency,
+    target_language: "EN",
+    ship_to_country: "US",
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
+}
+
 async function handleLink(request, env) {
   const body = await request.json();
   const { urls = [] } = body;
+
   if (!Array.isArray(urls) || urls.length === 0) {
     return json({ ok: false, error: "urls required" }, env, 400);
   }
+
   const params = {
     method: "aliexpress.affiliate.link.generate",
     app_key: env.ALI_APP_KEY,
@@ -103,35 +146,62 @@ async function handleLink(request, env) {
     source_values: urls.join(","),
     tracking_id: env.ALI_TRACKING_ID,
   };
+
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
 
+/* ═══════════════════════════════════════════════════════
+   ALIEXPRESS API CALL
+   ═══════════════════════════════════════════════════════ */
+
 async function callAliExpress(params, env) {
   const signed = await signRequest(params, env.ALI_APP_SECRET);
   const query = new URLSearchParams(signed).toString();
+
   const res = await fetch(`${API_BASE}?${query}`, {
     method: "GET",
     headers: { "Accept": "application/json" },
   });
+
   const text = await res.text();
-  try { return JSON.parse(text); } catch (_) { return { raw: text }; }
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return { raw: text };
+  }
 }
+
+/* ═══════════════════════════════════════════════════════
+   MD5 SIGNATURE
+   ═══════════════════════════════════════════════════════ */
 
 async function signRequest(params, secret) {
   const sortedKeys = Object.keys(params).sort();
+
   let base = "";
-  for (const k of sortedKeys) base += k + String(params[k]);
+  for (const k of sortedKeys) {
+    base += k + String(params[k]);
+  }
+
   const toHash = secret + base + secret;
   const hash = await md5Hex(toHash);
+
   return { ...params, sign: hash };
 }
 
 async function md5Hex(str) {
   const data = new TextEncoder().encode(str);
   const buf = await crypto.subtle.digest("MD5", data);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
 }
+
+/* ═══════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════ */
 
 function corsHeaders(env) {
   return {
@@ -145,6 +215,9 @@ function corsHeaders(env) {
 function json(data, env, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json", ...corsHeaders(env) },
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders(env),
+    },
   });
 }
