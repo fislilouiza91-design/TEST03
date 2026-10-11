@@ -1,6 +1,5 @@
 /* ═══════════════════════════════════════════════════════
    Smart Shopper — Cloudflare Worker Proxy (v2)
-   Supports Smart Match API.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -22,9 +21,6 @@ export default {
       }
       if (url.pathname === "/api/smart-match" && request.method === "POST") {
         return await handleSmartMatch(request, env);
-      }
-      if (url.pathname === "/api/hot-products" && request.method === "POST") {
-        return await handleHotProducts(request, env);
       }
       if (url.pathname === "/api/link" && request.method === "POST") {
         return await handleLink(request, env);
@@ -57,7 +53,6 @@ async function handleSearch(request, env) {
     ship_to_country: "US",
     tracking_id: env.ALI_TRACKING_ID,
   };
-
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
@@ -87,29 +82,6 @@ async function handleSmartMatch(request, env) {
   else if (imageUrl) params.image_url = imageUrl;
   else params.product_title = productTitle;
 
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
-
-async function handleHotProducts(request, env) {
-  const body = await request.json();
-  const { categoryId, page = 1, pageSize = 20, currency = "USD" } = body;
-  const params = {
-    method: "aliexpress.affiliate.hotproduct.query",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    category_ids: categoryId || "",
-    page_no: String(page),
-    page_size: String(pageSize),
-    currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
