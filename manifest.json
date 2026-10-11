@@ -1,178 +1,70 @@
-/* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v2)
-   Supports Smart Match API.
-   ═══════════════════════════════════════════════════════ */
+{
+  "manifest_version": 3,
+  "name": "Smart Shopper — AliExpress",
+  "version": "1.0.0",
+  "description": "Compare the same AliExpress product across different sellers for better prices, ratings, and sales.",
+  "author": "Bessem Madrid",
 
-const API_BASE = "https://api-sg.aliexpress.com/sync";
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
 
-export default {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders(env) });
-    }
-
-    const url = new URL(request.url);
-
-    try {
-      if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 2 }, env);
-      }
-      if (url.pathname === "/api/search" && request.method === "POST") {
-        return await handleSearch(request, env);
-      }
-      if (url.pathname === "/api/smart-match" && request.method === "POST") {
-        return await handleSmartMatch(request, env);
-      }
-      if (url.pathname === "/api/hot-products" && request.method === "POST") {
-        return await handleHotProducts(request, env);
-      }
-      if (url.pathname === "/api/link" && request.method === "POST") {
-        return await handleLink(request, env);
-      }
-      return json({ ok: false, error: "Route not found" }, env, 404);
-    } catch (err) {
-      return json({ ok: false, error: String(err) }, env, 500);
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Smart Shopper",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "48": "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
     }
   },
-};
 
-async function handleSearch(request, env) {
-  const body = await request.json();
-  const { keyword, page = 1, pageSize = 20, currency = "USD" } = body;
-  if (!keyword) return json({ ok: false, error: "keyword required" }, env, 400);
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
 
-  const params = {
-    method: "aliexpress.affiliate.product.query",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    keywords: keyword,
-    page_no: String(page),
-    page_size: String(pageSize),
-    currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.aliexpress.com/*",
+        "*://*.aliexpress.us/*",
+        "*://*.aliexpress.ru/*",
+        "*://*.aliexpress.com.tr/*",
+        "*://*.aliexpress.com.br/*",
+        "*://*.aliexpress.com.mx/*",
+        "*://*.aliexpress.com.ar/*",
+        "*://*.aliexpress.cl/*",
+        "*://*.aliexpress.co/*",
+        "*://*.aliexpress.pe/*"
+      ],
+      "js": ["content/i18n.js", "content/content.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
 
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting"
+  ],
 
-async function handleSmartMatch(request, env) {
-  const body = await request.json();
-  const { productId, imageUrl, productTitle, currency = "USD" } = body;
-
-  if (!productId && !imageUrl && !productTitle) {
-    return json({ ok: false, error: "productId, imageUrl or productTitle required" }, env, 400);
-  }
-
-  const params = {
-    method: "aliexpress.affiliate.product.smartmatch",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-
-  if (productId) params.product_id = String(productId);
-  else if (imageUrl) params.image_url = imageUrl;
-  else params.product_title = productTitle;
-
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
-
-async function handleHotProducts(request, env) {
-  const body = await request.json();
-  const { categoryId, page = 1, pageSize = 20, currency = "USD" } = body;
-  const params = {
-    method: "aliexpress.affiliate.hotproduct.query",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    category_ids: categoryId || "",
-    page_no: String(page),
-    page_size: String(pageSize),
-    currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
-
-async function handleLink(request, env) {
-  const body = await request.json();
-  const { urls = [] } = body;
-  if (!Array.isArray(urls) || urls.length === 0) {
-    return json({ ok: false, error: "urls required" }, env, 400);
-  }
-  const params = {
-    method: "aliexpress.affiliate.link.generate",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    promotion_link_type: "0",
-    source_values: urls.join(","),
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
-
-async function callAliExpress(params, env) {
-  const signed = await signRequest(params, env.ALI_APP_SECRET);
-  const query = new URLSearchParams(signed).toString();
-  const res = await fetch(`${API_BASE}?${query}`, {
-    method: "GET",
-    headers: { "Accept": "application/json" },
-  });
-  const text = await res.text();
-  try { return JSON.parse(text); } catch (_) { return { raw: text }; }
-}
-
-async function signRequest(params, secret) {
-  const sortedKeys = Object.keys(params).sort();
-  let base = "";
-  for (const k of sortedKeys) base += k + String(params[k]);
-  const toHash = secret + base + secret;
-  const hash = await md5Hex(toHash);
-  return { ...params, sign: hash };
-}
-
-async function md5Hex(str) {
-  const data = new TextEncoder().encode(str);
-  const buf = await crypto.subtle.digest("MD5", data);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
-}
-
-function corsHeaders(env) {
-  return {
-    "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Max-Age": "86400",
-  };
-}
-
-function json(data, env, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders(env) },
-  });
+  "host_permissions": [
+    "*://*.aliexpress.com/*",
+    "*://*.aliexpress.us/*",
+    "*://*.aliexpress.ru/*",
+    "*://*.aliexpress.com.tr/*",
+    "*://*.aliexpress.com.br/*",
+    "*://*.aliexpress.com.mx/*",
+    "*://*.aliexpress.com.ar/*",
+    "*://*.aliexpress.cl/*",
+    "*://*.aliexpress.co/*",
+    "*://*.aliexpress.pe/*",
+    "https://api-sg.aliexpress.com/*",
+    "https://api.aliexpress.com/*",
+    "https://smart-shopper-proxy.fislilouiza91.workers.dev/*"
+  ]
 }
