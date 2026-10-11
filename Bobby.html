@@ -1,11 +1,11 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v9)
-   30 parallel queries + Edge caching + Rate limiting.
+   Smart Shopper — Cloudflare Worker (v10)
+   Multi-language + Category search + 40 queries.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
 const CACHE_TTL = 1800;
-const MAX_QUERIES = 30;
+const MAX_QUERIES = 40;
 
 export default {
   async fetch(request, env, ctx) {
@@ -15,10 +15,13 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 9 }, env);
+        return json({ ok: true, service: "smart-shopper-proxy", version: 10 }, env);
       }
       if (url.pathname === "/api/deep-search" && request.method === "POST") {
         return await handleDeepSearch(request, env, ctx);
+      }
+      if (url.pathname === "/api/category-search" && request.method === "POST") {
+        return await handleCategorySearch(request, env);
       }
       if (url.pathname === "/api/link" && request.method === "POST") {
         return await handleLink(request, env);
@@ -30,10 +33,6 @@ export default {
   },
 };
 
-/* ═══════════════════════════════════════════════════════
-   DEEP SEARCH با Cache
-   ═══════════════════════════════════════════════════════ */
-
 async function handleDeepSearch(request, env, ctx) {
   const body = await request.json();
   const { queries = [], cacheKey } = body;
@@ -42,13 +41,11 @@ async function handleDeepSearch(request, env, ctx) {
     return json({ ok: false, error: "queries required" }, env, 400);
   }
 
-  // Cache check
   if (cacheKey) {
-    const cacheUrl = `https://cache.ss-proxy/${encodeURIComponent(cacheKey)}`;
+    const cacheUrl = `https://cache.ss/${encodeURIComponent(cacheKey)}`;
     const cache = caches.default;
     const cached = await cache.match(cacheUrl);
     if (cached) {
-      console.log(`[Worker] CACHE HIT: ${cacheKey}`);
       const data = await cached.json();
       return json({ ok: true, data, cached: true }, env);
     }
@@ -56,9 +53,8 @@ async function handleDeepSearch(request, env, ctx) {
 
   const data = await runDeepSearch(queries, env);
 
-  // Cache save
   if (cacheKey && data.total > 0) {
-    const cacheUrl = `https://cache.ss-proxy/${encodeURIComponent(cacheKey)}`;
+    const cacheUrl = `https://cache.ss/${encodeURIComponent(cacheKey)}`;
     const cache = caches.default;
     const resp = new Response(JSON.stringify(data), {
       headers: {
@@ -74,7 +70,7 @@ async function handleDeepSearch(request, env, ctx) {
 
 async function runDeepSearch(queries, env) {
   const cleanQueries = queries.slice(0, MAX_QUERIES);
-  console.log(`[Worker] Searching ${cleanQueries.length} queries`);
+  console.log(`[Worker] ${cleanQueries.length} queries`);
 
   const requests = [];
   for (const q of cleanQueries) {
@@ -83,9 +79,10 @@ async function runDeepSearch(queries, env) {
     const size = typeof q === "object" ? (q.pageSize || 50) : 50;
     const name = typeof q === "object" ? (q.name || keyword) : keyword;
     const priority = typeof q === "object" ? (q.priority || 99) : 99;
+    const lang = typeof q === "object" ? (q.language || "EN") : "EN";
 
     if (!keyword) continue;
-    requests.push({ name, keyword, page, size, priority });
+    requests.push({ name, keyword, page, size, priority, lang });
   }
 
   const promises = requests.map(async (req) => {
@@ -102,40 +99,25 @@ async function runDeepSearch(queries, env) {
         page_size: String(req.size),
         currency: "USD",
         target_currency: "USD",
-        target_language: "EN",
+        target_language: req.lang,
         ship_to_country: "US",
         tracking_id: env.ALI_TRACKING_ID,
       };
 
       const result = await callAliExpress(params, env);
       const products = extractProducts(result);
-      return {
-        name: req.name,
-        keyword: req.keyword,
-        priority: req.priority,
-        count: products.length,
-        products,
-      };
+      return { name: req.name, keyword: req.keyword, priority: req.priority, count: products.length, products };
     } catch (e) {
-      return {
-        name: req.name,
-        keyword: req.keyword,
-        priority: req.priority,
-        count: 0,
-        products: [],
-        error: e.message,
-      };
+      return { name: req.name, keyword: req.keyword, priority: req.priority, count: 0, products: [], error: e.message };
     }
   });
 
   const results = await Promise.all(promises);
 
-  // دمج + ترتيب حسب priority
   const seen = new Set();
   const merged = [];
   const stats = {};
 
-  // ترتيب النتائج: الأولوية الأعلى أولاً
   results.sort((a, b) => a.priority - b.priority);
 
   for (const r of results) {
@@ -153,11 +135,37 @@ async function runDeepSearch(queries, env) {
   return {
     total: merged.length,
     products: merged,
-    stats: {
-      queriesCount: requests.length,
-      perQuery: stats,
-    },
+    stats: { queriesCount: requests.length, perQuery: stats },
   };
+}
+
+/**
+ * ⭐ بحث بالتصنيف — لإيجاد منتجات مخفية
+ */
+async function handleCategorySearch(request, env) {
+  const body = await request.json();
+  const { categoryId, page = 1, pageSize = 50, currency = "USD" } = body;
+  if (!categoryId) return json({ ok: false, error: "categoryId required" }, env, 400);
+
+  const params = {
+    method: "aliexpress.affiliate.product.query",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    category_ids: String(categoryId),
+    page_no: String(page),
+    page_size: String(pageSize),
+    currency,
+    target_currency: currency,
+    target_language: "EN",
+    ship_to_country: "US",
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
 }
 
 function extractProducts(apiResult) {
