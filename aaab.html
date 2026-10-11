@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v6)
-   DEEP SEARCH — 5 strategies × 3 pages = 300+ raw results.
+   Smart Shopper — Cloudflare Worker Proxy (v7)
+   MEGA DEEP SEARCH — up to 30 queries in parallel.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -13,13 +13,10 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 6 }, env);
+        return json({ ok: true, service: "smart-shopper-proxy", version: 7 }, env);
       }
       if (url.pathname === "/api/search" && request.method === "POST") {
         return await handleSearch(request, env);
-      }
-      if (url.pathname === "/api/product-detail" && request.method === "POST") {
-        return await handleProductDetail(request, env);
       }
       if (url.pathname === "/api/deep-search" && request.method === "POST") {
         return await handleDeepSearch(request, env);
@@ -53,7 +50,7 @@ async function handleSearch(request, env) {
     keywords: keyword,
     page_no: String(page),
     page_size: String(pageSize),
-    currency: currency,
+    currency,
     target_currency: currency,
     target_language: "EN",
     ship_to_country: "US",
@@ -64,102 +61,41 @@ async function handleSearch(request, env) {
   return json({ ok: true, data: result }, env);
 }
 
-async function handleProductDetail(request, env) {
-  const body = await request.json();
-  const { productId, currency = "USD" } = body;
-  if (!productId) return json({ ok: false, error: "productId required" }, env, 400);
-
-  const params = {
-    method: "aliexpress.affiliate.productdetail.get",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    product_ids: String(productId),
-    currency: currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
-}
-
-/* ═══════════════════════════════════════════════════════
-   ⭐ DEEP SEARCH — الاستراتيجية القوية
-   ═══════════════════════════════════════════════════════
-
-   يستقبل:
-   {
-     strategies: [
-       { name: "brand-model", keywords: "HOCO EQ5" },
-       { name: "model-only", keywords: "EQ5" },
-       { name: "brand-kw", keywords: "HOCO wireless earphone" },
-       ...
-     ],
-     pagesPerQuery: 3,      // 3 صفحات لكل استراتيجية
-     pageSize: 50,          // 50 منتج لكل صفحة
-     currency: "USD"
-   }
-
-   يُرجع:
-   {
-     ok: true,
-     data: {
-       total: 250,
-       products: [...],     // مدموجة + بدون تكرار
-       stats: {...}
-     }
-   }
-   ═══════════════════════════════════════════════════════ */
-
+/**
+ * ⭐ MEGA DEEP SEARCH
+ * يستقبل قائمة queries (حتى 30) ويشغلها بالتوازي
+ */
 async function handleDeepSearch(request, env) {
   const body = await request.json();
-  const {
-    strategies = [],
-    pagesPerQuery = 3,
-    pageSize = 50,
-    currency = "USD",
-  } = body;
+  const { queries = [], currency = "USD" } = body;
 
-  if (!Array.isArray(strategies) || strategies.length === 0) {
-    return json({ ok: false, error: "strategies array required" }, env, 400);
+  if (!Array.isArray(queries) || queries.length === 0) {
+    return json({ ok: false, error: "queries array required" }, env, 400);
   }
 
-  // حد أقصى للحماية
-  const MAX_STRATEGIES = 6;
-  const MAX_PAGES = 3;
-  const MAX_PAGE_SIZE = 50;
+  // حد أقصى 30 استعلام
+  const MAX_QUERIES = 30;
+  const cleanQueries = queries.slice(0, MAX_QUERIES);
 
-  const cleanStrategies = strategies.slice(0, MAX_STRATEGIES);
-  const pages = Math.min(pagesPerQuery, MAX_PAGES);
-  const size = Math.min(pageSize, MAX_PAGE_SIZE);
+  console.log(`[Worker] MEGA search with ${cleanQueries.length} queries`);
 
-  console.log(`[Worker] Deep search: ${cleanStrategies.length} strategies × ${pages} pages × ${size}`);
+  // نبني قائمة الطلبات
+  const requests = [];
+  for (const q of cleanQueries) {
+    const keyword = (typeof q === "string" ? q : q.keywords || "").trim();
+    const page = typeof q === "object" ? (q.page || 1) : 1;
+    const size = typeof q === "object" ? (q.pageSize || 50) : 50;
+    const name = typeof q === "object" ? (q.name || keyword) : keyword;
 
-  // ⭐ نجهز كل (استراتيجية × صفحة) كطلب منفصل
-  const allRequests = [];
+    if (!keyword) continue;
 
-  for (const strategy of cleanStrategies) {
-    const kw = (strategy.keywords || "").trim();
-    if (!kw) continue;
-
-    for (let p = 1; p <= pages; p++) {
-      allRequests.push({
-        strategyName: strategy.name || kw,
-        keyword: kw,
-        page: p,
-      });
-    }
+    requests.push({ name, keyword, page, size });
   }
 
-  console.log(`[Worker] Total requests: ${allRequests.length}`);
+  console.log(`[Worker] Executing ${requests.length} requests`);
 
-  // ⭐ ننفذها بالتوازي
-  const promises = allRequests.map(async (req) => {
+  // ⭐ تنفيذ بالتوازي مع timeout
+  const promises = requests.map(async (req) => {
     try {
       const params = {
         method: "aliexpress.affiliate.product.query",
@@ -170,8 +106,8 @@ async function handleDeepSearch(request, env) {
         sign_method: "md5",
         keywords: req.keyword,
         page_no: String(req.page),
-        page_size: String(size),
-        currency: currency,
+        page_size: String(req.size),
+        currency,
         target_currency: currency,
         target_language: "EN",
         ship_to_country: "US",
@@ -181,20 +117,19 @@ async function handleDeepSearch(request, env) {
       const result = await callAliExpress(params, env);
       const products = extractProducts(result);
 
-      console.log(`[Worker] "${req.keyword}" p${req.page} → ${products.length}`);
-
       return {
-        strategy: req.strategyName,
+        name: req.name,
         keyword: req.keyword,
         page: req.page,
+        count: products.length,
         products,
       };
     } catch (e) {
-      console.log(`[Worker] FAIL "${req.keyword}" p${req.page}: ${e.message}`);
       return {
-        strategy: req.strategyName,
+        name: req.name,
         keyword: req.keyword,
         page: req.page,
+        count: 0,
         products: [],
         error: e.message,
       };
@@ -203,36 +138,32 @@ async function handleDeepSearch(request, env) {
 
   const results = await Promise.all(promises);
 
-  // ⭐ نجمع + نزيل التكرار
-  const seenIds = new Set();
-  const mergedProducts = [];
-  const strategyStats = {};
+  // دمج بدون تكرار
+  const seen = new Set();
+  const merged = [];
+  const stats = {};
 
   for (const r of results) {
-    const key = r.strategy;
-    strategyStats[key] = (strategyStats[key] || 0) + r.products.length;
+    stats[r.name] = (stats[r.name] || 0) + r.count;
 
     for (const p of r.products) {
       const id = String(p.product_id || "");
-      if (!id || seenIds.has(id)) continue;
-      seenIds.add(id);
-      mergedProducts.push(p);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(p);
     }
   }
 
-  console.log(`[Worker] ✅ Total unique: ${mergedProducts.length}`);
+  console.log(`[Worker] ✅ Unique products: ${merged.length}`);
 
   return json({
     ok: true,
     data: {
-      total: mergedProducts.length,
-      products: mergedProducts,
+      total: merged.length,
+      products: merged,
       stats: {
-        strategies: cleanStrategies.length,
-        pagesPerQuery: pages,
-        pageSize: size,
-        totalRequests: allRequests.length,
-        perStrategy: strategyStats,
+        queriesCount: requests.length,
+        perQuery: stats,
       },
     }
   }, env);
@@ -241,10 +172,6 @@ async function handleDeepSearch(request, env) {
 function extractProducts(apiResult) {
   try {
     const resp = apiResult?.aliexpress_affiliate_product_query_response;
-    if (resp?.resp_result?.resp_code !== 200) {
-      const msg = resp?.resp_result?.resp_msg || "unknown";
-      if (msg !== "Success") console.log(`[Worker] API msg: ${msg}`);
-    }
     const products = resp?.resp_result?.result?.products?.product || [];
     return Array.isArray(products) ? products : (products ? [products] : []);
   } catch (_) {
@@ -274,7 +201,7 @@ async function handleLink(request, env) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   CORE API CALL
+   CORE
    ═══════════════════════════════════════════════════════ */
 
 async function callAliExpress(params, env) {
