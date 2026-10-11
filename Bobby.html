@@ -1,11 +1,13 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker (v10)
-   Multi-language + Category search + 40 queries.
+   Smart Shopper — Cloudflare Worker (v11)
+   Multi-Language + Multi-Country + Multi-Currency.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
-const CACHE_TTL = 1800;
-const MAX_QUERIES = 40;
+
+const SUPPORTED_COUNTRIES = [
+  "US","GB","DE","FR","ES","IT","NL","BE","CH","AT","SE","NO","DK","FI","IS","IE","PT","PL","CZ","SK","HU","RO","BG","GR","HR","SI","RS","MK","AL","BA","MD","LT","LV","EE","RU","UA","BY","TR","IL","SA","AE","QA","KW","BH","OM","JO","LB","IQ","IR","EG","DZ","MA","TN","LY","SD","MR","ZA","NG","KE","GH","UG","TZ","RW","ET","MZ","ZW","BW","NA","MU","MG","AO","CM","SN","CI","IN","PK","BD","LK","NP","AF","MV","TH","VN","ID","MY","SG","PH","BN","KH","LA","MM","CN","JP","KR","TW","HK","MO","AU","NZ","CA","MX","BR","AR","CL","CO","PE","VE","UY","PY","BO","EC","GT","CR","PA","DO","CU","KZ","UZ","KG","TJ","TM","AZ","AM","GE","MN"
+];
 
 export default {
   async fetch(request, env, ctx) {
@@ -15,13 +17,10 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 10 }, env);
+        return json({ ok: true, service: "smart-shopper-proxy", version: 11 }, env);
       }
       if (url.pathname === "/api/deep-search" && request.method === "POST") {
-        return await handleDeepSearch(request, env, ctx);
-      }
-      if (url.pathname === "/api/category-search" && request.method === "POST") {
-        return await handleCategorySearch(request, env);
+        return await handleDeepSearch(request, env);
       }
       if (url.pathname === "/api/link" && request.method === "POST") {
         return await handleLink(request, env);
@@ -33,44 +32,18 @@ export default {
   },
 };
 
-async function handleDeepSearch(request, env, ctx) {
+async function handleDeepSearch(request, env) {
   const body = await request.json();
-  const { queries = [], cacheKey } = body;
+  const { queries = [], shipToCountry = "US", currency = "USD" } = body;
 
   if (!Array.isArray(queries) || queries.length === 0) {
     return json({ ok: false, error: "queries required" }, env, 400);
   }
 
-  if (cacheKey) {
-    const cacheUrl = `https://cache.ss/${encodeURIComponent(cacheKey)}`;
-    const cache = caches.default;
-    const cached = await cache.match(cacheUrl);
-    if (cached) {
-      const data = await cached.json();
-      return json({ ok: true, data, cached: true }, env);
-    }
-  }
+  const cleanCountry = SUPPORTED_COUNTRIES.includes(shipToCountry) ? shipToCountry : "US";
+  const cleanQueries = queries.slice(0, 30);
 
-  const data = await runDeepSearch(queries, env);
-
-  if (cacheKey && data.total > 0) {
-    const cacheUrl = `https://cache.ss/${encodeURIComponent(cacheKey)}`;
-    const cache = caches.default;
-    const resp = new Response(JSON.stringify(data), {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": `max-age=${CACHE_TTL}`,
-      },
-    });
-    ctx.waitUntil(cache.put(cacheUrl, resp));
-  }
-
-  return json({ ok: true, data, cached: false }, env);
-}
-
-async function runDeepSearch(queries, env) {
-  const cleanQueries = queries.slice(0, MAX_QUERIES);
-  console.log(`[Worker] ${cleanQueries.length} queries`);
+  console.log(`[Worker] ${cleanQueries.length} queries | country: ${cleanCountry} | currency: ${currency}`);
 
   const requests = [];
   for (const q of cleanQueries) {
@@ -80,7 +53,6 @@ async function runDeepSearch(queries, env) {
     const name = typeof q === "object" ? (q.name || keyword) : keyword;
     const priority = typeof q === "object" ? (q.priority || 99) : 99;
     const lang = typeof q === "object" ? (q.language || "EN") : "EN";
-
     if (!keyword) continue;
     requests.push({ name, keyword, page, size, priority, lang });
   }
@@ -97,10 +69,10 @@ async function runDeepSearch(queries, env) {
         keywords: req.keyword,
         page_no: String(req.page),
         page_size: String(req.size),
-        currency: "USD",
-        target_currency: "USD",
+        currency: currency,
+        target_currency: currency,
         target_language: req.lang,
-        ship_to_country: "US",
+        ship_to_country: cleanCountry,
         tracking_id: env.ALI_TRACKING_ID,
       };
 
@@ -132,40 +104,14 @@ async function runDeepSearch(queries, env) {
 
   console.log(`[Worker] ✅ ${merged.length} unique`);
 
-  return {
-    total: merged.length,
-    products: merged,
-    stats: { queriesCount: requests.length, perQuery: stats },
-  };
-}
-
-/**
- * ⭐ بحث بالتصنيف — لإيجاد منتجات مخفية
- */
-async function handleCategorySearch(request, env) {
-  const body = await request.json();
-  const { categoryId, page = 1, pageSize = 50, currency = "USD" } = body;
-  if (!categoryId) return json({ ok: false, error: "categoryId required" }, env, 400);
-
-  const params = {
-    method: "aliexpress.affiliate.product.query",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    category_ids: String(categoryId),
-    page_no: String(page),
-    page_size: String(pageSize),
-    currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: "US",
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-
-  const result = await callAliExpress(params, env);
-  return json({ ok: true, data: result }, env);
+  return json({
+    ok: true,
+    data: {
+      total: merged.length,
+      products: merged,
+      stats: { queriesCount: requests.length, perQuery: stats, country: cleanCountry, currency },
+    }
+  }, env);
 }
 
 function extractProducts(apiResult) {
