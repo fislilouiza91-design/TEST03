@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v8)
-   Added: Product Detail endpoint for accurate pricing.
+   Smart Shopper — Cloudflare Worker Proxy (v9)
+   Added: Product Detail + Coupon Check endpoints.
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -13,7 +13,7 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 8 }, env);
+        return json({ ok: true, service: "smart-shopper-proxy", version: 9 }, env);
       }
       if (url.pathname === "/api/search" && request.method === "POST") {
         return await handleSearch(request, env);
@@ -21,9 +21,11 @@ export default {
       if (url.pathname === "/api/deep-search" && request.method === "POST") {
         return await handleDeepSearch(request, env);
       }
-      // ⭐ NEW: مسار جلب تفاصيل المنتج الدقيق
       if (url.pathname === "/api/product-details" && request.method === "POST") {
         return await handleProductDetails(request, env);
+      }
+      if (url.pathname === "/api/coupon-check" && request.method === "POST") {
+        return await handleCouponCheck(request, env);
       }
       if (url.pathname === "/api/link" && request.method === "POST") {
         return await handleLink(request, env);
@@ -41,7 +43,7 @@ export default {
 
 async function handleSearch(request, env) {
   const body = await request.json();
-  const { keyword, page = 1, pageSize = 50, currency = "USD" } = body;
+  const { keyword, page = 1, pageSize = 50, currency = "USD", country = "US" } = body;
   if (!keyword) return json({ ok: false, error: "keyword required" }, env, 400);
 
   const params = {
@@ -57,7 +59,7 @@ async function handleSearch(request, env) {
     currency,
     target_currency: currency,
     target_language: "EN",
-    ship_to_country: "US",
+    ship_to_country: country,
     tracking_id: env.ALI_TRACKING_ID,
   };
 
@@ -65,13 +67,9 @@ async function handleSearch(request, env) {
   return json({ ok: true, data: result }, env);
 }
 
-/**
- * ⭐ MEGA DEEP SEARCH
- * يستقبل قائمة queries (حتى 30) ويشغلها بالتوازي
- */
 async function handleDeepSearch(request, env) {
   const body = await request.json();
-  const { queries = [], currency = "USD", country = "US" } = body; // ⭐ أضفنا country
+  const { queries = [], currency = "USD", country = "US" } = body;
 
   if (!Array.isArray(queries) || queries.length === 0) {
     return json({ ok: false, error: "queries array required" }, env, 400);
@@ -110,7 +108,7 @@ async function handleDeepSearch(request, env) {
         currency,
         target_currency: currency,
         target_language: "EN",
-        ship_to_country: country, // ⭐ استخدام البلد الممرر
+        ship_to_country: country,
         tracking_id: env.ALI_TRACKING_ID,
       };
 
@@ -142,10 +140,6 @@ async function handleDeepSearch(request, env) {
   return json({ ok: true, data: { total: merged.length, products: merged, stats: { queriesCount: requests.length, perQuery: stats } } }, env);
 }
 
-/**
- * ⭐⭐⭐ NEW: جلب تفاصيل المنتج الدقيق (لحل مشكلة اختلاف السعر)
- * يستخدم aliexpress.affiliate.productdetail.get
- */
 async function handleProductDetails(request, env) {
   const body = await request.json();
   const { product_ids, currency = "USD", country = "US" } = body;
@@ -154,7 +148,6 @@ async function handleProductDetails(request, env) {
     return json({ ok: false, error: "product_ids required" }, env, 400);
   }
 
-  // التأكد من أن المعرفات نصية ومفصولة بفواصل
   const idsString = Array.isArray(product_ids) ? product_ids.join(",") : String(product_ids);
 
   const params = {
@@ -167,7 +160,7 @@ async function handleProductDetails(request, env) {
     product_ids: idsString,
     target_currency: currency,
     target_language: "EN",
-    ship_to_country: country, // ⭐ مهم جداً: بلد المستخدم
+    ship_to_country: country,
     tracking_id: env.ALI_TRACKING_ID,
   };
 
@@ -176,16 +169,47 @@ async function handleProductDetails(request, env) {
   try {
     const result = await callAliExpress(params, env);
     const products = extractDetailedProducts(result);
-    
-    return json({ 
-      ok: true, 
-      data: { 
-        total: products.length, 
-        products 
-      } 
-    }, env);
+    return json({ ok: true, data: { total: products.length, products } }, env);
   } catch (e) {
     return json({ ok: false, error: e.message }, env, 500);
+  }
+}
+
+/**
+ * ⭐ فحص الكوبونات والعروض الترويجية
+ */
+async function handleCouponCheck(request, env) {
+  const body = await request.json();
+  const { product_ids, currency = "USD", country = "US" } = body;
+
+  if (!product_ids) {
+    return json({ ok: false, error: "product_ids required" }, env, 400);
+  }
+
+  const idsString = Array.isArray(product_ids) ? product_ids.join(",") : String(product_ids);
+
+  try {
+    const params = {
+      method: "aliexpress.marketing.storepromotions.querybyproduct",
+      app_key: env.ALI_APP_KEY,
+      timestamp: Date.now(),
+      format: "json",
+      v: "2.0",
+      sign_method: "md5",
+      product_ids: idsString,
+      target_currency: currency,
+      target_language: "EN",
+      ship_to_country: country,
+      tracking_id: env.ALI_TRACKING_ID,
+    };
+
+    const result = await callAliExpress(params, env);
+    const coupons = extractCoupons(result);
+
+    return json({ ok: true, data: { coupons } }, env);
+  } catch (e) {
+    console.error("[Worker] Coupon check failed:", e.message);
+    return json({ ok: true, data: { coupons: {} } }, env);
   }
 }
 
@@ -199,10 +223,6 @@ function extractProducts(apiResult) {
   }
 }
 
-/**
- * ⭐ استخراج المنتجات من رد واجهة التفاصيل
- * لاحظ اختلاف اسم الحقل في الـ API
- */
 function extractDetailedProducts(apiResult) {
   try {
     const resp = apiResult?.aliexpress_affiliate_productdetail_get_response;
@@ -211,6 +231,30 @@ function extractDetailedProducts(apiResult) {
   } catch (_) {
     return [];
   }
+}
+
+function extractCoupons(apiResult) {
+  const result = {};
+  try {
+    const resp = apiResult?.aliexpress_marketing_storepromotions_querybyproduct_response;
+    const promotions = resp?.result?.promotions || resp?.resp_result?.result?.promotions || [];
+    const promoList = Array.isArray(promotions) ? promotions : [promotions];
+
+    for (const promo of promoList) {
+      if (!promo) continue;
+      const pid = String(promo.product_id || "");
+      if (!pid) continue;
+
+      result[pid] = {
+        hasCoupon: true,
+        code: promo.promo_code || "",
+        discount: promo.discount || "",
+        startTime: promo.start_time || "",
+        endTime: promo.end_time || "",
+      };
+    }
+  } catch (_) { /* ignore */ }
+  return result;
 }
 
 async function handleLink(request, env) {
