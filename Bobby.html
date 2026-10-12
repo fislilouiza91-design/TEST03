@@ -1,23 +1,12 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker (v13)
-   100% URL Search — 4 endpoints + تشخيص
+   Smart Shopper — Cloudflare Worker (v14)
+   مع Proxy Fallback لتجاوز حجب AliExpress
    ═══════════════════════════════════════════════════════ */
 
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Cache-Control": "no-cache",
-  "Pragma": "no-cache",
-  "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-  "Sec-Ch-Ua-Mobile": "?0",
-  "Sec-Ch-Ua-Platform": '"Windows"',
-  "Sec-Fetch-Dest": "document",
-  "Sec-Fetch-Mode": "navigate",
-  "Sec-Fetch-Site": "none",
-  "Sec-Fetch-User": "?1",
-  "Upgrade-Insecure-Requests": "1",
   "Cookie": "aep_usuc_f=site=glo&c_tp=USD&region=US&b_locale=en_US&xman_f=US; intl_locale=en_US",
 };
 
@@ -26,8 +15,8 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders(env) });
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper", version: 13 }, env);
-      if (url.pathname === "/api/debug" && request.method === "POST") return await handleDebug(request, env);
+      if (url.pathname === "/health") return json({ ok: true, version: 14 }, env);
+      if (url.pathname === "/api/test") return await handleTest(request, env);
       if (url.pathname === "/api/similar-by-url" && request.method === "POST") return await handleSimilarByUrl(request, env);
       return json({ ok: false, error: "Route not found" }, env, 404);
     } catch (err) {
@@ -37,40 +26,135 @@ export default {
 };
 
 /* ═══════════════════════════════════════════════════════
-   DEBUG — يعرض بالضبط ما يرجعه AliExpress
+   TEST — يرجّع نص بسيط لتعرف ما يحدث
    ═══════════════════════════════════════════════════════ */
-async function handleDebug(request, env) {
+async function handleTest(request, env) {
   const body = await request.json().catch(() => ({}));
-  const keyword = body.keyword || "wifi router";
-  const urls = [
-    `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html`,
-    `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}`,
-    `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(keyword)}&page=1&g=y`,
-    `https://m.aliexpress.com/search.htm?keywords=${encodeURIComponent(keyword)}`,
-  ];
+  const kw = body.keyword || "wifi router";
+  const targetUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(kw)}.html`;
 
-  const results = {};
-  for (const u of urls) {
-    try {
-      const res = await fetch(u, { headers: BROWSER_HEADERS, redirect: "follow" });
-      const text = await res.text();
-      results[u] = {
-        status: res.status,
-        length: text.length,
-        hasItem: /\/item\/\d{6,}/.test(text),
-        hasCaptcha: /captcha|punish|slider|_sec/i.test(text),
-        hasJson: /__INIT_DATA__|_dida_config_|window\.runParams/.test(text),
-        preview: text.slice(0, 300).replace(/\s+/g, " "),
-      };
-    } catch (e) {
-      results[u] = { error: e.message };
-    }
+  const report = { target: targetUrl, attempts: [] };
+
+  // 1) مباشر
+  try {
+    const res = await fetch(targetUrl, { headers: BROWSER_HEADERS });
+    const txt = await res.text();
+    report.attempts.push({
+      proxy: "direct",
+      status: res.status,
+      length: txt.length,
+      hasItem: /\/item\/\d{6,}/.test(txt),
+      hasCaptcha: /punish|captcha|slider|verify/i.test(txt),
+      preview: txt.slice(0, 200).replace(/\s+/g, " "),
+    });
+  } catch (e) {
+    report.attempts.push({ proxy: "direct", error: e.message });
   }
-  return json({ ok: true, results }, env);
+
+  // 2) allorigins
+  try {
+    const u = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u);
+    const txt = await res.text();
+    report.attempts.push({
+      proxy: "allorigins",
+      status: res.status,
+      length: txt.length,
+      hasItem: /\/item\/\d{6,}/.test(txt),
+      hasCaptcha: /punish|captcha|slider|verify/i.test(txt),
+      preview: txt.slice(0, 200).replace(/\s+/g, " "),
+    });
+  } catch (e) {
+    report.attempts.push({ proxy: "allorigins", error: e.message });
+  }
+
+  // 3) corsproxy.io
+  try {
+    const u = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u, { headers: BROWSER_HEADERS });
+    const txt = await res.text();
+    report.attempts.push({
+      proxy: "corsproxy",
+      status: res.status,
+      length: txt.length,
+      hasItem: /\/item\/\d{6,}/.test(txt),
+      hasCaptcha: /punish|captcha|slider|verify/i.test(txt),
+      preview: txt.slice(0, 200).replace(/\s+/g, " "),
+    });
+  } catch (e) {
+    report.attempts.push({ proxy: "corsproxy", error: e.message });
+  }
+
+  // 4) codetabs
+  try {
+    const u = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u);
+    const txt = await res.text();
+    report.attempts.push({
+      proxy: "codetabs",
+      status: res.status,
+      length: txt.length,
+      hasItem: /\/item\/\d{6,}/.test(txt),
+      hasCaptcha: /punish|captcha|slider|verify/i.test(txt),
+      preview: txt.slice(0, 200).replace(/\s+/g, " "),
+    });
+  } catch (e) {
+    report.attempts.push({ proxy: "codetabs", error: e.message });
+  }
+
+  return json({ ok: true, report }, env);
 }
 
 /* ═══════════════════════════════════════════════════════
-   MAIN — Similar by URL
+   FETCH مع Proxy Fallback
+   ═══════════════════════════════════════════════════════ */
+async function fetchHtml(targetUrl) {
+  // 1) مباشر
+  try {
+    const res = await fetch(targetUrl, { headers: BROWSER_HEADERS, redirect: "follow" });
+    if (res.ok) {
+      const txt = await res.text();
+      if (txt.length > 5000 && !/punish|captcha|slider|_sec_/i.test(txt.slice(0, 2000))) {
+        return txt;
+      }
+    }
+  } catch (_) {}
+
+  // 2) allorigins
+  try {
+    const u = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u);
+    if (res.ok) {
+      const txt = await res.text();
+      if (txt.length > 5000) return txt;
+    }
+  } catch (_) {}
+
+  // 3) codetabs
+  try {
+    const u = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u);
+    if (res.ok) {
+      const txt = await res.text();
+      if (txt.length > 5000) return txt;
+    }
+  } catch (_) {}
+
+  // 4) corsproxy
+  try {
+    const u = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+    const res = await fetch(u, { headers: BROWSER_HEADERS });
+    if (res.ok) {
+      const txt = await res.text();
+      if (txt.length > 5000) return txt;
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════
+   MAIN
    ═══════════════════════════════════════════════════════ */
 async function handleSimilarByUrl(request, env) {
   const body = await request.json();
@@ -80,13 +164,12 @@ async function handleSimilarByUrl(request, env) {
   const productId = extractProductId(url);
   if (!productId) return json({ ok: false, error: "Invalid AliExpress URL" }, env, 400);
 
-  // ─── LAYER 1: جلب صفحة المنتج ───
   const productHtml = await fetchHtml(`https://www.aliexpress.com/item/${productId}.html`);
   if (!productHtml) {
     return json({
       ok: false,
-      error: "AliExpress blocked the request (captcha or 403). Cloudflare Worker IP is likely blocked.",
-      hint: "Try /api/debug to see what AliExpress returns."
+      error: "All sources blocked. AliExpress is blocking Cloudflare IPs completely.",
+      suggestion: "Run /api/test to confirm.",
     }, env, 502);
   }
 
@@ -94,63 +177,39 @@ async function handleSimilarByUrl(request, env) {
   if (!source.title) {
     return json({
       ok: false,
-      error: "Could not extract product title. Page may be a captcha.",
-      htmlPreview: productHtml.slice(0, 500),
+      error: "No title found — likely captcha page",
+      preview: productHtml.slice(0, 400),
     }, env, 422);
   }
 
-  const sourceTokens  = tokenize(source.title);
-  const sourceImgSig  = imageSignature(source.image);
-  const sourcePrice   = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
+  const sourceTokens = tokenize(source.title);
+  const sourceImgSig = imageSignature(source.image);
+  const sourcePrice = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
 
-  // ─── LAYER 2: صيغ البحث ───
   const keywords = buildKeywordVariants(source.title);
-  if (keywords.length === 0) {
-    return json({ ok: false, error: "No keywords", source }, env, 422);
-  }
+  if (keywords.length === 0) return json({ ok: false, error: "No keywords", source }, env, 422);
 
-  // ─── LAYER 3: بحث موازي ───
+  // بحث موازي
   const tasks = [];
+  tasks.push((async () => ({ source: "recommended", products: extractRecommendedFromPage(productHtml) }))());
 
-  // A) المنتجات المُقترحة من صفحة المنتج
-  tasks.push((async () => {
-    const list = extractRecommendedFromPage(productHtml);
-    return { source: "recommended", products: list };
-  })());
-
-  // B) لكل كلمة: 3 نقاط نهاية
   for (const kw of keywords) {
+    const enc = encodeURIComponent(kw);
     tasks.push(
-      searchAliExpress(`https://www.aliexpress.com/w/wholesale-${encodeURIComponent(kw)}.html`)
-        .then(products => ({ source: `w:${kw}`, products }))
-        .catch(e => ({ source: `w:${kw}`, products: [], error: e.message }))
-    );
-    tasks.push(
-      searchAliExpress(`https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(kw)}&g=y`)
-        .then(products => ({ source: `wholesale:${kw}`, products }))
-        .catch(e => ({ source: `wholesale:${kw}`, products: [], error: e.message }))
-    );
-    tasks.push(
-      searchJsonEndpoint(kw)
-        .then(products => ({ source: `json:${kw}`, products }))
-        .catch(e => ({ source: `json:${kw}`, products: [], error: e.message }))
-    );
-    tasks.push(
-      searchMobile(kw)
-        .then(products => ({ source: `mobile:${kw}`, products }))
-        .catch(e => ({ source: `mobile:${kw}`, products: [], error: e.message }))
+      fetchHtml(`https://www.aliexpress.com/w/wholesale-${enc}.html`)
+        .then(h => ({ source: `w:${kw}`, products: h ? extractFromHtml(h) : [] }))
+        .catch(() => ({ source: `w:${kw}`, products: [] }))
     );
   }
 
   const results = await Promise.all(tasks);
 
-  // ─── LAYER 4: دمج ───
   const seen = new Set([String(productId)]);
   const pool = [];
   const stats = {};
 
   for (const r of results) {
-    stats[r.source] = r.products.length + (r.error ? ` (err: ${r.error.slice(0, 50)})` : "");
+    stats[r.source] = r.products.length;
     for (const raw of r.products) {
       const p = normalizeProduct(raw);
       if (!p.product_id || !p.title) continue;
@@ -160,13 +219,12 @@ async function handleSimilarByUrl(request, env) {
     }
   }
 
-  // ─── LAYER 5: تقييم ───
   for (const p of pool) {
-    const text  = textSimilarity(sourceTokens, tokenize(p.title));
+    const text = textSimilarity(sourceTokens, tokenize(p.title));
     const image = imageSimilarity(sourceImgSig, imageSignature(p.image));
     const price = priceSimilarity(sourcePrice, parseFloat(String(p.price).replace(/[^\d.]/g, "")) || 0);
     p.score = {
-      text:  round3(text),
+      text: round3(text),
       image: round3(image),
       price: round3(price),
       total: round3(text * 0.45 + image * 0.45 + price * 0.10),
@@ -174,11 +232,10 @@ async function handleSimilarByUrl(request, env) {
     p.isImageMatch = image >= 0.85;
   }
 
-  // ─── LAYER 6: ترتيب ───
   pool.sort((a, b) => {
     if (a.isImageMatch !== b.isImageMatch) return a.isImageMatch ? -1 : 1;
     if (Math.abs(b.score.image - a.score.image) > 0.1) return b.score.image - a.score.image;
-    if (Math.abs(b.score.text - a.score.text) > 0.1)   return b.score.text - a.score.text;
+    if (Math.abs(b.score.text - a.score.text) > 0.1) return b.score.text - a.score.text;
     return a.price - b.price;
   });
 
@@ -189,80 +246,14 @@ async function handleSimilarByUrl(request, env) {
     data: {
       source: { product_id: productId, ...source },
       keywords,
-      stats: {
-        ...stats,
-        candidates: pool.length,
-        returned: top.length,
-        imageMatches: top.filter(p => p.isImageMatch).length,
-      },
+      stats: { ...stats, candidates: pool.length, returned: top.length, imageMatches: top.filter(p => p.isImageMatch).length },
       products: top,
     }
   }, env);
 }
 
 /* ═══════════════════════════════════════════════════════
-   SEARCH — 3 endpoints
-   ═══════════════════════════════════════════════════════ */
-
-async function searchAliExpress(url) {
-  const html = await fetchHtml(url);
-  if (!html) return [];
-  // كشف captcha
-  if (/punish|captcha|slider|_sec_|Please verify/i.test(html) && html.length < 20000) return [];
-  return extractFromHtml(html);
-}
-
-async function searchJsonEndpoint(keyword) {
-  const url = `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(keyword)}&page=1&g=y`;
-  const data = await fetchJson(url, "https://www.aliexpress.com/");
-  if (!data) return [];
-  const found = [];
-  collectProducts(data, found, 0);
-  return found;
-}
-
-async function searchMobile(keyword) {
-  const url = `https://m.aliexpress.com/search.htm?keywords=${encodeURIComponent(keyword)}`;
-  const html = await fetchHtml(url);
-  if (!html) return [];
-  if (/punish|captcha|slider/i.test(html) && html.length < 20000) return [];
-  return extractFromHtml(html);
-}
-
-/* ═══════════════════════════════════════════════════════
-   NETWORK
-   ═══════════════════════════════════════════════════════ */
-
-async function fetchHtml(targetUrl) {
-  try {
-    const res = await fetch(targetUrl, { headers: BROWSER_HEADERS, redirect: "follow" });
-    if (!res.ok) {
-      console.error(`fetchHtml ${res.status} for ${targetUrl}`);
-      return null;
-    }
-    return await res.text();
-  } catch (e) {
-    console.error("fetchHtml:", e.message);
-    return null;
-  }
-}
-
-async function fetchJson(targetUrl, referer) {
-  try {
-    const headers = { ...BROWSER_HEADERS, "Accept": "application/json, text/plain, */*" };
-    if (referer) headers["Referer"] = referer;
-    const res = await fetch(targetUrl, { headers, redirect: "follow" });
-    if (!res.ok) return null;
-    const text = await res.text();
-    try { return JSON.parse(text); } catch { return null; }
-  } catch (e) {
-    console.error("fetchJson:", e.message);
-    return null;
-  }
-}
-
-/* ═══════════════════════════════════════════════════════
-   EXTRACTION
+   EXTRACTION (كما قبل)
    ═══════════════════════════════════════════════════════ */
 
 function extractFromHtml(html) {
@@ -293,19 +284,12 @@ function extractRecommendedFromPage(html) {
 
 function collectProducts(obj, found, depth) {
   if (!obj || typeof obj !== "object" || depth > 15) return;
-  if (Array.isArray(obj)) {
-    for (const it of obj) collectProducts(it, found, depth + 1);
-    return;
-  }
-
+  if (Array.isArray(obj)) { for (const it of obj) collectProducts(it, found, depth + 1); return; }
   const pid = obj.productId || obj.product_id || obj.itemId || obj.item_id;
   const title = obj.title || obj.productTitle || obj.name || obj.subject;
-  const hasTitle =
-    (typeof title === "string" && title.length > 3) ||
+  const hasTitle = (typeof title === "string" && title.length > 3) ||
     (title && typeof title === "object" && (title.displayTitle || title.text));
-
   if (pid && hasTitle) found.push(obj);
-
   for (const k of Object.keys(obj)) {
     if (obj[k] && typeof obj[k] === "object") collectProducts(obj[k], found, depth + 1);
   }
@@ -326,106 +310,41 @@ function extractFromHtmlLinks(html) {
 
 function normalizeProduct(p) {
   const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
-
   let title = "";
   const t = p.title || p.productTitle || p.name || p.subject;
   if (typeof t === "string") title = t;
   else if (t && typeof t === "object") title = t.displayTitle || t.text || t.value || "";
-
   let img = "";
-  const i = p.image || p.imageUrl || p.productImage || p.imagePath
-         || p.mainImage || p.thumb || p.product_main_image_url;
+  const i = p.image || p.imageUrl || p.productImage || p.imagePath || p.mainImage || p.thumb;
   if (typeof i === "string") img = i;
   else if (i && typeof i === "object") img = i.imgUrl || i.url || i.src || "";
   if (img.startsWith("//")) img = "https:" + img;
-
   let price = "";
   if (typeof p.prices?.salePrice?.formattedPrice === "string") price = p.prices.salePrice.formattedPrice;
-  else if (typeof p.prices?.salePrice?.value === "number")     price = String(p.prices.salePrice.value);
+  else if (typeof p.prices?.salePrice?.value === "number") price = String(p.prices.salePrice.value);
   else if (typeof p.salePrice === "string" || typeof p.salePrice === "number") price = String(p.salePrice);
-  else if (typeof p.price === "string" || typeof p.price === "number")         price = String(p.price);
-
-  const currency = p.prices?.salePrice?.currency?.code || p.currency || "";
-
+  else if (typeof p.price === "string" || typeof p.price === "number") price = String(p.price);
   let url = p.productDetailUrl || p.url || (id ? `https://www.aliexpress.com/item/${id}.html` : "");
   if (url.startsWith("//")) url = "https:" + url;
-
-  return {
-    product_id: id,
-    title,
-    image: img,
-    price,
-    currency,
-    url,
-    store_name: p.storeName || p.shopName || p.sellerName || "",
-    sales:  p.trade?.tradeDesc || p.sales || p.sold || "",
-    rating: p.averageStar || p.rating || "",
-  };
+  return { product_id: id, title, image: img, price, currency: "", url, store_name: p.storeName || p.shopName || "" };
 }
 
-/* ═══════════════════════════════════════════════════════
-   PARSING PRODUCT PAGE
-   ═══════════════════════════════════════════════════════ */
-
-function parseProductPage(html, productId) {
+function parseProductPage(html) {
   const info = { title: "", image: "", price: "", currency: "" };
-
   const ogTitle = matchMeta(html, "og:title") || matchMeta(html, "twitter:title");
-  const ogImage = matchMeta(html, "og:image")
-               || matchMeta(html, "twitter:image")
-               || matchMeta(html, "twitter:image:src");
+  const ogImage = matchMeta(html, "og:image") || matchMeta(html, "twitter:image");
   const ogPrice = matchMeta(html, "og:price:amount") || matchMeta(html, "product:price:amount");
-  const ogCur   = matchMeta(html, "og:price:currency") || matchMeta(html, "product:price:currency");
-
+  const ogCur = matchMeta(html, "og:price:currency") || matchMeta(html, "product:price:currency");
   if (ogTitle) info.title = decodeHtml(ogTitle);
   if (ogImage) info.image = ogImage.startsWith("//") ? "https:" + ogImage : ogImage;
   if (ogPrice) info.price = ogPrice;
-  if (ogCur)   info.currency = ogCur;
-
-  if (!info.title) {
-    const json = findJsonAfter(html, "window.runParams")
-      || findJsonAfter(html, "window._dida_config_._init_data_")
-      || findJsonAfter(html, "_init_data_");
-    if (json) {
-      const picked = {};
-      walkForFields(json, picked, 0);
-      if (picked.title) info.title = picked.title;
-      if (!info.image && picked.image) info.image = picked.image.startsWith("//") ? "https:" + picked.image : picked.image;
-      if (!info.price && picked.price) info.price = picked.price;
-    }
-  }
-
+  if (ogCur) info.currency = ogCur;
   if (!info.title) {
     const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     if (t) info.title = decodeHtml(t[1]).replace(/\s*[-|]\s*AliExpress.*$/i, "").trim();
   }
   return info;
 }
-
-function walkForFields(obj, out, depth) {
-  if (!obj || typeof obj !== "object" || depth > 12) return;
-  if (Array.isArray(obj)) { for (const it of obj) walkForFields(it, out, depth + 1); return; }
-
-  if (!out.title && typeof obj.title === "string" && obj.title.length > 5 && obj.title.length < 400) out.title = obj.title;
-  if (!out.title && typeof obj.subject === "string" && obj.subject.length > 5 && obj.subject.length < 400) out.subject = obj.subject;
-
-  if (!out.image && typeof obj.image === "string" && /^(https?:)?\/\//.test(obj.image)) out.image = obj.image;
-  if (!out.image && typeof obj.imageUrl === "string") out.image = obj.imageUrl;
-
-  if (!out.price) {
-    if (typeof obj.formatedPrice === "string") out.price = obj.formatedPrice;
-    else if (typeof obj.formattedPrice === "string") out.price = obj.formattedPrice;
-    else if (typeof obj.minPrice === "number") out.price = String(obj.minPrice);
-  }
-
-  for (const k of Object.keys(obj)) {
-    if (obj[k] && typeof obj[k] === "object") walkForFields(obj[k], out, depth + 1);
-  }
-}
-
-/* ═══════════════════════════════════════════════════════
-   JSON HELPERS
-   ═══════════════════════════════════════════════════════ */
 
 function extractBalancedJson(text, startIdx) {
   if (text[startIdx] !== "{") return null;
@@ -455,8 +374,7 @@ function findJsonAfter(html, marker) {
   if (idx === -1) return null;
   const braceIdx = html.indexOf("{", idx + marker.length);
   if (braceIdx === -1) return null;
-  const slice = html.slice(braceIdx, braceIdx + 5_000_000);
-  return extractBalancedJson(slice, 0);
+  return extractBalancedJson(html.slice(braceIdx, braceIdx + 5_000_000), 0);
 }
 
 function matchMeta(html, prop) {
@@ -467,45 +385,26 @@ function matchMeta(html, prop) {
 }
 
 function decodeHtml(s) {
-  return String(s)
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
+  return String(s).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
 }
-
-/* ═══════════════════════════════════════════════════════
-   URL HELPERS
-   ═══════════════════════════════════════════════════════ */
 
 function extractProductId(input) {
   if (!input) return null;
   const s = String(input).trim();
   if (/^\d+$/.test(s)) return s;
-  const m1 = s.match(/\/item\/(\d{6,})/);       if (m1) return m1[1];
-  const m2 = s.match(/\/i\/(\d{6,})/);          if (m2) return m2[1];
-  const m3 = s.match(/[?&]productId=(\d{6,})/); if (m3) return m3[1];
-  const m4 = s.match(/(\d{10,})/);              return m4 ? m4[1] : null;
+  const m1 = s.match(/\/item\/(\d{6,})/); if (m1) return m1[1];
+  const m4 = s.match(/(\d{10,})/); return m4 ? m4[1] : null;
 }
 
 /* ═══════════════════════════════════════════════════════
-   TEXT / IMAGE / PRICE SIMILARITY
+   TEXT / IMAGE SIMILARITY
    ═══════════════════════════════════════════════════════ */
 
-const STOP_WORDS = new Set([
-  "new","hot","sale","free","shipping","high","quality","wholesale","dropshipping","dropship",
-  "original","genuine","factory","brand","official","fashion","top","best","good","cheap",
-  "promotion","discount","custom","drop","ship","dhl","ems","and","the","for","with","from",
-  "this","that","you","are","but","not","all","can","has","had","was","were","will","would",
-  "there","their","they","them","its","into","over","than","then","also","more","most",
-  "one","two","three","four","five","set","kit","pack","pcs","piece","pieces","cm","mm",
-  "inch","inches","g","kg","ml","l","diy"
-]);
+const STOP_WORDS = new Set(["new","hot","sale","free","shipping","high","quality","wholesale","original","genuine","factory","brand","official","top","best","good","cheap","promotion","discount","and","the","for","with","from","this","that","for","with","you","are","not","all","can","has","its","into","over","than","then","also","more","most","set","kit","pack","pcs","piece"]);
 
 function tokenize(text) {
   if (!text) return [];
-  return String(text)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
+  return String(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/)
     .filter(w => w.length > 2 && !STOP_WORDS.has(w) && !/^\d+$/.test(w));
 }
 
@@ -516,14 +415,12 @@ function buildKeywordVariants(title) {
   if (tokens.length >= 2) variants.add(tokens.slice(0, 2).join(" "));
   if (tokens.length >= 3) variants.add(tokens.slice(0, 3).join(" "));
   if (tokens.length >= 4) variants.add(tokens.slice(0, 4).join(" "));
-  if (tokens.length >= 6) variants.add(tokens.slice(0, 6).join(" "));
-  return Array.from(variants).filter(v => v.length > 2).slice(0, 5);
+  return Array.from(variants).slice(0, 4);
 }
 
-function textSimilarity(aTokens, bTokens) {
-  if (!aTokens.length || !bTokens.length) return 0;
-  const aSet = new Set(aTokens);
-  const bSet = new Set(bTokens);
+function textSimilarity(a, b) {
+  if (!a.length || !b.length) return 0;
+  const aSet = new Set(a), bSet = new Set(b);
   let inter = 0;
   for (const t of aSet) if (bSet.has(t)) inter++;
   const union = aSet.size + bSet.size - inter;
@@ -531,41 +428,13 @@ function textSimilarity(aTokens, bTokens) {
 }
 
 function imageSignature(url) {
-  if (!url || typeof url !== "string") return null;
+  if (!url) return null;
   try {
-    let u = url.trim();
-    if (u.startsWith("//")) u = "https:" + u;
-    const kf = u.match(/\/kf\/([A-Za-z0-9]{8,})/);
-    if (kf) {
-      const id = kf[1].toUpperCase();
-      return { id, p6: id.slice(0,6), p8: id.slice(0,8), p10: id.slice(0,10), p12: id.slice(0,12), p16: id.slice(0,16) };
-    }
-    const alt = u.match(/\/([A-Za-z0-9]{15,})[_\.]/);
-    if (alt) {
-      const id = alt[1].toUpperCase();
-      return { id, p6: id.slice(0,6), p8: id.slice(0,8), p10: id.slice(0,10), p12: id.slice(0,12), p16: id.slice(0,16) };
-    }
+    let u = url.startsWith("//") ? "https:" + url : url;
+    const m = u.match(/\/kf\/([A-Za-z0-9]{8,})/);
+    if (m) { const id = m[1].toUpperCase(); return { id, p8: id.slice(0,8), p12: id.slice(0,12), p16: id.slice(0,16) }; }
     return null;
-  } catch (_) { return null; }
-}
-
-function levenshtein(a, b) {
-  if (a === b) return 0;
-  if (!a) return b.length;
-  if (!b) return a.length;
-  const m = a.length, n = b.length;
-  if (m > 100 || n > 100) return Math.abs(m - n);
-  let prev = new Array(n + 1), curr = new Array(n + 1);
-  for (let j = 0; j <= n; j++) prev[j] = j;
-  for (let i = 1; i <= m; i++) {
-    curr[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
-    }
-    const tmp = prev; prev = curr; curr = tmp;
-  }
-  return prev[n];
+  } catch { return null; }
 }
 
 function imageSimilarity(a, b) {
@@ -573,33 +442,20 @@ function imageSimilarity(a, b) {
   if (a.id === b.id) return 1.0;
   if (a.p16.length >= 16 && a.p16 === b.p16) return 0.95;
   if (a.p12.length >= 12 && a.p12 === b.p12) return 0.82;
-  if (a.p10.length >= 10 && a.p10 === b.p10) return 0.65;
-  if (a.p8.length  >= 8  && a.p8  === b.p8)  return 0.45;
-  if (a.p6.length  >= 6  && a.p6  === b.p6)  return 0.22;
-  const maxLen = Math.max(a.id.length, b.id.length);
-  if (maxLen > 0) {
-    const dist = levenshtein(a.id, b.id);
-    const ratio = dist / maxLen;
-    if (ratio <= 0.04) return 0.92;
-    if (ratio <= 0.10) return 0.70;
-    if (ratio <= 0.18) return 0.40;
-    if (ratio <= 0.28) return 0.18;
-  }
+  if (a.p8.length >= 8 && a.p8 === b.p8) return 0.45;
   return 0;
 }
 
 function priceSimilarity(a, b) {
   if (!a || !b) return 0.5;
-  const diff = Math.abs(a - b) / Math.max(a, b);
-  return Math.max(0, 1 - diff);
+  return Math.max(0, 1 - Math.abs(a - b) / Math.max(a, b));
 }
 
 function round3(n) { return Math.round(n * 1000) / 1000; }
 
 /* ═══════════════════════════════════════════════════════
-   CORS / JSON
+   CORS
    ═══════════════════════════════════════════════════════ */
-
 function corsHeaders(env) {
   return {
     "Access-Control-Allow-Origin": env?.ALLOWED_ORIGIN || "*",
