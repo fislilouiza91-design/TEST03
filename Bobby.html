@@ -1,6 +1,7 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v45 MEGA)
-   5-tier progressive filter + Coupon detection + Accurate price.
+   Smart Shopper — Content Script (v46 FAST + IMG-FIRST)
+   ⚡ 6 queries بدل 20
+   🎯 ترتيب: تطابق الصورة → التشابه → السعر
    ═══════════════════════════════════════════════════════ */
 
 (function () {
@@ -13,7 +14,7 @@
   const LANG = typeof SS_LANG !== "undefined" ? SS_LANG : "en";
   const IS_RTL = typeof SS_RTL !== "undefined" ? SS_RTL : false;
 
-  console.log(`[Smart Shopper] v45 MEGA | Lang: ${LANG}`);
+  console.log(`[Smart Shopper] v46 FAST | Lang: ${LANG}`);
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
@@ -275,6 +276,7 @@
     return c;
   }
 
+  // ⚡⚡ 6 استعلامات فقط (بدل 20) للسرعة القصوى
   function buildMegaQueries(title) {
     const brand = extractBrand(title);
     const primaryModel = getPrimaryModel(title);
@@ -292,32 +294,26 @@
       queries.push({ name, keywords: kw, pageSize: 50 });
     }
 
+    // 1) brand + model (الأقوى)
     if (brand && primaryModel) addQ("brand+model", `${brand} ${primaryModel}`);
-    if (brand && primaryModel) addQ("brand-model-p2", `${brand} ${primaryModel}`, 2);
 
-    if (primaryModel) {
-      addQ("model-only", primaryModel);
-      addQ("model-p2", primaryModel, 2);
-    }
+    // 2) model فقط (نفس المنتج من بائعين آخرين)
+    if (primaryModel) addQ("model-only", primaryModel);
 
-    if (brand && kws.length >= 2) addQ("brand+2kw", `${brand} ${kws[0]} ${kws[1]}`);
-    if (brand && kws.length >= 3) addQ("brand+3kw", `${brand} ${kws[0]} ${kws[1]} ${kws[2]}`);
-
-    if (brand && kws.length >= 1) addQ("brand+kw1", `${brand} ${kws[0]}`);
-    if (brand) addQ("brand-only", brand);
-
+    // 3) model + كلمة
     if (primaryModel && kws.length >= 1) addQ("model+kw", `${primaryModel} ${kws[0]}`);
-    if (primaryModel && brand) addQ("model+brand+kw", `${primaryModel} ${brand} ${kws[0]}`);
 
+    // 4) brand + كلمتين
+    if (brand && kws.length >= 2) addQ("brand+2kw", `${brand} ${kws[0]} ${kws[1]}`);
+
+    // 5) أول 3 كلمات
+    if (kws.length >= 3) addQ("kw3", `${kws[0]} ${kws[1]} ${kws[2]}`);
+    else if (kws.length >= 2) addQ("kw2", `${kws[0]} ${kws[1]}`);
+
+    // 6) كل الموديلات
     if (allModels.length >= 2) addQ("all-models", allModels.slice(0, 3).join(" "));
 
-    if (kws.length >= 2) addQ("kw2", `${kws[0]} ${kws[1]}`);
-    if (kws.length >= 3) addQ("kw3", `${kws[0]} ${kws[1]} ${kws[2]}`);
-    if (kws.length >= 4) addQ("kw4", kws.slice(0, 4).join(" "));
-
-    if (kws.length >= 3) addQ("kw-spread", `${kws[0]} ${kws[2]}`);
-
-    return queries.slice(0, 20);
+    return queries.slice(0, 6);
   }
 
   async function fetchMegaSearch(queries) {
@@ -336,7 +332,7 @@
     return payload.data;
   }
 
-  // ⭐ فحص الكوبونات للمنتجات
+  // ⭐ فحص الكوبونات
   async function fetchCouponsForProducts(productIds) {
     if (!productIds || !productIds.length) return {};
 
@@ -491,7 +487,9 @@
     const accepted = [];
     const storesOriginal = ctx.originalStore.toLowerCase();
 
+    // ⚡ ترتيب أولي: صورة → tier → score
     scored.sort((a, b) => {
+      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
       if (a._tier !== b._tier) return a._tier - b._tier;
       return b._score - a._score;
     });
@@ -513,14 +511,14 @@
     return accepted;
   }
 
+  // 🎯 الترتيب النهائي: تطابق صورة → تشابه → سعر
   function rankProducts(products) {
-    return products.map(p => {
-      let rank = p._score;
-      if (p.rating >= 4.5) rank += 5;
-      if (p.sold >= 100) rank += 3;
-      return { ...p, _rank: rank };
-    }).sort((a, b) => {
-      if (Math.abs(b._rank - a._rank) > 5) return b._rank - a._rank;
+    return [...products].sort((a, b) => {
+      // 1) تطابق الصورة (مطلق)
+      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
+      // 2) التشابه (score)
+      if (Math.abs(b._score - a._score) > 5) return b._score - a._score;
+      // 3) السعر الأرخص
       return a.price - b.price;
     });
   }
@@ -600,13 +598,13 @@
       const imageHash = currentProduct.imageHash || "";
 
       console.log("═══════════════════════════════════════════");
-      console.log("[Smart Shopper] v45 MEGA");
+      console.log("[Smart Shopper] v46 FAST");
       console.log("[Smart Shopper] Product:", currentProduct.title.slice(0, 60));
-      console.log("[Smart Shopper] Brand:", brand);
-      console.log("[Smart Shopper] Primary Model:", primaryModel);
+      console.log("[Smart Shopper] Image Hash:", imageHash || "N/A");
       console.log("═══════════════════════════════════════════");
 
       const queries = buildMegaQueries(currentProduct.title);
+      console.log(`[Smart Shopper] Queries (${queries.length}):`, queries.map(q => q.keywords));
 
       if (!queries.length) {
         sellers = [];
@@ -616,6 +614,7 @@
 
       const data = await fetchMegaSearch(queries);
       const raw = data?.products || [];
+      console.log(`[Smart Shopper] Raw: ${raw.length} unique`);
 
       const ctx = {
         productId: currentProduct.id,
@@ -634,6 +633,8 @@
         if (s) scored.push(s);
       }
 
+      console.log(`[Smart Shopper] Scored: ${scored.length}`);
+
       const picked = pickProgressive(scored, ctx);
       sellers = rankProducts(picked);
 
@@ -647,12 +648,12 @@
           hasCoupon: !!(couponsMap[s._id]?.hasCoupon),
           couponInfo: couponsMap[s._id] || null
         }));
-
-        const couponCount = sellers.filter(s => s.hasCoupon).length;
-        console.log(`[Smart Shopper] 🎟️ Coupons found: ${couponCount}/${sellers.length}`);
       } catch (e) {
         console.error("[Smart Shopper] Coupon merge error:", e);
       }
+
+      const imgMatches = sellers.filter(s => s.isHashMatch).length;
+      console.log(`[Smart Shopper] ✅ FINAL: ${sellers.length} | 🎯 Images: ${imgMatches}`);
 
       updateSourceLabel(sellers.length > 0 ? "smart" : "none");
       renderList();
@@ -724,12 +725,23 @@
     document.getElementById("ss-retry")?.addEventListener("click", () => doScan());
   }
 
+  // 🎯 ترتيب: تطابق صورة دائماً أولاً، ثم حسب الفلتر
   function sortSellers(arr, f) {
     const copy = [...arr];
-    if (f === "cheap") return copy.sort((a, b) => a.price - b.price);
-    if (f === "discount") return copy.sort((a, b) => (b.discount || 0) - (a.discount || 0));
-    if (f === "sold") return copy.sort((a, b) => (b.sold || 0) - (a.sold || 0));
-    return copy.sort((a, b) => b._rank - a._rank);
+    const byImage = (a, b) => {
+      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
+      return 0;
+    };
+    const byScore = (a, b) => {
+      if (Math.abs(b._score - a._score) > 5) return b._score - a._score;
+      return 0;
+    };
+
+    if (f === "cheap") return copy.sort((a, b) => byImage(a, b) || a.price - b.price);
+    if (f === "discount") return copy.sort((a, b) => byImage(a, b) || (b.discount || 0) - (a.discount || 0));
+    if (f === "sold") return copy.sort((a, b) => byImage(a, b) || (b.sold || 0) - (a.sold || 0));
+    // "best" = صورة → تشابه → سعر
+    return copy.sort((a, b) => byImage(a, b) || byScore(a, b) || a.price - b.price);
   }
 
   function renderList() {
@@ -744,23 +756,23 @@
     list.innerHTML = items.slice(0, 20).map((s, i) => {
       const rank = i + 1;
       const isCheap = s.price === minPrice && s.price > 0;
-      const cardClass = rank === 1 ? "ss-best" : (isCheap ? "ss-cheap" : "");
+      // بطاقة تطابق الصورة → كلاس ذهبي
+      const cardClass = (s.isHashMatch ? "ss-imgmatch " : "") +
+                        (rank === 1 ? "ss-best" : "") +
+                        (isCheap && !s.isHashMatch && rank !== 1 ? " ss-cheap" : "");
       const rankClass = rank <= 3 ? `ss-r${rank}` : "";
 
       let badge = "";
-      if (s.isHashMatch) badge = `<span class="ss-badge ss-badge-match">🎯 EXACT</span>`;
-      else if (s.brandMatch && s.hasPrimaryModel) badge = `<span class="ss-badge ss-badge-match" style="background:#ecfdf5;color:#065f46">✓ SAME</span>`;
+      if (s.isHashMatch) badge = `<span class="ss-badge ss-badge-exact">🎯 EXACT IMG</span>`;
+      else if (s.brandMatch && s.hasPrimaryModel) badge = `<span class="ss-badge ss-badge-match">✓ SAME</span>`;
       else if (activeFilter === "cheap" && rank === 1) badge = `<span class="ss-badge ss-badge-cheap">${T("cheapestTag")}</span>`;
       else if (activeFilter === "discount" && rank === 1) badge = `<span class="ss-badge ss-badge-hot">${T("bestDeal")}</span>`;
       else if (activeFilter === "sold" && rank === 1) badge = `<span class="ss-badge ss-badge-top">${T("mostSoldTag")}</span>`;
       else if (activeFilter === "best" && rank === 1) badge = `<span class="ss-badge ss-badge-best">${T("bestValueTag")}</span>`;
       else if (isCheap) badge = `<span class="ss-badge ss-badge-cheap">${T("bestPrice")}</span>`;
 
-      // ⭐ شارة الكوبون
       const couponClass = s.hasCoupon ? "ss-has-coupon" : "";
-      const couponBadge = s.hasCoupon
-        ? `<span class="ss-badge ss-badge-coupon">🎟️ COUPON</span>`
-        : "";
+      const couponBadge = s.hasCoupon ? `<span class="ss-badge ss-badge-coupon">🎟️ COUPON</span>` : "";
       const couponHint = s.hasCoupon && s.couponInfo?.discount
         ? `<span class="ss-coupon-hint">🎁 ${esc(s.couponInfo.discount)}</span>`
         : (s.hasCoupon ? `<span class="ss-coupon-hint">🎁 كوبون متاح</span>` : "");
@@ -782,6 +794,18 @@
       if (s.rating > 0) subtitleItems.push(`<span class="ss-tag-inline rating">★ ${s.rating.toFixed(1)}</span>`);
       if (s.sold > 0) subtitleItems.push(`<span class="ss-tag-inline sold">${fmt(s.sold)} ${T("sold")}</span>`);
 
+      // شريط التشابه
+      const scorePct = s.isHashMatch ? 100 : Math.min(100, s._score);
+      const scoreClass = s.isHashMatch ? "" : (s._score >= 100 ? "mid" : "low");
+      const scoreIcon = s.isHashMatch ? "🎯" : "≈";
+      const matchBar = `
+        <div class="ss-match-line">
+          <span class="ss-match-text">${scoreIcon}</span>
+          <div class="ss-match-track"><div class="ss-match-fill ${scoreClass}" style="width:${scorePct}%"></div></div>
+          <span class="ss-match-text">${scorePct}%</span>
+        </div>
+      `;
+
       const imgHtml = s.img
         ? `<img src="${s.img}" loading="lazy" onerror="this.style.display='none';this.parentElement.innerHTML='🖼️'">`
         : `🖼️`;
@@ -794,6 +818,7 @@
             <div class="ss-card-info">
               <div class="ss-card-title">${esc(s.store)} ${badge}${couponBadge}</div>
               <div class="ss-card-subtitle">${subtitleItems.join('<span class="ss-sep">●</span>')}</div>
+              ${matchBar}
             </div>
             <div class="ss-price-col">
               <div class="ss-price-line">
@@ -873,7 +898,8 @@
   async function run() {
     await sleep(800);
     currentProduct = extractProduct();
-    console.log("[Smart Shopper] v45 MEGA ready");
+    console.log("[Smart Shopper] v46 FAST ready");
+    console.log("[Smart Shopper] Image Hash:", currentProduct.imageHash);
     if (!currentProduct.title || currentProduct.title.length < 5) return;
     buildPanel();
     await doScan();
@@ -888,5 +914,5 @@
   });
 
   run();
-  console.log("[Smart Shopper] v45 ready.");
+  console.log("[Smart Shopper] v46 ready.");
 })();
