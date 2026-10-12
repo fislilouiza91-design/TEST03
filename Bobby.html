@@ -1,35 +1,21 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v9)
-   Added: Product Detail + Coupon Check endpoints.
+   Smart Shopper — Cloudflare Worker Proxy (v8)
+   + NEW: /api/similar-by-url  (Scraping مباشر — بدون API)
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 export default {
   async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders(env) });
-    }
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders(env) });
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") {
-        return json({ ok: true, service: "smart-shopper-proxy", version: 9 }, env);
-      }
-      if (url.pathname === "/api/search" && request.method === "POST") {
-        return await handleSearch(request, env);
-      }
-      if (url.pathname === "/api/deep-search" && request.method === "POST") {
-        return await handleDeepSearch(request, env);
-      }
-      if (url.pathname === "/api/product-details" && request.method === "POST") {
-        return await handleProductDetails(request, env);
-      }
-      if (url.pathname === "/api/coupon-check" && request.method === "POST") {
-        return await handleCouponCheck(request, env);
-      }
-      if (url.pathname === "/api/link" && request.method === "POST") {
-        return await handleLink(request, env);
-      }
+      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper-proxy", version: 8 }, env);
+      if (url.pathname === "/api/search" && request.method === "POST") return await handleSearch(request, env);
+      if (url.pathname === "/api/deep-search" && request.method === "POST") return await handleDeepSearch(request, env);
+      if (url.pathname === "/api/link" && request.method === "POST") return await handleLink(request, env);
+      if (url.pathname === "/api/similar-by-url" && request.method === "POST") return await handleSimilarByUrl(request, env);
       return json({ ok: false, error: "Route not found" }, env, 404);
     } catch (err) {
       return json({ ok: false, error: String(err), stack: err.stack }, env, 500);
@@ -38,83 +24,342 @@ export default {
 };
 
 /* ═══════════════════════════════════════════════════════
-   HANDLERS
+   ⭐ NEW: Similar products by URL (no API, no key)
+   POST /api/similar-by-url
+   body: { url: "https://www.aliexpress.com/item/100500xxxx.html", maxResults?: 60 }
+   ═══════════════════════════════════════════════════════ */
+async function handleSimilarByUrl(request, env) {
+  const body = await request.json();
+  const { url, maxResults = 60 } = body || {};
+  if (!url) return json({ ok: false, error: "url required" }, env, 400);
+
+  const productId = extractProductId(url);
+  if (!productId) return json({ ok: false, error: "Invalid AliExpress URL" }, env, 400);
+
+  // 1) جلب صفحة المنتج
+  const productHtml = await fetchHtml(`https://www.aliexpress.com/item/${productId}.html`);
+  if (!productHtml) return json({ ok: false, error: "Failed to fetch product page (blocked or 404)" }, env, 502);
+
+  // 2) استخراج بيانات المنتج
+  const sourceInfo = parseProductPage(productHtml, productId);
+
+  // 3) بناء كلمات البحث
+  const keyword = buildKeyword(sourceInfo.title);
+  if (!keyword) return json({ ok: false, error: "Could not extract title", source: sourceInfo }, env, 422);
+
+  // 4) البحث الداخلي
+  const searchHtml = await fetchHtml(`https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html`);
+  let products = searchHtml ? parseSearchPage(searchHtml) : [];
+
+  // 5) استبعاد المنتج الأصلي
+  products = products.filter(p => String(p.product_id) !== String(productId));
+  products = products.slice(0, maxResults);
+
+  return json({
+    ok: true,
+    data: {
+      source: { product_id: productId, ...sourceInfo },
+      keyword,
+      total: products.length,
+      products,
+    }
+  }, env);
+}
+
+/* ═══════════════════════════════════════════════════════
+   HELPERS — URL / FETCH / JSON
+   ═══════════════════════════════════════════════════════ */
+
+function extractProductId(input) {
+  if (!input) return null;
+  const s = String(input).trim();
+  if (/^\d+$/.test(s)) return s;
+  const m1 = s.match(/\/item\/(\d{6,})/);
+  if (m1) return m1[1];
+  const m2 = s.match(/\/i\/(\d{6,})/);
+  if (m2) return m2[1];
+  const m3 = s.match(/[?&]productId=(\d{6,})/);
+  if (m3) return m3[1];
+  const m4 = s.match(/(\d{10,})/);
+  return m4 ? m4[1] : null;
+}
+
+async function fetchHtml(targetUrl) {
+  try {
+    const res = await fetch(targetUrl, {
+      headers: {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+      },
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch (e) {
+    console.error("fetchHtml:", e);
+    return null;
+  }
+}
+
+// استخراج JSON متوازن بدءاً من '{' مع احترام النصوص والهروب
+function extractBalancedJson(text, startIdx) {
+  if (text[startIdx] !== "{") return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = startIdx; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else {
+      if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try { return JSON.parse(text.slice(startIdx, i + 1)); }
+          catch { return null; }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function findJsonAfter(html, marker) {
+  const idx = html.indexOf(marker);
+  if (idx === -1) return null;
+  const braceIdx = html.indexOf("{", idx + marker.length);
+  if (braceIdx === -1) return null;
+  const slice = html.slice(braceIdx, braceIdx + 3_000_000);
+  return extractBalancedJson(slice, 0);
+}
+
+function matchMeta(html, prop) {
+  const safe = prop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<meta[^>]+(?:property|name)=["']${safe}["'][^>]+content=["']([^"']*)["']`, "i");
+  const m = html.match(re);
+  return m ? m[1] : null;
+}
+
+function decodeHtml(s) {
+  return String(s)
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+/* ═══════════════════════════════════════════════════════
+   PARSE PRODUCT PAGE
+   ═══════════════════════════════════════════════════════ */
+
+function parseProductPage(html, productId) {
+  const info = { title: "", image: "", price: "", currency: "", category: "" };
+
+  // 1) OG meta (الأكثر موثوقية)
+  const ogTitle = matchMeta(html, "og:title") || matchMeta(html, "twitter:title");
+  const ogImage = matchMeta(html, "og:image");
+  const ogPrice = matchMeta(html, "og:price:amount") || matchMeta(html, "product:price:amount");
+  const ogCur   = matchMeta(html, "og:price:currency") || matchMeta(html, "product:price:currency");
+  if (ogTitle) info.title = decodeHtml(ogTitle);
+  if (ogImage) info.image = ogImage.startsWith("//") ? "https:" + ogImage : ogImage;
+  if (ogPrice) info.price = ogPrice;
+  if (ogCur)   info.currency = ogCur;
+
+  // 2) JSON المدمج (runParams / _init_data_)
+  const json = findJsonAfter(html, "window.runParams")
+    || findJsonAfter(html, "window._dida_config_._init_data_")
+    || findJsonAfter(html, "_init_data_");
+
+  if (json) {
+    const picked = {};
+    walkForFields(json, picked, 0);
+    if (!info.title && picked.title) info.title = picked.title;
+    if (!info.image && picked.image) info.image = picked.image.startsWith("//") ? "https:" + picked.image : picked.image;
+    if (!info.price && picked.price) info.price = picked.price;
+    if (picked.category) info.category = picked.category;
+  }
+
+  // 3) Fallback <title>
+  if (!info.title) {
+    const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) info.title = decodeHtml(t[1]).replace(/\s*[-|]\s*AliExpress.*$/i, "").trim();
+  }
+
+  return info;
+}
+
+function walkForFields(obj, out, depth) {
+  if (!obj || typeof obj !== "object" || depth > 12) return;
+  if (Array.isArray(obj)) { for (const it of obj) walkForFields(it, out, depth + 1); return; }
+
+  if (!out.title && typeof obj.title === "string" && obj.title.length > 5 && obj.title.length < 400) out.title = obj.title;
+  if (!out.title && typeof obj.subject === "string" && obj.subject.length > 5 && obj.subject.length < 400) out.title = obj.subject;
+  if (!out.title && typeof obj.productTitle === "string") out.title = obj.productTitle;
+
+  if (!out.image && typeof obj.image === "string" && /^(https?:)?\/\//.test(obj.image)) out.image = obj.image;
+  if (!out.image && typeof obj.imageUrl === "string") out.image = obj.imageUrl;
+  if (!out.image && typeof obj.imagePath === "string") out.image = obj.imagePath;
+
+  if (!out.price) {
+    if (typeof obj.formatedPrice === "string") out.price = obj.formatedPrice;
+    else if (typeof obj.formattedPrice === "string") out.price = obj.formattedPrice;
+    else if (typeof obj.minPrice === "number") out.price = String(obj.minPrice);
+  }
+  if (!out.category && typeof obj.categoryName === "string") out.category = obj.categoryName;
+
+  for (const k of Object.keys(obj)) {
+    if (obj[k] && typeof obj[k] === "object") walkForFields(obj[k], out, depth + 1);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   PARSE SEARCH PAGE
+   ═══════════════════════════════════════════════════════ */
+
+function parseSearchPage(html) {
+  let items = [];
+
+  const json = findJsonAfter(html, "window._dida_config_._init_data_")
+    || findJsonAfter(html, "_init_data_")
+    || findJsonAfter(html, "window._dida_config_");
+
+  if (json) {
+    const found = [];
+    collectProducts(json, found, 0);
+    items = found;
+  }
+
+  if (items.length === 0) items = parseSearchHtmlFallback(html);
+
+  return items.map(normalizeProduct).filter(p => p.product_id);
+}
+
+function collectProducts(obj, found, depth) {
+  if (!obj || typeof obj !== "object" || depth > 15) return;
+  if (Array.isArray(obj)) { for (const it of obj) collectProducts(it, found, depth + 1); return; }
+
+  const pid = obj.productId || obj.product_id || obj.itemId || obj.item_id;
+  const title = obj.title || obj.productTitle || obj.name;
+  if (pid && title) { found.push(obj); return; } // لا ندخل أعمق
+
+  for (const k of Object.keys(obj)) {
+    if (obj[k] && typeof obj[k] === "object") collectProducts(obj[k], found, depth + 1);
+  }
+}
+
+function normalizeProduct(p) {
+  const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
+  let img = p.image || p.imageUrl || p.productImage || p.imagePath || "";
+  if (img && img.startsWith("//")) img = "https:" + img;
+
+  let price = "";
+  if (typeof p.prices?.salePrice?.formattedPrice === "string") price = p.prices.salePrice.formattedPrice;
+  else if (typeof p.prices?.salePrice?.value === "number") price = String(p.prices.salePrice.value);
+  else if (typeof p.salePrice === "string" || typeof p.salePrice === "number") price = String(p.salePrice);
+  else if (typeof p.price === "string" || typeof p.price === "number") price = String(p.price);
+
+  const currency =
+    p.prices?.salePrice?.currency?.code ||
+    p.currency || "";
+
+  let url = p.productDetailUrl || p.url || (id ? `https://www.aliexpress.com/item/${id}.html` : "");
+  if (url.startsWith("//")) url = "https:" + url;
+
+  return {
+    product_id: id,
+    title: p.title || p.productTitle || p.name || "",
+    image: img,
+    price,
+    currency,
+    url,
+    sales: p.trade?.tradeDesc || p.sales || p.sold || "",
+    rating: p.averageStar || p.rating || "",
+  };
+}
+
+function parseSearchHtmlFallback(html) {
+  const items = [];
+  const seen = new Set();
+  const re = /href=["'](?:https?:)?\/\/(?:[a-z0-9.-]*\.)?aliexpress\.[^"']*?\/item\/(\d{6,})\.html/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    items.push({ productId: m[1] });
+  }
+  return items;
+}
+
+/* ═══════════════════════════════════════════════════════
+   KEYWORD BUILDER
+   ═══════════════════════════════════════════════════════ */
+
+function buildKeyword(title) {
+  if (!title) return "";
+  let t = title
+    .replace(/[^\p{L}\p{N}\s\-\+]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const STOP = /\b(new|hot|sale|free shipping|high quality|wholesale|dropshipping|dropship|original|genuine|factory|brand|official|fashion|top|best|good|cheap|promotion|discount|2024|2025|2026|2027|custom|drop|ship|dhl|ems|usb|not)\b/gi;
+  t = t.replace(STOP, " ").replace(/\s+/g, " ").trim();
+
+  const words = t.split(/\s+/).filter(w => w.length > 1);
+  return words.slice(0, 6).join(" ");
+}
+
+/* ═══════════════════════════════════════════════════════
+   (Routes القديمة كما هي — Affiliate API)
    ═══════════════════════════════════════════════════════ */
 
 async function handleSearch(request, env) {
   const body = await request.json();
-  const { keyword, page = 1, pageSize = 50, currency = "USD", country = "US" } = body;
+  const { keyword, page = 1, pageSize = 50, currency = "USD" } = body;
   if (!keyword) return json({ ok: false, error: "keyword required" }, env, 400);
-
   const params = {
     method: "aliexpress.affiliate.product.query",
     app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    keywords: keyword,
-    page_no: String(page),
-    page_size: String(pageSize),
-    currency,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: country,
-    tracking_id: env.ALI_TRACKING_ID,
+    timestamp: Date.now(), format: "json", v: "2.0", sign_method: "md5",
+    keywords: keyword, page_no: String(page), page_size: String(pageSize),
+    currency, target_currency: currency, target_language: "EN",
+    ship_to_country: "US", tracking_id: env.ALI_TRACKING_ID,
   };
-
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
 
 async function handleDeepSearch(request, env) {
   const body = await request.json();
-  const { queries = [], currency = "USD", country = "US" } = body;
-
-  if (!Array.isArray(queries) || queries.length === 0) {
+  const { queries = [], currency = "USD" } = body;
+  if (!Array.isArray(queries) || queries.length === 0)
     return json({ ok: false, error: "queries array required" }, env, 400);
-  }
 
-  const MAX_QUERIES = 30;
-  const cleanQueries = queries.slice(0, MAX_QUERIES);
-
-  console.log(`[Worker] MEGA search with ${cleanQueries.length} queries`);
-
+  const cleanQueries = queries.slice(0, 30);
   const requests = [];
   for (const q of cleanQueries) {
     const keyword = (typeof q === "string" ? q : q.keywords || "").trim();
     const page = typeof q === "object" ? (q.page || 1) : 1;
     const size = typeof q === "object" ? (q.pageSize || 50) : 50;
     const name = typeof q === "object" ? (q.name || keyword) : keyword;
-
-    if (!keyword) continue;
-    requests.push({ name, keyword, page, size });
+    if (keyword) requests.push({ name, keyword, page, size });
   }
-
-  console.log(`[Worker] Executing ${requests.length} requests`);
 
   const promises = requests.map(async (req) => {
     try {
       const params = {
         method: "aliexpress.affiliate.product.query",
-        app_key: env.ALI_APP_KEY,
-        timestamp: Date.now(),
-        format: "json",
-        v: "2.0",
-        sign_method: "md5",
-        keywords: req.keyword,
-        page_no: String(req.page),
-        page_size: String(req.size),
-        currency,
-        target_currency: currency,
-        target_language: "EN",
-        ship_to_country: country,
-        tracking_id: env.ALI_TRACKING_ID,
+        app_key: env.ALI_APP_KEY, timestamp: Date.now(),
+        format: "json", v: "2.0", sign_method: "md5",
+        keywords: req.keyword, page_no: String(req.page), page_size: String(req.size),
+        currency, target_currency: currency, target_language: "EN",
+        ship_to_country: "US", tracking_id: env.ALI_TRACKING_ID,
       };
-
       const result = await callAliExpress(params, env);
       const products = extractProducts(result);
-
       return { name: req.name, keyword: req.keyword, page: req.page, count: products.length, products };
     } catch (e) {
       return { name: req.name, keyword: req.keyword, page: req.page, count: 0, products: [], error: e.message };
@@ -122,95 +367,16 @@ async function handleDeepSearch(request, env) {
   });
 
   const results = await Promise.all(promises);
-  const seen = new Set();
-  const merged = [];
-  const stats = {};
-
+  const seen = new Set(); const merged = []; const stats = {};
   for (const r of results) {
     stats[r.name] = (stats[r.name] || 0) + r.count;
     for (const p of r.products) {
       const id = String(p.product_id || "");
       if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(p);
+      seen.add(id); merged.push(p);
     }
   }
-
-  console.log(`[Worker] ✅ Unique products: ${merged.length}`);
   return json({ ok: true, data: { total: merged.length, products: merged, stats: { queriesCount: requests.length, perQuery: stats } } }, env);
-}
-
-async function handleProductDetails(request, env) {
-  const body = await request.json();
-  const { product_ids, currency = "USD", country = "US" } = body;
-
-  if (!product_ids) {
-    return json({ ok: false, error: "product_ids required" }, env, 400);
-  }
-
-  const idsString = Array.isArray(product_ids) ? product_ids.join(",") : String(product_ids);
-
-  const params = {
-    method: "aliexpress.affiliate.productdetail.get",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    product_ids: idsString,
-    target_currency: currency,
-    target_language: "EN",
-    ship_to_country: country,
-    tracking_id: env.ALI_TRACKING_ID,
-  };
-
-  console.log(`[Worker] Fetching details for IDs: ${idsString}`);
-
-  try {
-    const result = await callAliExpress(params, env);
-    const products = extractDetailedProducts(result);
-    return json({ ok: true, data: { total: products.length, products } }, env);
-  } catch (e) {
-    return json({ ok: false, error: e.message }, env, 500);
-  }
-}
-
-/**
- * ⭐ فحص الكوبونات والعروض الترويجية
- */
-async function handleCouponCheck(request, env) {
-  const body = await request.json();
-  const { product_ids, currency = "USD", country = "US" } = body;
-
-  if (!product_ids) {
-    return json({ ok: false, error: "product_ids required" }, env, 400);
-  }
-
-  const idsString = Array.isArray(product_ids) ? product_ids.join(",") : String(product_ids);
-
-  try {
-    const params = {
-      method: "aliexpress.marketing.storepromotions.querybyproduct",
-      app_key: env.ALI_APP_KEY,
-      timestamp: Date.now(),
-      format: "json",
-      v: "2.0",
-      sign_method: "md5",
-      product_ids: idsString,
-      target_currency: currency,
-      target_language: "EN",
-      ship_to_country: country,
-      tracking_id: env.ALI_TRACKING_ID,
-    };
-
-    const result = await callAliExpress(params, env);
-    const coupons = extractCoupons(result);
-
-    return json({ ok: true, data: { coupons } }, env);
-  } catch (e) {
-    console.error("[Worker] Coupon check failed:", e.message);
-    return json({ ok: true, data: { coupons: {} } }, env);
-  }
 }
 
 function extractProducts(apiResult) {
@@ -218,81 +384,31 @@ function extractProducts(apiResult) {
     const resp = apiResult?.aliexpress_affiliate_product_query_response;
     const products = resp?.resp_result?.result?.products?.product || [];
     return Array.isArray(products) ? products : (products ? [products] : []);
-  } catch (_) {
-    return [];
-  }
-}
-
-function extractDetailedProducts(apiResult) {
-  try {
-    const resp = apiResult?.aliexpress_affiliate_productdetail_get_response;
-    const products = resp?.resp_result?.result?.products?.product || [];
-    return Array.isArray(products) ? products : (products ? [products] : []);
-  } catch (_) {
-    return [];
-  }
-}
-
-function extractCoupons(apiResult) {
-  const result = {};
-  try {
-    const resp = apiResult?.aliexpress_marketing_storepromotions_querybyproduct_response;
-    const promotions = resp?.result?.promotions || resp?.resp_result?.result?.promotions || [];
-    const promoList = Array.isArray(promotions) ? promotions : [promotions];
-
-    for (const promo of promoList) {
-      if (!promo) continue;
-      const pid = String(promo.product_id || "");
-      if (!pid) continue;
-
-      result[pid] = {
-        hasCoupon: true,
-        code: promo.promo_code || "",
-        discount: promo.discount || "",
-        startTime: promo.start_time || "",
-        endTime: promo.end_time || "",
-      };
-    }
-  } catch (_) { /* ignore */ }
-  return result;
+  } catch { return []; }
 }
 
 async function handleLink(request, env) {
   const body = await request.json();
   const { urls = [] } = body;
-  if (!Array.isArray(urls) || urls.length === 0) {
+  if (!Array.isArray(urls) || urls.length === 0)
     return json({ ok: false, error: "urls required" }, env, 400);
-  }
   const params = {
     method: "aliexpress.affiliate.link.generate",
-    app_key: env.ALI_APP_KEY,
-    timestamp: Date.now(),
-    format: "json",
-    v: "2.0",
-    sign_method: "md5",
-    promotion_link_type: "0",
-    source_values: urls.join(","),
+    app_key: env.ALI_APP_KEY, timestamp: Date.now(),
+    format: "json", v: "2.0", sign_method: "md5",
+    promotion_link_type: "0", source_values: urls.join(","),
     tracking_id: env.ALI_TRACKING_ID,
   };
   const result = await callAliExpress(params, env);
   return json({ ok: true, data: result }, env);
 }
 
-/* ═══════════════════════════════════════════════════════
-   CORE
-   ═══════════════════════════════════════════════════════ */
-
 async function callAliExpress(params, env) {
   const signed = await signRequest(params, env.ALI_APP_SECRET);
   const query = new URLSearchParams(signed).toString();
-
-  const res = await fetch(`${API_BASE}?${query}`, {
-    method: "GET",
-    headers: { "Accept": "application/json" },
-  });
-
+  const res = await fetch(`${API_BASE}?${query}`, { method: "GET", headers: { "Accept": "application/json" } });
   const text = await res.text();
-  try { return JSON.parse(text); } catch (_) { return { raw: text }; }
+  try { return JSON.parse(text); } catch { return { raw: text }; }
 }
 
 async function signRequest(params, secret) {
@@ -306,10 +422,7 @@ async function signRequest(params, secret) {
 async function md5Hex(str) {
   const data = new TextEncoder().encode(str);
   const buf = await crypto.subtle.digest("MD5", data);
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
 function corsHeaders(env) {
