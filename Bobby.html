@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v9)
-   URL → داخليًا → طبقات بحث (نص + كلمات + صورة)
+   Smart Shopper — Cloudflare Worker Proxy (v10)
+   URL → داخليًا → طبقات بحث (نص + كلمات + صورة محسّن)
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -12,7 +12,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders(env) });
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper-proxy", version: 9 }, env);
+      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper-proxy", version: 10 }, env);
       if (url.pathname === "/api/search" && request.method === "POST") return await handleSearch(request, env);
       if (url.pathname === "/api/deep-search" && request.method === "POST") return await handleDeepSearch(request, env);
       if (url.pathname === "/api/link" && request.method === "POST") return await handleLink(request, env);
@@ -42,9 +42,9 @@ async function handleSimilarByUrl(request, env) {
   if (!productHtml) return json({ ok: false, error: "Failed to fetch product page (blocked or 404)" }, env, 502);
 
   const source = parseProductPage(productHtml, productId);
-  const sourceTokens  = tokenize(source.title);
-  const sourceImgSig  = imageSignature(source.image);
-  const sourcePrice   = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
+  const sourceTokens = tokenize(source.title);
+  const sourceImgSig = imageSignature(source.image);
+  const sourcePrice = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
 
   // ─── LAYER 2: توليد صيغ كلمات مفتاحية متعددة ───
   const keywordVariants = buildKeywordVariants(source.title, source.category);
@@ -83,12 +83,18 @@ async function handleSimilarByUrl(request, env) {
       text:  round3(text),
       image: round3(image),
       price: round3(price),
-      total: round3(text * 0.55 + image * 0.30 + price * 0.15),
+      total: round3(text * 0.45 + image * 0.45 + price * 0.10),
     };
+    p.isImageMatch = image >= 0.85;
   }
 
-  // ─── LAYER 6: ترتيب نهائي + إرجاع ───
-  pool.sort((a, b) => b.score.total - a.score.total);
+  // ─── LAYER 6: ترتيب نهائي (صورة → نص → سعر) + إرجاع ───
+  pool.sort((a, b) => {
+    if (a.isImageMatch !== b.isImageMatch) return a.isImageMatch ? -1 : 1;
+    if (Math.abs(b.score.image - a.score.image) > 0.1) return b.score.image - a.score.image;
+    if (Math.abs(b.score.text - a.score.text) > 0.1) return b.score.text - a.score.text;
+    return b.score.total - a.score.total;
+  });
   const top = pool.slice(0, maxResults);
 
   return json({
@@ -100,6 +106,7 @@ async function handleSimilarByUrl(request, env) {
         perKeyword,
         candidates: pool.length,
         returned: top.length,
+        imageMatches: top.filter(p => p.isImageMatch).length,
       },
       products: top,
     }
@@ -134,23 +141,17 @@ function buildKeywordVariants(title, category) {
   if (tokens.length === 0) return [];
 
   const variants = new Set();
-  // صيغة عريضة (2 كلمات)
   if (tokens.length >= 2) variants.add(tokens.slice(0, 2).join(" "));
-  // الصيغة المتوسطة (3 كلمات)
   if (tokens.length >= 3) variants.add(tokens.slice(0, 3).join(" "));
-  // الصيغة الواسعة (5 كلمات)
   if (tokens.length >= 5) variants.add(tokens.slice(0, 5).join(" "));
-  // الصيغة المركبة مع التصنيف
   if (category && tokens.length >= 2) {
     variants.add(tokens.slice(0, 3).join(" ") + " " + category);
   }
-  // احتياطي: كل الكلمات (حد 6)
   variants.add(tokens.slice(0, 6).join(" "));
 
   return Array.from(variants).filter(v => v.length > 2).slice(0, 4);
 }
 
-// Jaccard على مجموعات الكلمات
 function textSimilarity(aTokens, bTokens) {
   if (!aTokens.length || !bTokens.length) return 0;
   const aSet = new Set(aTokens);
@@ -161,44 +162,88 @@ function textSimilarity(aTokens, bTokens) {
   return union === 0 ? 0 : inter / union;
 }
 
-// بصمة الصورة: مجلد + اسم + بادئة على CDN
-function imageSignature(imgUrl) {
-  if (!imgUrl) return { folder: "", prefix: "" };
+/* ═══════════════════════════════════════════════════════
+   IMAGE MATCHING — v10 (محسّن)
+   ═══════════════════════════════════════════════════════ */
+
+function imageSignature(url) {
+  if (!url || typeof url !== "string") return null;
   try {
-    const u = new URL(imgUrl, "https://x/");
-    const parts = u.pathname.split("/").filter(Boolean);
-    const filename = parts[parts.length - 1] || "";
-    const folder   = parts[parts.length - 2] || "";
-    const name = filename
-      .replace(/\.(jpg|jpeg|png|webp|gif)$/i, "")
-      .replace(/_\d+x\d+.*$/, "")
-      .replace(/\.(jpg|jpeg|png|webp|gif)_.*$/i, "");
-    const prefixMatch = name.match(/^[A-Za-z0-9]{4,14}/);
-    return {
-      folder,
-      prefix: prefixMatch ? prefixMatch[0] : name.slice(0, 8),
-    };
-  } catch {
-    return { folder: "", prefix: "" };
+    let u = url.trim();
+    if (u.startsWith("//")) u = "https:" + u;
+
+    const kf = u.match(/\/kf\/([A-Za-z0-9]+?)(?:[_\.]|$)/);
+    if (kf && kf[1] && kf[1].length >= 8) {
+      const id = kf[1].toUpperCase();
+      return {
+        id,
+        p6:  id.slice(0, 6),
+        p8:  id.slice(0, 8),
+        p12: id.slice(0, 12),
+        p16: id.slice(0, 16),
+        len: id.length,
+      };
+    }
+
+    const alt = u.match(/\/([A-Za-z0-9]{15,})[_\.]/);
+    if (alt && alt[1]) {
+      const id = alt[1].toUpperCase();
+      return {
+        id,
+        p6:  id.slice(0, 6),
+        p8:  id.slice(0, 8),
+        p12: id.slice(0, 12),
+        p16: id.slice(0, 16),
+        len: id.length,
+      };
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+  const m = a.length, n = b.length;
+  if (m > 100 || n > 100) return Math.abs(m - n);
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    const tmp = prev; prev = curr; curr = tmp;
   }
+  return prev[n];
 }
 
 function imageSimilarity(a, b) {
-  if (!a.prefix || !b.prefix) return 0;
-  let score = 0;
-  if (a.folder && b.folder && a.folder === b.folder) score += 0.4;
-  const minLen = Math.min(a.prefix.length, b.prefix.length);
-  let match = 0;
-  for (let i = 0; i < minLen; i++) {
-    if (a.prefix[i] === b.prefix[i]) match++;
-    else break;
+  if (!a || !b) return 0;
+
+  if (a.id === b.id) return 1.0;
+  if (a.p16 && b.p16 && a.p16 === b.p16 && a.p16.length === 16) return 0.95;
+  if (a.p12 && b.p12 && a.p12 === b.p12 && a.p12.length === 12) return 0.85;
+  if (a.p8 && b.p8 && a.p8 === b.p8 && a.p8.length === 8) return 0.68;
+  if (a.p6 && b.p6 && a.p6 === b.p6 && a.p6.length === 6) return 0.42;
+
+  const maxLen = Math.max(a.id.length, b.id.length);
+  if (maxLen > 0) {
+    const dist = levenshtein(a.id, b.id);
+    const ratio = dist / maxLen;
+    if (ratio <= 0.06) return 0.85;
+    if (ratio <= 0.12) return 0.65;
+    if (ratio <= 0.20) return 0.40;
+    if (ratio <= 0.30) return 0.20;
   }
-  score += (match / Math.max(a.prefix.length, b.prefix.length)) * 0.6;
-  return Math.min(1, score);
+  return 0;
 }
 
 function priceSimilarity(a, b) {
-  if (!a || !b) return 0.5; // محايد إذا ما توفر سعر
+  if (!a || !b) return 0.5;
   const diff = Math.abs(a - b) / Math.max(a, b);
   return Math.max(0, 1 - diff);
 }
@@ -213,10 +258,10 @@ function extractProductId(input) {
   if (!input) return null;
   const s = String(input).trim();
   if (/^\d+$/.test(s)) return s;
-  const m1 = s.match(/\/item\/(\d{6,})/);      if (m1) return m1[1];
-  const m2 = s.match(/\/i\/(\d{6,})/);         if (m2) return m2[1];
-  const m3 = s.match(/[?&]productId=(\d{6,})/);if (m3) return m3[1];
-  const m4 = s.match(/(\d{10,})/);             return m4 ? m4[1] : null;
+  const m1 = s.match(/\/item\/(\d{6,})/);       if (m1) return m1[1];
+  const m2 = s.match(/\/i\/(\d{6,})/);          if (m2) return m2[1];
+  const m3 = s.match(/[?&]productId=(\d{6,})/); if (m3) return m3[1];
+  const m4 = s.match(/(\d{10,})/);              return m4 ? m4[1] : null;
 }
 
 async function fetchHtml(targetUrl) {
@@ -294,9 +339,12 @@ function parseProductPage(html, productId) {
   const info = { title: "", image: "", price: "", currency: "", category: "" };
 
   const ogTitle = matchMeta(html, "og:title") || matchMeta(html, "twitter:title");
-  const ogImage = matchMeta(html, "og:image");
+  const ogImage = matchMeta(html, "og:image")
+               || matchMeta(html, "twitter:image")
+               || matchMeta(html, "twitter:image:src");
   const ogPrice = matchMeta(html, "og:price:amount") || matchMeta(html, "product:price:amount");
   const ogCur   = matchMeta(html, "og:price:currency") || matchMeta(html, "product:price:currency");
+
   if (ogTitle) info.title = decodeHtml(ogTitle);
   if (ogImage) info.image = ogImage.startsWith("//") ? "https:" + ogImage : ogImage;
   if (ogPrice) info.price = ogPrice;
@@ -370,7 +418,7 @@ function collectProducts(obj, found, depth) {
   if (!obj || typeof obj !== "object" || depth > 15) return;
   if (Array.isArray(obj)) { for (const it of obj) collectProducts(it, found, depth + 1); return; }
 
-  const pid   = obj.productId || obj.product_id || obj.itemId || obj.item_id;
+  const pid = obj.productId || obj.product_id || obj.itemId || obj.item_id;
   const title = obj.title || obj.productTitle || obj.name;
   if (pid && title) { found.push(obj); return; }
 
@@ -381,7 +429,14 @@ function collectProducts(obj, found, depth) {
 
 function normalizeProduct(p) {
   const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
-  let img = p.image || p.imageUrl || p.productImage || p.imagePath || "";
+  let img = p.image
+         || p.imageUrl
+         || p.productImage
+         || p.imagePath
+         || p.product_main_image_url
+         || p.mainImage
+         || p.thumb
+         || "";
   if (img && img.startsWith("//")) img = "https:" + img;
 
   let price = "";
