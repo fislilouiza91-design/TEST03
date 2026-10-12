@@ -1,1 +1,251 @@
-hff
+/* ═══════════════════════════════════════════════════════
+   Smart Shopper — Cloudflare Worker Proxy (v7)
+   MEGA DEEP SEARCH — up to 30 queries in parallel.
+   ═══════════════════════════════════════════════════════ */
+
+const API_BASE = "https://api-sg.aliexpress.com/sync";
+
+export default {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders(env) });
+    }
+    const url = new URL(request.url);
+    try {
+      if (url.pathname === "/health") {
+        return json({ ok: true, service: "smart-shopper-proxy", version: 7 }, env);
+      }
+      if (url.pathname === "/api/search" && request.method === "POST") {
+        return await handleSearch(request, env);
+      }
+      if (url.pathname === "/api/deep-search" && request.method === "POST") {
+        return await handleDeepSearch(request, env);
+      }
+      if (url.pathname === "/api/link" && request.method === "POST") {
+        return await handleLink(request, env);
+      }
+      return json({ ok: false, error: "Route not found" }, env, 404);
+    } catch (err) {
+      return json({ ok: false, error: String(err), stack: err.stack }, env, 500);
+    }
+  },
+};
+
+/* ═══════════════════════════════════════════════════════
+   HANDLERS
+   ═══════════════════════════════════════════════════════ */
+
+async function handleSearch(request, env) {
+  const body = await request.json();
+  const { keyword, page = 1, pageSize = 50, currency = "USD" } = body;
+  if (!keyword) return json({ ok: false, error: "keyword required" }, env, 400);
+
+  const params = {
+    method: "aliexpress.affiliate.product.query",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    keywords: keyword,
+    page_no: String(page),
+    page_size: String(pageSize),
+    currency,
+    target_currency: currency,
+    target_language: "EN",
+    ship_to_country: "US",
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
+}
+
+/**
+ * ⭐ MEGA DEEP SEARCH
+ * يستقبل قائمة queries (حتى 30) ويشغلها بالتوازي
+ */
+async function handleDeepSearch(request, env) {
+  const body = await request.json();
+  const { queries = [], currency = "USD" } = body;
+
+  if (!Array.isArray(queries) || queries.length === 0) {
+    return json({ ok: false, error: "queries array required" }, env, 400);
+  }
+
+  // حد أقصى 30 استعلام
+  const MAX_QUERIES = 30;
+  const cleanQueries = queries.slice(0, MAX_QUERIES);
+
+  console.log(`[Worker] MEGA search with ${cleanQueries.length} queries`);
+
+  // نبني قائمة الطلبات
+  const requests = [];
+  for (const q of cleanQueries) {
+    const keyword = (typeof q === "string" ? q : q.keywords || "").trim();
+    const page = typeof q === "object" ? (q.page || 1) : 1;
+    const size = typeof q === "object" ? (q.pageSize || 50) : 50;
+    const name = typeof q === "object" ? (q.name || keyword) : keyword;
+
+    if (!keyword) continue;
+
+    requests.push({ name, keyword, page, size });
+  }
+
+  console.log(`[Worker] Executing ${requests.length} requests`);
+
+  // ⭐ تنفيذ بالتوازي مع timeout
+  const promises = requests.map(async (req) => {
+    try {
+      const params = {
+        method: "aliexpress.affiliate.product.query",
+        app_key: env.ALI_APP_KEY,
+        timestamp: Date.now(),
+        format: "json",
+        v: "2.0",
+        sign_method: "md5",
+        keywords: req.keyword,
+        page_no: String(req.page),
+        page_size: String(req.size),
+        currency,
+        target_currency: currency,
+        target_language: "EN",
+        ship_to_country: "US",
+        tracking_id: env.ALI_TRACKING_ID,
+      };
+
+      const result = await callAliExpress(params, env);
+      const products = extractProducts(result);
+
+      return {
+        name: req.name,
+        keyword: req.keyword,
+        page: req.page,
+        count: products.length,
+        products,
+      };
+    } catch (e) {
+      return {
+        name: req.name,
+        keyword: req.keyword,
+        page: req.page,
+        count: 0,
+        products: [],
+        error: e.message,
+      };
+    }
+  });
+
+  const results = await Promise.all(promises);
+
+  // دمج بدون تكرار
+  const seen = new Set();
+  const merged = [];
+  const stats = {};
+
+  for (const r of results) {
+    stats[r.name] = (stats[r.name] || 0) + r.count;
+
+    for (const p of r.products) {
+      const id = String(p.product_id || "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(p);
+    }
+  }
+
+  console.log(`[Worker] ✅ Unique products: ${merged.length}`);
+
+  return json({
+    ok: true,
+    data: {
+      total: merged.length,
+      products: merged,
+      stats: {
+        queriesCount: requests.length,
+        perQuery: stats,
+      },
+    }
+  }, env);
+}
+
+function extractProducts(apiResult) {
+  try {
+    const resp = apiResult?.aliexpress_affiliate_product_query_response;
+    const products = resp?.resp_result?.result?.products?.product || [];
+    return Array.isArray(products) ? products : (products ? [products] : []);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function handleLink(request, env) {
+  const body = await request.json();
+  const { urls = [] } = body;
+  if (!Array.isArray(urls) || urls.length === 0) {
+    return json({ ok: false, error: "urls required" }, env, 400);
+  }
+  const params = {
+    method: "aliexpress.affiliate.link.generate",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    promotion_link_type: "0",
+    source_values: urls.join(","),
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
+}
+
+/* ═══════════════════════════════════════════════════════
+   CORE
+   ═══════════════════════════════════════════════════════ */
+
+async function callAliExpress(params, env) {
+  const signed = await signRequest(params, env.ALI_APP_SECRET);
+  const query = new URLSearchParams(signed).toString();
+
+  const res = await fetch(`${API_BASE}?${query}`, {
+    method: "GET",
+    headers: { "Accept": "application/json" },
+  });
+
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (_) { return { raw: text }; }
+}
+
+async function signRequest(params, secret) {
+  const sortedKeys = Object.keys(params).sort();
+  let base = "";
+  for (const k of sortedKeys) base += k + String(params[k]);
+  const hash = await md5Hex(secret + base + secret);
+  return { ...params, sign: hash };
+}
+
+async function md5Hex(str) {
+  const data = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest("MD5", data);
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+}
+
+function corsHeaders(env) {
+  return {
+    "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function json(data, env, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(env) },
+  });
+}
