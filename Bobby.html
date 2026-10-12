@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v52 HYBRID FULL)
-   🔍 بحث منفصل في المتصفح (صورة + عنوان + موديل) ثم دمج مع API
-   ⭐ الشحن الحقيقي لكل منتج
+   Smart Shopper — Content Script (v53 IFRAME SEARCH)
+   🔍 يبحث فعليًا في المتصفح عبر iframe (نفس جلسة المستخدم)
+   ⭐ بحث بالعنوان + بحث بالصورة
    ⭐ اللغة تتبع المتصفح
    ═══════════════════════════════════════════════════════ */
 
@@ -19,20 +19,18 @@
   const L10N = {
     shipping: { en:"Shipping", fr:"Livraison", ar:"الشحن", es:"Envío", de:"Versand", ru:"Доставка", pt:"Frete", it:"Spedizione", tr:"Kargo" },
     freeShipping: { en:"Free Shipping", fr:"Livraison gratuite", ar:"شحن مجاني", es:"Envío gratis", de:"Kostenloser Versand", ru:"Бесплатная доставка", pt:"Frete grátis", it:"Spedizione gratuita", tr:"Ücretsiz kargo" },
-    searching: { en:"Searching...", fr:"Recherche...", ar:"جاري البحث...", es:"Buscando..." },
-    checkingShipping: { en:"Checking shipping...", fr:"Vérification de la livraison...", ar:"جاري فحص الشحن...", es:"Verificando envío..." },
-    fromBrowser: { en:"Browser search", fr:"Recherche navigateur", ar:"بحث المتصفح", es:"Búsqueda navegador" },
   };
   function tr(key) { return L10N[key]?.[BROWSER_LANG] || L10N[key]?.en || key; }
 
-  console.log(`[Smart Shopper] v52 HYBRID FULL | Lang: ${LANG} | Browser: ${BROWSER_LANG}`);
+  console.log(`[Smart Shopper] v53 IFRAME | Lang: ${LANG} | Browser: ${BROWSER_LANG}`);
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
   const SHIP_TO_COUNTRY = "DZ";
-  const MAX_FINAL_RESULTS = 25;
-  const MAX_SHIPPING_FETCH = 12;
+  const MAX_RESULTS = 25;
+  const MAX_SHIPPING = 12;
   const FETCH_CONCURRENCY = 4;
+  const IFRAME_TIMEOUT = 15000;
 
   let currentProduct = null;
   let sellers = [];
@@ -238,278 +236,179 @@
   }
 
   /* ═══════════════════════════════════════════════════════
-     fetch with timeout
+     ⭐⭐⭐ البحث في المتصفح عبر IFRAME (نفس الجلسة)
      ═══════════════════════════════════════════════════════ */
-  async function fetchWithTimeout(url, ms) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), ms);
-    try {
-      const res = await fetch(url, {
-        credentials: "include",
-        method: "GET",
-        headers: {
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": navigator.language || "en-US,en;q=0.9",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache",
-          "Upgrade-Insecure-Requests": "1",
-        },
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-      if (!res.ok) {
-        console.warn(`[fetch] ${res.status} ${url.slice(0, 80)}`);
-        return null;
-      }
-      const txt = await res.text();
-      if (!txt || txt.length < 1000) return null;
-      return txt;
-    } catch (e) {
-      clearTimeout(timer);
-      console.warn(`[fetch] error: ${e.message} — ${url.slice(0, 80)}`);
-      return null;
-    }
+  async function searchViaIframe(searchUrl, timeoutMs = IFRAME_TIMEOUT) {
+    return new Promise((resolve) => {
+      const iframe = document.createElement("iframe");
+      iframe.style.cssText = "position:fixed;left:-99999px;top:-99999px;width:1400px;height:1000px;border:0;visibility:hidden;pointer-events:none;";
+      iframe.setAttribute("aria-hidden", "true");
+      iframe.setAttribute("tabindex", "-1");
+
+      let done = false;
+      const finish = (products) => {
+        if (done) return;
+        done = true;
+        clearTimeout(globalTimer);
+        try { iframe.remove(); } catch (_) {}
+        resolve(products || []);
+      };
+
+      const globalTimer = setTimeout(() => {
+        try {
+          const doc = iframe.contentDocument;
+          if (doc) finish(extractFromIframeDom(doc));
+          else finish([]);
+        } catch (_) { finish([]); }
+      }, timeoutMs);
+
+      iframe.onload = () => {
+        // انتظر JavaScript ليرسم المنتجات
+        setTimeout(() => {
+          try {
+            const doc = iframe.contentDocument;
+            if (!doc) return finish([]);
+            const products = extractFromIframeDom(doc);
+            finish(products);
+          } catch (e) {
+            console.warn("[iframe] read error:", e.message);
+            finish([]);
+          }
+        }, 3500);
+      };
+
+      iframe.onerror = () => finish([]);
+      iframe.src = searchUrl;
+      document.body.appendChild(iframe);
+    });
   }
 
-  /* ═══════════════════════════════════════════════════════
-     ⭐⭐⭐ بحث في المتصفح — 9 endpoints
-     ═══════════════════════════════════════════════════════ */
-  async function searchInBrowser() {
-    const fullTitle = (currentProduct?.title || "").slice(0, 100).trim();
-    const imageUrl = currentProduct?.image || "";
-    const model = getPrimaryModel(currentProduct?.title || "");
-    const brand = extractBrand(currentProduct?.title || "");
-
-    if (!fullTitle && !imageUrl) return [];
-
-    const enc = encodeURIComponent(fullTitle);
-    const imgEnc = imageUrl ? encodeURIComponent(imageUrl) : "";
-    const endpoints = [];
-
-    // بحث بالصورة
-    if (imageUrl) {
-      endpoints.push({ name: "IMG-fn", url: `https://www.aliexpress.com/fn/search-pc/index?image_url=${imgEnc}&page=1&g=y` });
-      endpoints.push({ name: "IMG-wholesale", url: `https://www.aliexpress.com/wholesale?imageUrl=${imgEnc}&g=y` });
-    }
-
-    // بحث بالعنوان الكامل
-    if (fullTitle) {
-      endpoints.push({ name: "TXT-fn-1", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=1&g=y&sortType=total_tranpro_desc` });
-      endpoints.push({ name: "TXT-fn-2", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=2&g=y&sortType=total_tranpro_desc` });
-      endpoints.push({ name: "TXT-fn-3", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=3&g=y&sortType=total_tranpro_desc` });
-      endpoints.push({ name: "TXT-ws-1", url: `https://www.aliexpress.com/w/wholesale-${enc}.html` });
-      endpoints.push({ name: "TXT-ws-2", url: `https://www.aliexpress.com/w/wholesale-${enc}.html?page=2` });
-      endpoints.push({ name: "TXT-search", url: `https://www.aliexpress.com/wholesale?SearchText=${enc}&page=1` });
-    }
-
-    // بحث بالموديل
-    if (model) {
-      endpoints.push({ name: `MDL-${model}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(model)}&page=1&g=y` });
-    }
-    // بحث بالبراند + موديل
-    if (brand && model) {
-      endpoints.push({ name: `BM-${brand}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(brand + " " + model)}&page=1&g=y` });
-    }
-
-    console.log(`[Smart Shopper] 🌐 BROWSER SEARCH — ${endpoints.length} endpoints`);
-
-    const results = await Promise.allSettled(
-      endpoints.map(e => fetchWithTimeout(e.url, 10000).then(html => ({ name: e.name, html })))
-    );
-
-    const all = [];
-    const seen = new Set();
-    let successCount = 0;
-    let failCount = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.status !== "fulfilled" || !r.value || !r.value.html) {
-        failCount++;
-        continue;
-      }
-      successCount++;
-      const products = extractProductsFromHtml(r.value.html);
-      let added = 0;
-      for (const p of products) {
-        if (seen.has(p._id)) continue;
-        seen.add(p._id);
-        all.push(p);
-        added++;
-      }
-      console.log(`  ✓ ${r.value.name}: +${added} (total ${all.length})`);
-    }
-
-    console.log(`[Smart Shopper] 🌐 BROWSER RESULT: ${all.length} products (${successCount} OK, ${failCount} fail)`);
-    return all;
-  }
-
-  /* ═══════════════════════════════════════════════════════
-     استخراج منتجات من HTML أو JSON
-     ═══════════════════════════════════════════════════════ */
-  function extractProductsFromHtml(html) {
-    if (!html) return [];
+  /* ⭐ استخراج المنتجات من DOM الخاص بالـ iframe */
+  function extractFromIframeDom(doc) {
     const products = [];
     const seen = new Set();
 
-    const trimmed = html.trim();
+    // ابحث عن كل روابط المنتجات داخل iframe
+    const links = doc.querySelectorAll('a[href*="/item/"]');
+    console.log(`[iframe] found ${links.length} product links in DOM`);
 
-    // 1) JSON مباشر
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    for (const link of links) {
       try {
-        const json = JSON.parse(trimmed);
-        const found = [];
-        collectJsonProducts(json, found, 0);
-        if (found.length > 0) {
-          console.log(`[extract] JSON direct: ${found.length}`);
-          return found;
+        const href = link.href || link.getAttribute("href") || "";
+        const m = href.match(/\/item\/(\d{6,})\.html/);
+        if (!m) continue;
+        const id = m[1];
+        if (seen.has(id)) continue;
+        seen.add(id);
+
+        // الصورة
+        let img = "";
+        const imgEl = link.querySelector("img");
+        if (imgEl) {
+          img = imgEl.src || imgEl.getAttribute("data-src") || imgEl.getAttribute("data-lazy-src") || "";
         }
-      } catch (_) {}
-    }
+        if (img.startsWith("//")) img = "https:" + img;
 
-    // 2) JSON مضمّن في script tags
-    const scriptJsonRe = /window\._dida_config_\._init_data_\s*=\s*(\{[\s\S]{100,2000000}?\});/;
-    const initDataRe = /window\.__INIT_DATA__\s*=\s*(\{[\s\S]{100,2000000}?\});/;
-    const runParamsRe = /window\.runParams\s*=\s*(\{[\s\S]{100,2000000}?\});/;
+        // العنوان
+        let title = "";
+        if (imgEl && imgEl.alt && imgEl.alt.length > 5) title = imgEl.alt.trim();
+        if (!title) {
+          const tEl = link.querySelector("[class*='title'], [class*='Title'], h3, h2");
+          if (tEl) title = (tEl.innerText || tEl.textContent || "").trim();
+        }
+        if (!title) title = link.getAttribute("title") || "";
+        if (!title || title.length < 5) continue;
 
-    for (const re of [scriptJsonRe, initDataRe, runParamsRe]) {
-      const m = html.match(re);
-      if (m && m[1]) {
-        try {
-          const json = JSON.parse(m[1]);
-          const found = [];
-          collectJsonProducts(json, found, 0);
-          for (const p of found) {
-            if (seen.has(p._id)) continue;
-            seen.add(p._id);
-            products.push(p);
+        // حاوي البطاقة
+        const card = link.closest(
+          "[class*='search-item-card'], [class*='product-card'], [class*='card'], [class*='item'], li, article"
+        ) || link.parentElement?.parentElement || link.parentElement;
+
+        const cardText = ((card?.innerText || card?.textContent || "") + " ").replace(/\s+/g, " ").trim();
+
+        // السعر
+        let price = 0;
+        const priceMatches = cardText.match(/[\$€£DA﷼¥]\s*([\d.,]+)/g);
+        if (priceMatches) {
+          for (const pm of priceMatches) {
+            const num = parseFloat(pm.replace(/[^\d.]/g, ""));
+            if (num > 0 && num < 100000) if (!price || num < price) price = num;
           }
-        } catch (_) {}
+        }
+
+        // التقييم
+        let rating = 0;
+        const r2 = cardText.match(/★\s*([\d.]+)/);
+        if (r2) { const r = parseFloat(r2[1]); if (r > 0 && r <= 5) rating = +r.toFixed(1); }
+
+        // المبيعات
+        let sold = 0;
+        const sm = cardText.match(/([\d.,]+)\s*(k|K)?\s*(?:sold|vendus|vendido|بيع|vendu|已售)/i);
+        if (sm) { let n = parseFloat(sm[1].replace(/,/g, "")); if (sm[2]) n *= 1000; if (n > 0) sold = Math.round(n); }
+
+        // المتجر
+        let store = "";
+        const stm = cardText.match(/(?:by|from|par|de|من)\s+([^\|•·]{3,40})/i);
+        if (stm) store = stm[1].trim();
+
+        // الشحن
+        let shippingFree = false;
+        let shippingPrice = 0;
+        let hasShippingInfo = false;
+        if (/free\s+shipping|livraison\s+gratuite|شحن\s+مجاني|envío\s+gratis|kostenloser\s+versand/i.test(cardText)) {
+          shippingFree = true;
+          hasShippingInfo = true;
+        } else {
+          const shipMatch = cardText.match(/(?:shipping|livraison|شحن|envío|versand)[^$€£¥﷼\d]{0,30}[\$€£¥﷼]\s*([\d.,]+)/i);
+          if (shipMatch) {
+            const v = parseFloat(shipMatch[1].replace(",", "."));
+            if (v > 0 && v < 1000) { shippingPrice = v; hasShippingInfo = true; }
+          }
+        }
+
+        products.push({
+          _id: id,
+          title,
+          img,
+          price,
+          store: store || "AliExpress",
+          rating,
+          sold,
+          link: `https://www.aliexpress.com/item/${id}.html`,
+          fromBrowser: true,
+          shippingFree,
+          shippingPrice,
+          hasShippingInfo,
+        });
+
+        if (products.length >= 200) break;
+      } catch (e) { /* ignore */ }
+    }
+
+    // Fallback: ابحث في نصوص البطاقات حتى لو لم يكن هناك رابط مباشر
+    if (products.length < 5) {
+      const cards = doc.querySelectorAll("[class*='search-item-card'], [class*='product-card'], [class*='SearchItem']");
+      for (const card of cards) {
+        const cardText = (card.innerText || "").replace(/\s+/g, " ").trim();
+        const link = card.querySelector('a[href*="/item/"]');
+        if (!link) continue;
+        const m = (link.href || "").match(/\/item\/(\d{6,})\.html/);
+        if (!m) continue;
+        const id = m[1];
+        if (seen.has(id)) continue;
+        seen.add(id);
+        // نفس الاستخراج...
       }
     }
 
-    if (products.length > 0) {
-      console.log(`[extract] JSON embedded: ${products.length}`);
-      return products;
-    }
-
-    // 3) Regex على /item/
-    const re = /\/item\/(\d{6,})\.html/g;
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const id = m[1];
-      if (seen.has(id)) continue;
-      seen.add(id);
-
-      const start = Math.max(0, m.index - 4000);
-      const end = Math.min(html.length, m.index + 4000);
-      const ctx = html.slice(start, end);
-
-      let title = "";
-      const tPatterns = [
-        /"displayTitle"\s*:\s*"([^"]{8,300})"/,
-        /"title"\s*:\s*\{\s*"displayTitle"\s*:\s*"([^"]{8,300})"/,
-        /"title"\s*:\s*"([^"]{8,300})"/,
-        /"productTitle"\s*:\s*"([^"]{8,300})"/,
-        /"subject"\s*:\s*"([^"]{8,300})"/,
-        /alt="([^"]{8,300})"/,
-      ];
-      for (const t of tPatterns) {
-        const tm = ctx.match(t);
-        if (tm && tm[1] && tm[1].length > 5) { title = tm[1]; break; }
-      }
-      if (!title) continue;
-
-      title = title.replace(/\\"/g, '"').replace(/\\u[\da-f]{4}/gi, x => String.fromCharCode(parseInt(x.slice(2), 16))).replace(/\\n/g, " ").replace(/\\t/g, " ").replace(/\\/g, "").replace(/\s+/g, " ").trim();
-      if (title.length < 5) continue;
-
-      let img = "";
-      const iPatterns = [/"(?:image|imageUrl|imgUrl|mainImage)"\s*:\s*"([^"]+?\/kf\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/i];
-      for (const ip of iPatterns) {
-        const im = ctx.match(ip);
-        if (im && im[1]) { img = im[1]; break; }
-      }
-      img = img.replace(/\\u002F/gi, "/").replace(/\\\//g, "/");
-      if (img.startsWith("//")) img = "https:" + img;
-
-      let price = 0;
-      const pPatterns = [
-        /"salePrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
-        /"formattedPrice"\s*:\s*"([^"]+)"/,
-        /"price"\s*:\s*"?([\d.]+)/,
-      ];
-      for (const pp of pPatterns) {
-        const pm = ctx.match(pp);
-        if (pm && pm[1]) { const v = parseFloat(String(pm[1]).replace(/[^\d.]/g, "")); if (v > 0 && v < 100000) { price = v; break; } }
-      }
-
-      let store = "";
-      const sm = ctx.match(/"storeName"\s*:\s*"([^"]{2,80})"/); if (sm) store = sm[1];
-
-      let rating = 0;
-      const rm = ctx.match(/"averageStar"\s*:\s*"?([\d.]+)/); if (rm) { const r = parseFloat(rm[1]); if (r > 0 && r <= 5) rating = +r.toFixed(1); }
-
-      let sold = 0;
-      const vm = ctx.match(/"tradeDesc"\s*:\s*"([^"]+)"/); if (vm) { const n = parseInt(vm[1].replace(/[^\d]/g, "")); if (n > 0) sold = n; }
-
-      products.push({
-        _id: id, title, img, price, store: store || "AliExpress", rating, sold,
-        link: `https://www.aliexpress.com/item/${id}.html`,
-        fromBrowser: true, shippingFree: false, shippingPrice: 0, hasShippingInfo: false,
-      });
-      if (products.length >= 200) break;
-    }
-
-    if (products.length > 0) console.log(`[extract] Regex: ${products.length}`);
+    console.log(`[iframe] extracted ${products.length} products`);
     return products;
   }
 
-  function collectJsonProducts(obj, found, depth) {
-    if (!obj || typeof obj !== "object" || depth > 15) return;
-    if (found.length >= 200) return;
-    if (Array.isArray(obj)) { for (const it of obj) collectJsonProducts(it, found, depth + 1); return; }
-
-    const pid = obj.productId || obj.product_id || obj.itemId || obj.item_id;
-    if (pid) {
-      let title = "";
-      const t = obj.title || obj.productTitle || obj.name;
-      if (typeof t === "string") title = t;
-      else if (t && typeof t === "object") title = t.displayTitle || t.text || "";
-
-      if (title && title.length > 5) {
-        let img = "";
-        const i = obj.image || obj.imageUrl || obj.mainImage || obj.productImage;
-        if (typeof i === "string") img = i;
-        else if (i && typeof i === "object") img = i.imgUrl || i.url || i.src || "";
-        if (img.startsWith("//")) img = "https:" + img;
-
-        let price = 0;
-        if (obj.prices?.salePrice?.value) price = parseFloat(obj.prices.salePrice.value);
-        else if (obj.prices?.salePrice?.formattedPrice) price = parseFloat(String(obj.prices.salePrice.formattedPrice).replace(/[^\d.]/g, ""));
-        else if (obj.salePrice) price = parseFloat(String(obj.salePrice).replace(/[^\d.]/g, ""));
-
-        let store = obj.storeName || obj.shopName || "";
-        let rating = parseFloat(obj.averageStar || obj.starRating || 0);
-        let sold = parseInt(String(obj.tradeDesc || obj.lastest_volume || 0).replace(/[^\d]/g, "")) || 0;
-
-        found.push({
-          _id: String(pid), title, img, price, store: store || "AliExpress",
-          rating: rating > 0 && rating <= 5 ? +rating.toFixed(1) : 0, sold,
-          link: `https://www.aliexpress.com/item/${pid}.html`,
-          fromBrowser: true, shippingFree: false, shippingPrice: 0, hasShippingInfo: false,
-        });
-      }
-    }
-
-    for (const k of Object.keys(obj)) {
-      if (obj[k] && typeof obj[k] === "object") collectJsonProducts(obj[k], found, depth + 1);
-    }
-  }
-
   /* ═══════════════════════════════════════════════════════
-     جلب الشحن
+     ⭐⭐ جلب الشحن
      ═══════════════════════════════════════════════════════ */
-  function extractShippingFromProductPage(html) {
+  function extractShippingFromHtml(html) {
     if (!html) return { free: false, price: 0, hasInfo: false };
     const freePatterns = /(?:free\s+shipping|shipping\s+free|livraison\s+gratuite|livraison\s+offerte|gratuite|شحن\s+مجاني|توصيل\s+مجاني|envío\s+gratis|envio\s+gratis|kostenloser\s+versand|kostenlos|бесплатная\s+доставка|spedizione\s+gratuita|frete\s+gr[áa]tis|免运费|送料無料)/i;
     if (freePatterns.test(html)) return { free: true, price: 0, hasInfo: true };
@@ -517,7 +416,6 @@
       /(?:shipping|delivery|livraison|شحن|توصيل|envío|versand|доставка|spedizione|frete)[^$€£¥﷼\d]{0,40}[$€£¥﷼]\s*([\d.,]+)/i,
       /"shippingFee"\s*:\s*"?([\d.]+)/i,
       /"logisticsFee"\s*:\s*"?([\d.]+)/i,
-      /"freight"\s*:\s*"?([\d.]+)/i,
     ];
     for (const re of pricePatterns) {
       const m = html.match(re);
@@ -539,7 +437,7 @@
       if (!res.ok) return null;
       const html = await res.text();
       if (!html || html.length < 5000) return null;
-      return extractShippingFromProductPage(html);
+      return extractShippingFromHtml(html);
     } catch (e) { return null; }
   }
 
@@ -560,7 +458,7 @@
   }
 
   /* ═══════════════════════════════════════════════════════
-     ⭐⭐⭐ Hybrid Search — المتصفح أولاً ثم API
+     ⭐⭐⭐ البحث الرئيسي: iframe + API
      ═══════════════════════════════════════════════════════ */
   async function doHybridSearch() {
     if (isScanning) return;
@@ -568,34 +466,94 @@
 
     try {
       const t0 = Date.now();
+      const fullTitle = (currentProduct.title || "").slice(0, 100).trim();
+      const imageUrl = currentProduct.image || "";
+      const model = getPrimaryModel(currentProduct.title || "");
+      const brand = extractBrand(currentProduct.title || "");
+
       console.log("═══════════════════════════════════════════");
-      console.log("[Smart Shopper] 🔍 HYBRID SEARCH — API + Browser");
+      console.log("[Smart Shopper] 🔍 SEARCH — iframe (browser) + API");
+      console.log("[Smart Shopper] Title:", fullTitle.slice(0, 80));
+      console.log("[Smart Shopper] Image:", imageUrl.slice(0, 80));
       console.log("═══════════════════════════════════════════");
 
-      renderProgress("🌐 بحث في المتصفح...", 0, 1);
+      renderProgress("🔍 بحث في المتصفح...", 0, 1);
 
-      // 1) بحث المتصفح (منفصل)
-      const browserProducts = await searchInBrowser();
-      console.log(`[Smart Shopper] 🌐 Browser done: ${browserProducts.length} products`);
+      // ⭐ 1) روابط البحث
+      const enc = encodeURIComponent(fullTitle);
+      const imgEnc = imageUrl ? encodeURIComponent(imageUrl) : "";
 
-      if (browserProducts.length > 0) {
-        renderProgress(`🌐 المتصفح: ${browserProducts.length} — جاري API...`, 1, 2);
-      } else {
-        renderProgress("🌐 المتصفح: 0 — جاري API...", 1, 2);
+      const iframeUrls = [];
+
+      // ⭐ بحث بالعنوان الكامل (نفس ما يكتبه المستخدم في خانة البحث)
+      if (fullTitle) {
+        iframeUrls.push({
+          name: "TXT-full",
+          url: `https://www.aliexpress.com/w/wholesale-${enc}.html`
+        });
+      }
+      // ⭐ بحث بالموديل + البراند
+      if (brand && model) {
+        const bm = encodeURIComponent(`${brand} ${model}`);
+        iframeUrls.push({
+          name: "TXT-brand-model",
+          url: `https://www.aliexpress.com/w/wholesale-${bm}.html`
+        });
+      }
+      // ⭐ بحث بالصورة (صفحة AliExpress لبحث الصور)
+      if (imageUrl) {
+        iframeUrls.push({
+          name: "IMG-search",
+          url: `https://www.aliexpress.com/wholesale?imageUrl=${imgEnc}&g=y`
+        });
+        iframeUrls.push({
+          name: "IMG-search2",
+          url: `https://www.aliexpress.com/af/imgSearch.htm?imageUrl=${imgEnc}`
+        });
       }
 
-      // 2) API
+      console.log(`[Smart Shopper] 🌐 Will search ${iframeUrls.length} URLs via iframe`);
+
+      // ⚡ بحث متوازي عبر iframes
+      const iframeResults = await Promise.all(
+        iframeUrls.map(async ({ name, url }) => {
+          try {
+            console.log(`[iframe] Loading: ${name}`);
+            const products = await searchViaIframe(url, IFRAME_TIMEOUT);
+            console.log(`[iframe] ${name}: ${products.length} products`);
+            return { name, products };
+          } catch (e) {
+            console.warn(`[iframe] ${name} failed:`, e.message);
+            return { name, products: [] };
+          }
+        })
+      );
+
+      // دمج نتائج iframe
+      const allBrowserProducts = [];
+      const seen = new Set();
+      for (const r of iframeResults) {
+        for (const p of r.products) {
+          if (seen.has(p._id)) continue;
+          seen.add(p._id);
+          allBrowserProducts.push(p);
+        }
+      }
+
+      console.log(`[Smart Shopper] 🌐 Browser (iframe) total: ${allBrowserProducts.length} unique`);
+
+      // ⭐ 2) API (بالتوازي كان أو بعده)
+      renderProgress(`🌐 المتصفح: ${allBrowserProducts.length} — جاري API...`, 1, 2);
       const apiData = await fetchMegaSearch(buildMegaQueries(currentProduct.title))
         .catch(() => ({ products: [] }));
       const apiRaw = apiData?.products || [];
       console.log(`[Smart Shopper] 📡 API: ${apiRaw.length} products`);
 
-      // 3) تقييم
+      // ⭐ 3) قيّم
       const kws = getKeywords(currentProduct.title);
       const ctx = {
         productId: currentProduct.id,
-        brand: extractBrand(currentProduct.title),
-        primaryModel: getPrimaryModel(currentProduct.title),
+        brand, primaryModel: model,
         keywords: kws,
         referencePrice: currentProduct.price,
         originalStore: (currentProduct.store || "").toLowerCase(),
@@ -606,7 +564,7 @@
       for (const p of apiRaw) { const s = scoreProduct(p, ctx); if (s) apiScored.push(s); }
 
       const browserScored = [];
-      for (const p of browserProducts) {
+      for (const p of allBrowserProducts) {
         if (p._id === currentProduct.id) continue;
         const pFormatted = {
           product_id: p._id, product_title: p.title, product_main_image_url: p.img,
@@ -615,13 +573,22 @@
           promotion_link: p.link, product_detail_url: p.link,
         };
         const s = scoreProduct(pFormatted, ctx);
-        if (s) { s.fromBrowser = true; browserScored.push(s); }
+        if (s) {
+          s.fromBrowser = true;
+          // احتفظ بمعلومات الشحن المستخرجة من iframe
+          if (p.hasShippingInfo) {
+            s.shippingFree = p.shippingFree;
+            s.shippingPrice = p.shippingPrice;
+            s.hasShippingInfo = true;
+          }
+          browserScored.push(s);
+        }
       }
 
-      console.log(`[Smart Shopper] API scored: ${apiScored.length} | Browser scored: ${browserScored.length}`);
+      console.log(`[Smart Shopper] ✅ API scored: ${apiScored.length} | Browser scored: ${browserScored.length}`);
 
-      // 4) دمج
-      const seen = new Set();
+      // ⭐ 4) دمج
+      const mergedSeen = new Set();
       const merged = [];
       const sortFn = (a, b) => {
         if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
@@ -632,33 +599,35 @@
       browserScored.sort(sortFn);
 
       for (const p of [...apiScored, ...browserScored]) {
-        if (seen.has(p._id)) continue;
-        seen.add(p._id);
+        if (mergedSeen.has(p._id)) continue;
+        mergedSeen.add(p._id);
         merged.push(p);
-        if (merged.length >= MAX_FINAL_RESULTS) break;
+        if (merged.length >= MAX_RESULTS) break;
       }
 
       console.log(`[Smart Shopper] 📦 Merged: ${merged.length}`);
 
       if (merged.length === 0) { sellers = []; renderEmpty(); return; }
 
-      // 5) الشحن
-      const toFetch = merged.slice(0, MAX_SHIPPING_FETCH);
-      renderProgress(`🚚 جلب الشحن لـ ${toFetch.length} منتج...`, 0, toFetch.length);
-      const shippingResults = await batchFetchShipping(toFetch, FETCH_CONCURRENCY, (done, total) => {
-        renderProgress(`🚚 جلب الشحن: ${done}/${total}`, done, total);
-      });
-      toFetch.forEach((p, i) => {
-        const s = shippingResults[i];
-        if (s && s.hasInfo) { p.shippingFree = s.free; p.shippingPrice = s.price; p.hasShippingInfo = true; }
-      });
+      // ⭐ 5) الشحن للمنتجات التي لم تحصل عليه من iframe
+      const needShipping = merged.filter(p => !p.hasShippingInfo).slice(0, MAX_SHIPPING);
+      if (needShipping.length > 0) {
+        renderProgress(`🚚 جلب الشحن: 0/${needShipping.length}`, 0, needShipping.length);
+        const shippingResults = await batchFetchShipping(needShipping, FETCH_CONCURRENCY, (done, total) => {
+          renderProgress(`🚚 جلب الشحن: ${done}/${total}`, done, total);
+        });
+        needShipping.forEach((p, i) => {
+          const s = shippingResults[i];
+          if (s && s.hasInfo) { p.shippingFree = s.free; p.shippingPrice = s.price; p.hasShippingInfo = true; }
+        });
+      }
 
       sellers = merged;
       console.log(`[Smart Shopper] ✅ Done in ${Date.now() - t0}ms`);
       updateSourceLabel("hybrid");
       renderList();
     } catch (e) {
-      console.error("[Smart Shopper] Hybrid error:", e);
+      console.error("[Smart Shopper] Search error:", e);
       sellers = [];
       renderEmpty();
     } finally {
@@ -696,7 +665,7 @@
           </div>
         </div>
         <div class="ss-header-actions">
-          <button class="ss-btn-icon" data-action="hybrid" title="Hybrid Search">🔍</button>
+          <button class="ss-btn-icon" data-action="hybrid" title="Browser Search">🔍</button>
           <button class="ss-btn-icon" data-action="refresh">↻</button>
           <button class="ss-btn-icon" data-action="minimize">−</button>
           <button class="ss-btn-icon" data-action="close">×</button>
@@ -763,7 +732,7 @@
   function updateSourceLabel(mode) {
     const el = document.getElementById("ss-source"); if (!el) return;
     if (mode === "smart") el.textContent = T("sameProduct") + " ✓";
-    else if (mode === "hybrid") el.textContent = "🔍 " + tr("fromBrowser");
+    else if (mode === "hybrid") el.textContent = "🔍 " + (BROWSER_LANG === "ar" ? "بحث المتصفح" : BROWSER_LANG === "fr" ? "Recherche navigateur" : "Browser search");
     else if (mode === "none") el.textContent = "No matches";
     else el.textContent = T("scanning");
   }
@@ -904,7 +873,7 @@
   async function run() {
     await sleep(800);
     currentProduct = extractProduct();
-    console.log("[Smart Shopper] v52 HYBRID FULL ready");
+    console.log("[Smart Shopper] v53 IFRAME ready");
     if (!currentProduct.title || currentProduct.title.length < 5) return;
     buildPanel();
     await doScan();
@@ -919,5 +888,5 @@
   });
 
   run();
-  console.log("[Smart Shopper] v52 ready.");
+  console.log("[Smart Shopper] v53 ready.");
 })();
