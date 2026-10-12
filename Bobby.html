@@ -1,8 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v48 MEGA FIXED)
-   5-tier strict filter + Coupon detection + Accurate price.
-   ⚡ الفرق عن v45: يقبل منتجات بدون سعر
-   🎯 الفلترة الصارمة محفوظة
+   Smart Shopper — Content Script (v45 MEGA — ORIGINAL)
+   5-tier progressive filter + Coupon detection + Accurate price.
    ═══════════════════════════════════════════════════════ */
 
 (function () {
@@ -15,7 +13,7 @@
   const LANG = typeof SS_LANG !== "undefined" ? SS_LANG : "en";
   const IS_RTL = typeof SS_RTL !== "undefined" ? SS_RTL : false;
 
-  console.log(`[Smart Shopper] v48 MEGA FIXED | Lang: ${LANG}`);
+  console.log(`[Smart Shopper] v45 MEGA | Lang: ${LANG}`);
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
@@ -414,14 +412,11 @@
   }
 
   /* ═══════════════════════════════════════════════════════
-     ⭐ scoreProduct — قبول بدون سعر مع الفلترة الصارمة
+     scoreProduct — v45 الأصلي + إصلاح السعر الفاضي
      ═══════════════════════════════════════════════════════ */
   function scoreProduct(p, ctx) {
-    // سعر
-    const priceRaw = p.target_sale_price || p.sale_price || 0;
-    let price = parseFloat(String(priceRaw).replace(/[^\d.]/g, "")) || 0;
-
-    const oldP = parseFloat(String(p.target_original_price || p.original_price || 0).replace(/[^\d.]/g, "")) || 0;
+    let price = parseFloat(p.target_sale_price || p.sale_price || 0);
+    const oldP = parseFloat(p.target_original_price || p.original_price || 0);
     const rating = parseFloat(String(p.evaluate_rate || "0").replace("%", "")) / 20;
     const title = p.product_title || p.product_name || "";
     const id = String(p.product_id || "");
@@ -429,8 +424,10 @@
     const img = p.product_main_image_url || "";
     const imageHash = extractImageHash(img);
 
-    // ⭐ نرفض فقط إذا ما فيه id أو عنوان
-    if (!id || !title) return null;
+    // ⭐ الإصلاح الوحيد: إذا السعر فاضي، نستخدم السعر المرجعي مؤقتًا
+    if (!price || isNaN(price)) price = ctx.referencePrice || 0;
+
+    if (!id || !price || !title) return null;
     if (id === ctx.productId) return null;
 
     const titleUpper = title.toUpperCase();
@@ -440,7 +437,6 @@
     const brandMatch = ctx.brand && cardBrand && ctx.brand === cardBrand;
     const kwMatches = countKeywords(title, ctx.keywords);
 
-    // ⭐⭐⭐ الفلترة الصارمة — نرفض أي منتج لا علاقة له
     let tier = 0;
     let score = 0;
 
@@ -453,18 +449,11 @@
     else if (brandMatch && kwMatches >= 2) { tier = 4; score = 50; }
     else if (kwMatches >= 4) { tier = 4; score = 40; }
     else if (kwMatches >= 3) { tier = 5; score = 25; }
-    // ⭐ نشيل قبول الـ 2 kw و 0 kw — فقط 3+ كلمات
     else { return null; }
 
-    // فلتر السعر (خيف فقط إذا في سعر)
-    if (ctx.referencePrice > 0 && price > 0) {
+    if (ctx.referencePrice > 0) {
       const ratio = price / ctx.referencePrice;
       if (ratio < 0.15 || ratio > 7.0) return null;
-    }
-
-    // إذا ما في سعر → نضع السعر المرجعي كمؤشر
-    if (price === 0 && ctx.referencePrice > 0) {
-      price = ctx.referencePrice;
     }
 
     const finalOld = (oldP > price && price > 0) ? oldP : 0;
@@ -503,7 +492,6 @@
     const storesOriginal = ctx.originalStore.toLowerCase();
 
     scored.sort((a, b) => {
-      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
       if (a._tier !== b._tier) return a._tier - b._tier;
       return b._score - a._score;
     });
@@ -532,15 +520,11 @@
       if (p.sold >= 100) rank += 3;
       return { ...p, _rank: rank };
     }).sort((a, b) => {
-      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
       if (Math.abs(b._rank - a._rank) > 5) return b._rank - a._rank;
       return a.price - b.price;
     });
   }
 
-  /* ═══════════════════════════════════════════════════════
-     PANEL — نفس v45 الأصلي
-     ═══════════════════════════════════════════════════════ */
   function buildPanel() {
     document.getElementById(PANEL_ID)?.remove();
     const panel = document.createElement("div");
@@ -616,16 +600,13 @@
       const imageHash = currentProduct.imageHash || "";
 
       console.log("═══════════════════════════════════════════");
-      console.log("[Smart Shopper] v48 MEGA FIXED");
+      console.log("[Smart Shopper] v45 MEGA");
       console.log("[Smart Shopper] Product:", currentProduct.title.slice(0, 60));
       console.log("[Smart Shopper] Brand:", brand);
       console.log("[Smart Shopper] Primary Model:", primaryModel);
-      console.log("[Smart Shopper] Image Hash:", imageHash || "N/A");
       console.log("═══════════════════════════════════════════");
 
       const queries = buildMegaQueries(currentProduct.title);
-      console.log(`[Smart Shopper] Queries (${queries.length}):`);
-      queries.forEach(q => console.log(`  → ${q.name}: "${q.keywords}"`));
 
       if (!queries.length) {
         sellers = [];
@@ -635,7 +616,7 @@
 
       const data = await fetchMegaSearch(queries);
       const raw = data?.products || [];
-      console.log(`[Smart Shopper] Raw: ${raw.length} unique`);
+      console.log(`[Smart Shopper] Raw: ${raw.length}`);
       console.log(`[Smart Shopper] Worker stats:`, data?.stats);
 
       const ctx = {
@@ -657,10 +638,6 @@
 
       console.log(`[Smart Shopper] Scored: ${scored.length}`);
 
-      const tiers = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-      scored.forEach(s => tiers[s._tier]++);
-      console.log("[Smart Shopper] Tiers:", tiers);
-
       const picked = pickProgressive(scored, ctx);
       sellers = rankProducts(picked);
 
@@ -680,8 +657,7 @@
         console.error("[Smart Shopper] Coupon merge error:", e);
       }
 
-      const imgMatches = sellers.filter(s => s.isHashMatch).length;
-      console.log(`[Smart Shopper] ✅ FINAL: ${sellers.length} | 🎯 Images: ${imgMatches}`);
+      console.log(`[Smart Shopper] ✅ FINAL: ${sellers.length}`);
 
       updateSourceLabel(sellers.length > 0 ? "smart" : "none");
       renderList();
@@ -899,8 +875,7 @@
   async function run() {
     await sleep(800);
     currentProduct = extractProduct();
-    console.log("[Smart Shopper] v48 MEGA FIXED ready");
-    console.log("[Smart Shopper] Image Hash:", currentProduct.imageHash);
+    console.log("[Smart Shopper] v45 MEGA ready");
     if (!currentProduct.title || currentProduct.title.length < 5) return;
     buildPanel();
     await doScan();
@@ -915,5 +890,5 @@
   });
 
   run();
-  console.log("[Smart Shopper] v48 ready.");
+  console.log("[Smart Shopper] v45 ready.");
 })();
