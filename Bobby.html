@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v47 FIXED)
-   ✅ يقبل منتجات بدون سعر
-   ✅ استعلامات أذكى
-   🎯 ترتيب: تطابق الصورة → التشابه → السعر
+   Smart Shopper — Content Script (v48 MEGA FIXED)
+   5-tier strict filter + Coupon detection + Accurate price.
+   ⚡ الفرق عن v45: يقبل منتجات بدون سعر
+   🎯 الفلترة الصارمة محفوظة
    ═══════════════════════════════════════════════════════ */
 
 (function () {
@@ -15,7 +15,7 @@
   const LANG = typeof SS_LANG !== "undefined" ? SS_LANG : "en";
   const IS_RTL = typeof SS_RTL !== "undefined" ? SS_RTL : false;
 
-  console.log(`[Smart Shopper] v47 FIXED | Lang: ${LANG}`);
+  console.log(`[Smart Shopper] v48 MEGA FIXED | Lang: ${LANG}`);
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
@@ -275,7 +275,6 @@
     return c;
   }
 
-  // ⚡ 6 استعلامات أذكى
   function buildMegaQueries(title) {
     const brand = extractBrand(title);
     const primaryModel = getPrimaryModel(title);
@@ -293,29 +292,32 @@
       queries.push({ name, keywords: kw, pageSize: 50 });
     }
 
-    // 1) brand + model (الأقوى)
     if (brand && primaryModel) addQ("brand+model", `${brand} ${primaryModel}`);
+    if (brand && primaryModel) addQ("brand-model-p2", `${brand} ${primaryModel}`, 2);
 
-    // 2) model فقط
-    if (primaryModel) addQ("model-only", primaryModel);
+    if (primaryModel) {
+      addQ("model-only", primaryModel);
+      addQ("model-p2", primaryModel, 2);
+    }
 
-    // 3) model + كلمة
-    if (primaryModel && kws.length >= 1) addQ("model+kw", `${primaryModel} ${kws[0]}`);
-
-    // 4) brand + كلمتين
     if (brand && kws.length >= 2) addQ("brand+2kw", `${brand} ${kws[0]} ${kws[1]}`);
+    if (brand && kws.length >= 3) addQ("brand+3kw", `${brand} ${kws[0]} ${kws[1]} ${kws[2]}`);
 
-    // 5) أول 3 كلمات
-    if (kws.length >= 3) addQ("kw3", `${kws[0]} ${kws[1]} ${kws[2]}`);
-    else if (kws.length >= 2) addQ("kw2", `${kws[0]} ${kws[1]}`);
+    if (brand && kws.length >= 1) addQ("brand+kw1", `${brand} ${kws[0]}`);
+    if (brand) addQ("brand-only", brand);
 
-    // 6) كل الموديلات
+    if (primaryModel && kws.length >= 1) addQ("model+kw", `${primaryModel} ${kws[0]}`);
+    if (primaryModel && brand) addQ("model+brand+kw", `${primaryModel} ${brand} ${kws[0]}`);
+
     if (allModels.length >= 2) addQ("all-models", allModels.slice(0, 3).join(" "));
 
-    // 7) كلمات متباعدة (احتياطي)
-    if (kws.length >= 4) addQ("kw-spread", `${kws[0]} ${kws[2]} ${kws[3]}`);
+    if (kws.length >= 2) addQ("kw2", `${kws[0]} ${kws[1]}`);
+    if (kws.length >= 3) addQ("kw3", `${kws[0]} ${kws[1]} ${kws[2]}`);
+    if (kws.length >= 4) addQ("kw4", kws.slice(0, 4).join(" "));
 
-    return queries.slice(0, 6);
+    if (kws.length >= 3) addQ("kw-spread", `${kws[0]} ${kws[2]}`);
+
+    return queries.slice(0, 20);
   }
 
   async function fetchMegaSearch(queries) {
@@ -361,7 +363,10 @@
       cardElement.style.opacity = "0.6";
       cardElement.style.pointerEvents = "none";
     }
+
     try {
+      console.log(`[Smart Shopper] Fetching accurate price for ID: ${productId}`);
+
       const res = await fetch(`${WORKER_URL}/api/product-details`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -371,13 +376,19 @@
           country: SHIP_TO_COUNTRY
         }),
       });
+
       if (res.ok) {
         const data = await res.json();
         if (data.ok && data.data.products && data.data.products.length > 0) {
           const dp = data.data.products[0];
           const accuratePrice = parseFloat(
-            dp.target_sale_price || dp.sale_price || dp.app_sale_price || dp.original_price || 0
+            dp.target_sale_price ||
+            dp.sale_price ||
+            dp.app_sale_price ||
+            dp.original_price ||
+            0
           );
+
           if (accuratePrice > 0 && cardElement) {
             const priceEl = cardElement.querySelector(".ss-price-now");
             if (priceEl) {
@@ -396,20 +407,19 @@
         cardElement.style.pointerEvents = "auto";
       }
     }
+
     if (fallbackUrl) {
       window.open(fallbackUrl, "_blank", "noopener");
     }
   }
 
   /* ═══════════════════════════════════════════════════════
-     ⭐ scoreProduct — معدّلة لتقبل منتجات بدون سعر
+     ⭐ scoreProduct — قبول بدون سعر مع الفلترة الصارمة
      ═══════════════════════════════════════════════════════ */
   function scoreProduct(p, ctx) {
+    // سعر
     const priceRaw = p.target_sale_price || p.sale_price || 0;
     let price = parseFloat(String(priceRaw).replace(/[^\d.]/g, "")) || 0;
-
-    // ⭐ إذا ما في سعر، نعطيه سعر مرجعي حتى لا يُرفض
-    if (price === 0) price = ctx.referencePrice || 0;
 
     const oldP = parseFloat(String(p.target_original_price || p.original_price || 0).replace(/[^\d.]/g, "")) || 0;
     const rating = parseFloat(String(p.evaluate_rate || "0").replace("%", "")) / 20;
@@ -419,7 +429,7 @@
     const img = p.product_main_image_url || "";
     const imageHash = extractImageHash(img);
 
-    // ⭐ فقط نرفض إذا ما فيه id أو عنوان
+    // ⭐ نرفض فقط إذا ما فيه id أو عنوان
     if (!id || !title) return null;
     if (id === ctx.productId) return null;
 
@@ -430,6 +440,7 @@
     const brandMatch = ctx.brand && cardBrand && ctx.brand === cardBrand;
     const kwMatches = countKeywords(title, ctx.keywords);
 
+    // ⭐⭐⭐ الفلترة الصارمة — نرفض أي منتج لا علاقة له
     let tier = 0;
     let score = 0;
 
@@ -442,13 +453,18 @@
     else if (brandMatch && kwMatches >= 2) { tier = 4; score = 50; }
     else if (kwMatches >= 4) { tier = 4; score = 40; }
     else if (kwMatches >= 3) { tier = 5; score = 25; }
-    else if (kwMatches >= 2) { tier = 5; score = 15; }  // ⭐ أضفنا طبقة أخيرة
-    else { tier = 5; score = 5; }  // ⭐ نقبل حتى لو صفر كلمات (احتياطي)
+    // ⭐ نشيل قبول الـ 2 kw و 0 kw — فقط 3+ كلمات
+    else { return null; }
 
-    // فلتر السعر (أخف)
+    // فلتر السعر (خيف فقط إذا في سعر)
     if (ctx.referencePrice > 0 && price > 0) {
       const ratio = price / ctx.referencePrice;
-      if (ratio < 0.1 || ratio > 10.0) return null;
+      if (ratio < 0.15 || ratio > 7.0) return null;
+    }
+
+    // إذا ما في سعر → نضع السعر المرجعي كمؤشر
+    if (price === 0 && ctx.referencePrice > 0) {
+      price = ctx.referencePrice;
     }
 
     const finalOld = (oldP > price && price > 0) ? oldP : 0;
@@ -505,17 +521,26 @@
       accepted.push(s);
       if (accepted.length >= 20) break;
     }
+
     return accepted;
   }
 
   function rankProducts(products) {
-    return [...products].sort((a, b) => {
+    return products.map(p => {
+      let rank = p._score;
+      if (p.rating >= 4.5) rank += 5;
+      if (p.sold >= 100) rank += 3;
+      return { ...p, _rank: rank };
+    }).sort((a, b) => {
       if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
-      if (Math.abs(b._score - a._score) > 5) return b._score - a._score;
+      if (Math.abs(b._rank - a._rank) > 5) return b._rank - a._rank;
       return a.price - b.price;
     });
   }
 
+  /* ═══════════════════════════════════════════════════════
+     PANEL — نفس v45 الأصلي
+     ═══════════════════════════════════════════════════════ */
   function buildPanel() {
     document.getElementById(PANEL_ID)?.remove();
     const panel = document.createElement("div");
@@ -591,13 +616,16 @@
       const imageHash = currentProduct.imageHash || "";
 
       console.log("═══════════════════════════════════════════");
-      console.log("[Smart Shopper] v47 FIXED");
+      console.log("[Smart Shopper] v48 MEGA FIXED");
       console.log("[Smart Shopper] Product:", currentProduct.title.slice(0, 60));
+      console.log("[Smart Shopper] Brand:", brand);
+      console.log("[Smart Shopper] Primary Model:", primaryModel);
       console.log("[Smart Shopper] Image Hash:", imageHash || "N/A");
       console.log("═══════════════════════════════════════════");
 
       const queries = buildMegaQueries(currentProduct.title);
-      console.log(`[Smart Shopper] Queries (${queries.length}):`, queries.map(q => q.keywords));
+      console.log(`[Smart Shopper] Queries (${queries.length}):`);
+      queries.forEach(q => console.log(`  → ${q.name}: "${q.keywords}"`));
 
       if (!queries.length) {
         sellers = [];
@@ -629,8 +657,28 @@
 
       console.log(`[Smart Shopper] Scored: ${scored.length}`);
 
+      const tiers = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      scored.forEach(s => tiers[s._tier]++);
+      console.log("[Smart Shopper] Tiers:", tiers);
+
       const picked = pickProgressive(scored, ctx);
       sellers = rankProducts(picked);
+
+      try {
+        const productIds = sellers.map(s => s._id).filter(Boolean);
+        const couponsMap = await fetchCouponsForProducts(productIds);
+
+        sellers = sellers.map(s => ({
+          ...s,
+          hasCoupon: !!(couponsMap[s._id]?.hasCoupon),
+          couponInfo: couponsMap[s._id] || null
+        }));
+
+        const couponCount = sellers.filter(s => s.hasCoupon).length;
+        console.log(`[Smart Shopper] 🎟️ Coupons found: ${couponCount}/${sellers.length}`);
+      } catch (e) {
+        console.error("[Smart Shopper] Coupon merge error:", e);
+      }
 
       const imgMatches = sellers.filter(s => s.isHashMatch).length;
       console.log(`[Smart Shopper] ✅ FINAL: ${sellers.length} | 🎯 Images: ${imgMatches}`);
@@ -696,7 +744,9 @@
       <div class="ss-empty">
         <div class="ss-empty-icon">🎯</div>
         <div class="ss-empty-title">No matches found</div>
-        <div class="ss-empty-sub">This product seems unique. Try another product.</div>
+        <div class="ss-empty-sub">
+          This product seems unique. Try another product.
+        </div>
         <button class="ss-empty-btn" id="ss-retry">${T("scanAgain")}</button>
       </div>
     `;
@@ -705,18 +755,10 @@
 
   function sortSellers(arr, f) {
     const copy = [...arr];
-    const byImage = (a, b) => {
-      if (a.isHashMatch !== b.isHashMatch) return a.isHashMatch ? -1 : 1;
-      return 0;
-    };
-    const byScore = (a, b) => {
-      if (Math.abs(b._score - a._score) > 5) return b._score - a._score;
-      return 0;
-    };
-    if (f === "cheap") return copy.sort((a, b) => byImage(a, b) || a.price - b.price);
-    if (f === "discount") return copy.sort((a, b) => byImage(a, b) || (b.discount || 0) - (a.discount || 0));
-    if (f === "sold") return copy.sort((a, b) => byImage(a, b) || (b.sold || 0) - (a.sold || 0));
-    return copy.sort((a, b) => byImage(a, b) || byScore(a, b) || a.price - b.price);
+    if (f === "cheap") return copy.sort((a, b) => a.price - b.price);
+    if (f === "discount") return copy.sort((a, b) => (b.discount || 0) - (a.discount || 0));
+    if (f === "sold") return copy.sort((a, b) => (b.sold || 0) - (a.sold || 0));
+    return copy.sort((a, b) => b._rank - a._rank);
   }
 
   function renderList() {
@@ -731,14 +773,12 @@
     list.innerHTML = items.slice(0, 20).map((s, i) => {
       const rank = i + 1;
       const isCheap = s.price === minPrice && s.price > 0;
-      const cardClass = (s.isHashMatch ? "ss-imgmatch " : "") +
-                        (rank === 1 ? "ss-best" : "") +
-                        (isCheap && !s.isHashMatch && rank !== 1 ? " ss-cheap" : "");
+      const cardClass = rank === 1 ? "ss-best" : (isCheap ? "ss-cheap" : "");
       const rankClass = rank <= 3 ? `ss-r${rank}` : "";
 
       let badge = "";
-      if (s.isHashMatch) badge = `<span class="ss-badge ss-badge-exact">🎯 EXACT IMG</span>`;
-      else if (s.brandMatch && s.hasPrimaryModel) badge = `<span class="ss-badge ss-badge-match">✓ SAME</span>`;
+      if (s.isHashMatch) badge = `<span class="ss-badge ss-badge-match">🎯 EXACT</span>`;
+      else if (s.brandMatch && s.hasPrimaryModel) badge = `<span class="ss-badge ss-badge-match" style="background:#ecfdf5;color:#065f46">✓ SAME</span>`;
       else if (activeFilter === "cheap" && rank === 1) badge = `<span class="ss-badge ss-badge-cheap">${T("cheapestTag")}</span>`;
       else if (activeFilter === "discount" && rank === 1) badge = `<span class="ss-badge ss-badge-hot">${T("bestDeal")}</span>`;
       else if (activeFilter === "sold" && rank === 1) badge = `<span class="ss-badge ss-badge-top">${T("mostSoldTag")}</span>`;
@@ -768,17 +808,6 @@
       if (s.rating > 0) subtitleItems.push(`<span class="ss-tag-inline rating">★ ${s.rating.toFixed(1)}</span>`);
       if (s.sold > 0) subtitleItems.push(`<span class="ss-tag-inline sold">${fmt(s.sold)} ${T("sold")}</span>`);
 
-      const scorePct = s.isHashMatch ? 100 : Math.min(100, s._score);
-      const scoreClass = s.isHashMatch ? "" : (s._score >= 100 ? "mid" : "low");
-      const scoreIcon = s.isHashMatch ? "🎯" : "≈";
-      const matchBar = `
-        <div class="ss-match-line">
-          <span class="ss-match-text">${scoreIcon}</span>
-          <div class="ss-match-track"><div class="ss-match-fill ${scoreClass}" style="width:${scorePct}%"></div></div>
-          <span class="ss-match-text">${scorePct}%</span>
-        </div>
-      `;
-
       const imgHtml = s.img
         ? `<img src="${s.img}" loading="lazy" onerror="this.style.display='none';this.parentElement.innerHTML='🖼️'">`
         : `🖼️`;
@@ -791,7 +820,6 @@
             <div class="ss-card-info">
               <div class="ss-card-title">${esc(s.store)} ${badge}${couponBadge}</div>
               <div class="ss-card-subtitle">${subtitleItems.join('<span class="ss-sep">●</span>')}</div>
-              ${matchBar}
             </div>
             <div class="ss-price-col">
               <div class="ss-price-line">
@@ -871,7 +899,7 @@
   async function run() {
     await sleep(800);
     currentProduct = extractProduct();
-    console.log("[Smart Shopper] v47 FIXED ready");
+    console.log("[Smart Shopper] v48 MEGA FIXED ready");
     console.log("[Smart Shopper] Image Hash:", currentProduct.imageHash);
     if (!currentProduct.title || currentProduct.title.length < 5) return;
     buildPanel();
@@ -887,5 +915,5 @@
   });
 
   run();
-  console.log("[Smart Shopper] v47 ready.");
+  console.log("[Smart Shopper] v48 ready.");
 })();
