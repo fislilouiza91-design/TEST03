@@ -1,17 +1,33 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker (v12)
-   100% URL-Based Search — لا يوجد Affiliate API
+   Smart Shopper — Cloudflare Worker (v13)
+   100% URL Search — 4 endpoints + تشخيص
    ═══════════════════════════════════════════════════════ */
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-const ALI_COOKIE = "aep_usuc_f=site=glo&c_tp=USD&region=US&b_locale=en_US&xman_f=US";
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+  "Cookie": "aep_usuc_f=site=glo&c_tp=USD&region=US&b_locale=en_US&xman_f=US; intl_locale=en_US",
+};
 
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders(env) });
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper", version: 12 }, env);
+      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper", version: 13 }, env);
+      if (url.pathname === "/api/debug" && request.method === "POST") return await handleDebug(request, env);
       if (url.pathname === "/api/similar-by-url" && request.method === "POST") return await handleSimilarByUrl(request, env);
       return json({ ok: false, error: "Route not found" }, env, 404);
     } catch (err) {
@@ -19,6 +35,39 @@ export default {
     }
   },
 };
+
+/* ═══════════════════════════════════════════════════════
+   DEBUG — يعرض بالضبط ما يرجعه AliExpress
+   ═══════════════════════════════════════════════════════ */
+async function handleDebug(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const keyword = body.keyword || "wifi router";
+  const urls = [
+    `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html`,
+    `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}`,
+    `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(keyword)}&page=1&g=y`,
+    `https://m.aliexpress.com/search.htm?keywords=${encodeURIComponent(keyword)}`,
+  ];
+
+  const results = {};
+  for (const u of urls) {
+    try {
+      const res = await fetch(u, { headers: BROWSER_HEADERS, redirect: "follow" });
+      const text = await res.text();
+      results[u] = {
+        status: res.status,
+        length: text.length,
+        hasItem: /\/item\/\d{6,}/.test(text),
+        hasCaptcha: /captcha|punish|slider|_sec/i.test(text),
+        hasJson: /__INIT_DATA__|_dida_config_|window\.runParams/.test(text),
+        preview: text.slice(0, 300).replace(/\s+/g, " "),
+      };
+    } catch (e) {
+      results[u] = { error: e.message };
+    }
+  }
+  return json({ ok: true, results }, env);
+}
 
 /* ═══════════════════════════════════════════════════════
    MAIN — Similar by URL
@@ -33,51 +82,75 @@ async function handleSimilarByUrl(request, env) {
 
   // ─── LAYER 1: جلب صفحة المنتج ───
   const productHtml = await fetchHtml(`https://www.aliexpress.com/item/${productId}.html`);
-  if (!productHtml) return json({ ok: false, error: "Failed to fetch product page" }, env, 502);
+  if (!productHtml) {
+    return json({
+      ok: false,
+      error: "AliExpress blocked the request (captcha or 403). Cloudflare Worker IP is likely blocked.",
+      hint: "Try /api/debug to see what AliExpress returns."
+    }, env, 502);
+  }
 
   const source = parseProductPage(productHtml, productId);
+  if (!source.title) {
+    return json({
+      ok: false,
+      error: "Could not extract product title. Page may be a captcha.",
+      htmlPreview: productHtml.slice(0, 500),
+    }, env, 422);
+  }
+
   const sourceTokens  = tokenize(source.title);
   const sourceImgSig  = imageSignature(source.image);
   const sourcePrice   = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
 
-  // ─── LAYER 2: بناء صيغ البحث ───
+  // ─── LAYER 2: صيغ البحث ───
   const keywords = buildKeywordVariants(source.title);
   if (keywords.length === 0) {
-    return json({ ok: false, error: "Could not extract keywords", source }, env, 422);
+    return json({ ok: false, error: "No keywords", source }, env, 422);
   }
 
-  // ─── LAYER 3: بحث متوازٍ عبر 3 نقاط نهاية ───
+  // ─── LAYER 3: بحث موازي ───
   const tasks = [];
 
-  // 1) المنتجات المُقترحة من صفحة المنتج نفسها
-  tasks.push(
-    Promise.resolve().then(() => extractRecommendedFromPage(productHtml))
-      .then(list => ({ source: "recommended", products: list }))
-      .catch(() => ({ source: "recommended", products: [] }))
-  );
+  // A) المنتجات المُقترحة من صفحة المنتج
+  tasks.push((async () => {
+    const list = extractRecommendedFromPage(productHtml);
+    return { source: "recommended", products: list };
+  })());
 
-  // 2) لكل كلمة مفتاحية: JSON endpoint + HTML page
+  // B) لكل كلمة: 3 نقاط نهاية
   for (const kw of keywords) {
     tasks.push(
-      searchViaJsonEndpoint(kw).then(products => ({ source: `json:${kw}`, products }))
-        .catch(() => ({ source: `json:${kw}`, products: [] }))
+      searchAliExpress(`https://www.aliexpress.com/w/wholesale-${encodeURIComponent(kw)}.html`)
+        .then(products => ({ source: `w:${kw}`, products }))
+        .catch(e => ({ source: `w:${kw}`, products: [], error: e.message }))
     );
     tasks.push(
-      searchViaHtmlPage(kw).then(products => ({ source: `html:${kw}`, products }))
-        .catch(() => ({ source: `html:${kw}`, products: [] }))
+      searchAliExpress(`https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(kw)}&g=y`)
+        .then(products => ({ source: `wholesale:${kw}`, products }))
+        .catch(e => ({ source: `wholesale:${kw}`, products: [], error: e.message }))
+    );
+    tasks.push(
+      searchJsonEndpoint(kw)
+        .then(products => ({ source: `json:${kw}`, products }))
+        .catch(e => ({ source: `json:${kw}`, products: [], error: e.message }))
+    );
+    tasks.push(
+      searchMobile(kw)
+        .then(products => ({ source: `mobile:${kw}`, products }))
+        .catch(e => ({ source: `mobile:${kw}`, products: [], error: e.message }))
     );
   }
 
   const results = await Promise.all(tasks);
 
-  // ─── LAYER 4: دمج + إزالة التكرار ───
+  // ─── LAYER 4: دمج ───
   const seen = new Set([String(productId)]);
   const pool = [];
   const stats = {};
 
   for (const r of results) {
-    const count = r.products.length;
-    stats[r.source] = count;
+    stats[r.source] = r.products.length + (r.error ? ` (err: ${r.error.slice(0, 50)})` : "");
     for (const raw of r.products) {
       const p = normalizeProduct(raw);
       if (!p.product_id || !p.title) continue;
@@ -87,7 +160,7 @@ async function handleSimilarByUrl(request, env) {
     }
   }
 
-  // ─── LAYER 5: تقييم (نص + صورة + سعر) ───
+  // ─── LAYER 5: تقييم ───
   for (const p of pool) {
     const text  = textSimilarity(sourceTokens, tokenize(p.title));
     const image = imageSimilarity(sourceImgSig, imageSignature(p.image));
@@ -101,7 +174,7 @@ async function handleSimilarByUrl(request, env) {
     p.isImageMatch = image >= 0.85;
   }
 
-  // ─── LAYER 6: ترتيب (صورة → نص → سعر) ───
+  // ─── LAYER 6: ترتيب ───
   pool.sort((a, b) => {
     if (a.isImageMatch !== b.isImageMatch) return a.isImageMatch ? -1 : 1;
     if (Math.abs(b.score.image - a.score.image) > 0.1) return b.score.image - a.score.image;
@@ -128,34 +201,31 @@ async function handleSimilarByUrl(request, env) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   SEARCH ENDPOINTS (بدون API key)
+   SEARCH — 3 endpoints
    ═══════════════════════════════════════════════════════ */
 
-/**
- * 1) نقطة JSON داخلية تستعملها صفحة البحث نفسها
- *    (ترجع JSON نظيف بسرعة)
- */
-async function searchViaJsonEndpoint(keyword) {
-  const params = new URLSearchParams({
-    SearchText: keyword,
-    page: "1",
-    g: "y",
-    SearchType: "product",
-  });
-  const url = `https://www.aliexpress.com/fn/search-pc/index?${params}`;
-  const data = await fetchJson(url);
-  if (!data) return [];
-  return extractFromJsonTree(data);
-}
-
-/**
- * 2) صفحة HTML عادية (wholesale)
- */
-async function searchViaHtmlPage(keyword) {
-  const enc = encodeURIComponent(keyword);
-  const url = `https://www.aliexpress.com/w/wholesale-${enc}.html`;
+async function searchAliExpress(url) {
   const html = await fetchHtml(url);
   if (!html) return [];
+  // كشف captcha
+  if (/punish|captcha|slider|_sec_|Please verify/i.test(html) && html.length < 20000) return [];
+  return extractFromHtml(html);
+}
+
+async function searchJsonEndpoint(keyword) {
+  const url = `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(keyword)}&page=1&g=y`;
+  const data = await fetchJson(url, "https://www.aliexpress.com/");
+  if (!data) return [];
+  const found = [];
+  collectProducts(data, found, 0);
+  return found;
+}
+
+async function searchMobile(keyword) {
+  const url = `https://m.aliexpress.com/search.htm?keywords=${encodeURIComponent(keyword)}`;
+  const html = await fetchHtml(url);
+  if (!html) return [];
+  if (/punish|captcha|slider/i.test(html) && html.length < 20000) return [];
   return extractFromHtml(html);
 }
 
@@ -165,18 +235,11 @@ async function searchViaHtmlPage(keyword) {
 
 async function fetchHtml(targetUrl) {
   try {
-    const res = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": ALI_COOKIE,
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-      },
-      redirect: "follow",
-    });
-    if (!res.ok) return null;
+    const res = await fetch(targetUrl, { headers: BROWSER_HEADERS, redirect: "follow" });
+    if (!res.ok) {
+      console.error(`fetchHtml ${res.status} for ${targetUrl}`);
+      return null;
+    }
     return await res.text();
   } catch (e) {
     console.error("fetchHtml:", e.message);
@@ -184,18 +247,11 @@ async function fetchHtml(targetUrl) {
   }
 }
 
-async function fetchJson(targetUrl) {
+async function fetchJson(targetUrl, referer) {
   try {
-    const res = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": ALI_COOKIE,
-        "Referer": "https://www.aliexpress.com/",
-      },
-      redirect: "follow",
-    });
+    const headers = { ...BROWSER_HEADERS, "Accept": "application/json, text/plain, */*" };
+    if (referer) headers["Referer"] = referer;
+    const res = await fetch(targetUrl, { headers, redirect: "follow" });
     if (!res.ok) return null;
     const text = await res.text();
     try { return JSON.parse(text); } catch { return null; }
@@ -209,25 +265,17 @@ async function fetchJson(targetUrl) {
    EXTRACTION
    ═══════════════════════════════════════════════════════ */
 
-function extractFromJsonTree(root) {
-  const found = [];
-  collectProducts(root, found, 0);
-  return found;
-}
-
 function extractFromHtml(html) {
-  // محاولة 1: JSON مدمج
   const json = findJsonAfter(html, "window._dida_config_._init_data_")
     || findJsonAfter(html, "_init_data_")
-    || findJsonAfter(html, "window._dida_config_")
     || findJsonAfter(html, "__INIT_DATA__")
-    || findJsonAfter(html, "window.__INITIAL_STATE__");
+    || findJsonAfter(html, "window.__INITIAL_STATE__")
+    || findJsonAfter(html, "window._dida_config_");
   if (json) {
     const found = [];
     collectProducts(json, found, 0);
     if (found.length > 0) return found;
   }
-  // محاولة 2: Regex على روابط المنتجات
   return extractFromHtmlLinks(html);
 }
 
@@ -243,9 +291,6 @@ function extractRecommendedFromPage(html) {
   return found;
 }
 
-/**
- * يجمع كل كائن فيه productId + عنوان
- */
 function collectProducts(obj, found, depth) {
   if (!obj || typeof obj !== "object" || depth > 15) return;
   if (Array.isArray(obj)) {
@@ -259,9 +304,7 @@ function collectProducts(obj, found, depth) {
     (typeof title === "string" && title.length > 3) ||
     (title && typeof title === "object" && (title.displayTitle || title.text));
 
-  if (pid && hasTitle) {
-    found.push(obj);
-  }
+  if (pid && hasTitle) found.push(obj);
 
   for (const k of Object.keys(obj)) {
     if (obj[k] && typeof obj[k] === "object") collectProducts(obj[k], found, depth + 1);
@@ -284,13 +327,11 @@ function extractFromHtmlLinks(html) {
 function normalizeProduct(p) {
   const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
 
-  // عنوان
   let title = "";
   const t = p.title || p.productTitle || p.name || p.subject;
   if (typeof t === "string") title = t;
   else if (t && typeof t === "object") title = t.displayTitle || t.text || t.value || "";
 
-  // صورة
   let img = "";
   const i = p.image || p.imageUrl || p.productImage || p.imagePath
          || p.mainImage || p.thumb || p.product_main_image_url;
@@ -298,7 +339,6 @@ function normalizeProduct(p) {
   else if (i && typeof i === "object") img = i.imgUrl || i.url || i.src || "";
   if (img.startsWith("//")) img = "https:" + img;
 
-  // سعر
   let price = "";
   if (typeof p.prices?.salePrice?.formattedPrice === "string") price = p.prices.salePrice.formattedPrice;
   else if (typeof p.prices?.salePrice?.value === "number")     price = String(p.prices.salePrice.value);
@@ -324,7 +364,7 @@ function normalizeProduct(p) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   PARSING
+   PARSING PRODUCT PAGE
    ═══════════════════════════════════════════════════════ */
 
 function parseProductPage(html, productId) {
@@ -359,7 +399,6 @@ function parseProductPage(html, productId) {
     const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     if (t) info.title = decodeHtml(t[1]).replace(/\s*[-|]\s*AliExpress.*$/i, "").trim();
   }
-
   return info;
 }
 
@@ -368,7 +407,7 @@ function walkForFields(obj, out, depth) {
   if (Array.isArray(obj)) { for (const it of obj) walkForFields(it, out, depth + 1); return; }
 
   if (!out.title && typeof obj.title === "string" && obj.title.length > 5 && obj.title.length < 400) out.title = obj.title;
-  if (!out.title && typeof obj.subject === "string" && obj.subject.length > 5 && obj.subject.length < 400) out.title = obj.subject;
+  if (!out.title && typeof obj.subject === "string" && obj.subject.length > 5 && obj.subject.length < 400) out.subject = obj.subject;
 
   if (!out.image && typeof obj.image === "string" && /^(https?:)?\/\//.test(obj.image)) out.image = obj.image;
   if (!out.image && typeof obj.imageUrl === "string") out.image = obj.imageUrl;
@@ -385,7 +424,7 @@ function walkForFields(obj, out, depth) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   JSON EXTRACTION (متوازن)
+   JSON HELPERS
    ═══════════════════════════════════════════════════════ */
 
 function extractBalancedJson(text, startIdx) {
@@ -448,7 +487,7 @@ function extractProductId(input) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   TEXT SIMILARITY
+   TEXT / IMAGE / PRICE SIMILARITY
    ═══════════════════════════════════════════════════════ */
 
 const STOP_WORDS = new Set([
@@ -474,18 +513,10 @@ function buildKeywordVariants(title) {
   const tokens = tokenize(title);
   if (tokens.length === 0) return [];
   const variants = new Set();
-
-  // صيغ متدرجة
   if (tokens.length >= 2) variants.add(tokens.slice(0, 2).join(" "));
   if (tokens.length >= 3) variants.add(tokens.slice(0, 3).join(" "));
   if (tokens.length >= 4) variants.add(tokens.slice(0, 4).join(" "));
   if (tokens.length >= 6) variants.add(tokens.slice(0, 6).join(" "));
-
-  // صيغة بدون كلمات شائعة (أول 3 كلمات + آخر 2)
-  if (tokens.length >= 5) {
-    variants.add(tokens[0] + " " + tokens[1] + " " + tokens[2]);
-  }
-
   return Array.from(variants).filter(v => v.length > 2).slice(0, 5);
 }
 
@@ -499,40 +530,20 @@ function textSimilarity(aTokens, bTokens) {
   return union === 0 ? 0 : inter / union;
 }
 
-/* ═══════════════════════════════════════════════════════
-   IMAGE SIMILARITY
-   ═══════════════════════════════════════════════════════ */
-
 function imageSignature(url) {
   if (!url || typeof url !== "string") return null;
   try {
     let u = url.trim();
     if (u.startsWith("//")) u = "https:" + u;
-
     const kf = u.match(/\/kf\/([A-Za-z0-9]{8,})/);
     if (kf) {
       const id = kf[1].toUpperCase();
-      return {
-        id,
-        p6:  id.slice(0, 6),
-        p8:  id.slice(0, 8),
-        p10: id.slice(0, 10),
-        p12: id.slice(0, 12),
-        p16: id.slice(0, 16),
-      };
+      return { id, p6: id.slice(0,6), p8: id.slice(0,8), p10: id.slice(0,10), p12: id.slice(0,12), p16: id.slice(0,16) };
     }
-
     const alt = u.match(/\/([A-Za-z0-9]{15,})[_\.]/);
     if (alt) {
       const id = alt[1].toUpperCase();
-      return {
-        id,
-        p6:  id.slice(0, 6),
-        p8:  id.slice(0, 8),
-        p10: id.slice(0, 10),
-        p12: id.slice(0, 12),
-        p16: id.slice(0, 16),
-      };
+      return { id, p6: id.slice(0,6), p8: id.slice(0,8), p10: id.slice(0,10), p12: id.slice(0,12), p16: id.slice(0,16) };
     }
     return null;
   } catch (_) { return null; }
@@ -565,7 +576,6 @@ function imageSimilarity(a, b) {
   if (a.p10.length >= 10 && a.p10 === b.p10) return 0.65;
   if (a.p8.length  >= 8  && a.p8  === b.p8)  return 0.45;
   if (a.p6.length  >= 6  && a.p6  === b.p6)  return 0.22;
-
   const maxLen = Math.max(a.id.length, b.id.length);
   if (maxLen > 0) {
     const dist = levenshtein(a.id, b.id);
