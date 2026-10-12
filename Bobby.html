@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker (v13 ULTRA FAST)
-   ⚡ ScrapingAnt + استخراج قوي (JSON + Regex)
-   🎯 طلب واحد + استخراج كل شيء من نفس الصفحة
+   Smart Shopper — Cloudflare Worker (v14 ULTRA FAST)
+   ⚡ ScrapingAnt + استخراج قوي متعدد الأنماط
+   🎯 طلب واحد + استخراج 100+ منتج من نفس الصفحة
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api.scrapingant.com/v2/general";
@@ -14,10 +14,10 @@ export default {
     try {
       if (url.pathname === "/health") {
         return json({
-          ok: true, v: 13,
+          ok: true, v: 14,
           hasKey: !!env.SCRAPINGANT_API_KEY,
           provider: "scrapingant",
-          mode: "ultra-fast"
+          mode: "ultra-fast+wide-extract"
         }, env);
       }
 
@@ -45,6 +45,7 @@ export default {
             hasCaptcha: /punish|captcha|slider|_sec_|verify/i.test(txt.slice(0, 3000)),
             hasInitData: /__INIT_DATA__|_dida_config_|window\.runParams/.test(txt),
             extractedCount: extracted.length,
+            withPrice: extracted.filter(p => p.salePrice || p.price).length,
             first3: extracted.slice(0, 3),
           }, env);
         } catch (e) {
@@ -128,7 +129,7 @@ async function handleSimilarByUrl(request, env) {
   const productId = extractProductId(url);
   if (!productId) return json({ ok: false, error: "Invalid URL" }, env, 400);
 
-  console.log(`[Worker v13] 🚀 Single fetch: product page`);
+  console.log(`[Worker v14] 🚀 Single fetch: product page`);
   const productHtml = await fetchViaScrapingAnt(
     `https://www.aliexpress.com/item/${productId}.html`, env
   );
@@ -150,11 +151,11 @@ async function handleSimilarByUrl(request, env) {
   const sourcePrice = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
 
   const allFromPage = extractFromHtml(productHtml);
-  console.log(`[Worker v13] From page: ${allFromPage.length}`);
+  console.log(`[Worker v14] From page: ${allFromPage.length}`);
 
   let extraProducts = [];
   if (allFromPage.length < 15) {
-    console.log(`[Worker v13] Only ${allFromPage.length} — extra search`);
+    console.log(`[Worker v14] Only ${allFromPage.length} — extra search`);
     const keywords = buildKeywordVariants(source.title).slice(0, 1);
     if (keywords.length) {
       const searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keywords[0])}.html`;
@@ -220,7 +221,7 @@ async function handleSimilarByUrl(request, env) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   /api/deep-search
+   /api/deep-search — متوافق مع content.js
    ═══════════════════════════════════════════════════════ */
 async function handleDeepSearch(request, env) {
   const t0 = Date.now();
@@ -231,7 +232,8 @@ async function handleDeepSearch(request, env) {
     return json({ ok: false, error: "queries array required" }, env, 400);
   }
 
-  const cleanQueries = queries.slice(0, 2);
+  const cleanQueries = queries.slice(0, 3);
+  console.log(`[Worker v14] deep-search: ${cleanQueries.length} queries`);
 
   const promises = cleanQueries.map(async (q) => {
     const keyword = (typeof q === "string" ? q : q.keywords || "").trim();
@@ -245,7 +247,7 @@ async function handleDeepSearch(request, env) {
 
       const raw = extractFromHtml(html);
       const products = raw.map(normalizeToAffiliateFormat).filter(p => p.product_id && p.product_title);
-      console.log(`[Worker v13] Query "${keyword}": ${products.length} products`);
+      console.log(`[Worker v14] Query "${keyword}": ${products.length}`);
       return { name, keyword, count: products.length, products };
     } catch (e) {
       return { name, keyword, count: 0, products: [], error: e.message };
@@ -303,6 +305,8 @@ function normalizeToAffiliateFormat(raw) {
   else if (typeof raw.salePrice === "number" || typeof raw.salePrice === "string") salePrice = String(raw.salePrice);
   else if (typeof raw.price === "number" || typeof raw.price === "string") salePrice = String(raw.price);
 
+  salePrice = String(salePrice).replace(/[^\d.]/g, "");
+
   let url = raw.productDetailUrl || raw.url || (id ? `https://www.aliexpress.com/item/${id}.html` : "");
   if (url.startsWith("//")) url = "https:" + url;
 
@@ -321,10 +325,10 @@ function normalizeToAffiliateFormat(raw) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   ⭐ استخراج قوي — JSON + Regex
+   ⭐ استخراج قوي — JSON + Regex متعدد
    ═══════════════════════════════════════════════════════ */
 function extractFromHtml(html) {
-  // 1) JSON
+  // 1) محاولة JSON
   const found = [];
   const markers = [
     "window._dida_config_._init_data_",
@@ -341,12 +345,12 @@ function extractFromHtml(html) {
     const json = findJsonAfter(html, marker);
     if (json) {
       collectProducts(json, found, 0);
-      if (found.length >= 20) break;
+      if (found.length >= 30) break;
     }
   }
 
   const uniqueFound = dedupeById(found);
-  if (uniqueFound.length >= 10) {
+  if (uniqueFound.length >= 20) {
     console.log(`[extractFromHtml] JSON: ${uniqueFound.length}`);
     return uniqueFound;
   }
@@ -360,79 +364,99 @@ function extractFromHtml(html) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   استخراج مباشر من HTML بـ Regex
+   استخراج Regex موسّع — كل أنماط الروابط
    ═══════════════════════════════════════════════════════ */
 function extractProductsByRegex(html) {
   const products = [];
   const seen = new Set();
-  const linkRe = /\/item\/(\d{6,})\.html/g;
-  let m;
 
-  while ((m = linkRe.exec(html)) !== null) {
-    const id = m[1];
-    if (seen.has(id)) continue;
-    seen.add(id);
+  const linkPatterns = [
+    /\/item\/(\d{6,})\.html/g,
+    /\/i\/(\d{6,})\.html/g,
+    /"productId"\s*:\s*"?(\d{6,})"?/g,
+    /"product_id"\s*:\s*"?(\d{6,})"?/g,
+    /"itemId"\s*:\s*"?(\d{6,})"?/g,
+  ];
 
-    const start = Math.max(0, m.index - 3000);
-    const end = Math.min(html.length, m.index + 3000);
-    const context = html.slice(start, end);
+  for (const re of linkPatterns) {
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const id = m[1];
+      if (seen.has(id)) continue;
+      seen.add(id);
 
-    // عنوان
-    let title = "";
-    const t1 = context.match(/"title"\s*:\s*"([^"]{8,300}?)"/);
-    if (t1 && t1[1]) title = t1[1];
-    if (!title) {
-      const t2 = context.match(/"displayTitle"\s*:\s*"([^"]{8,300}?)"/);
-      if (t2 && t2[1]) title = t2[1];
+      const start = Math.max(0, m.index - 5000);
+      const end = Math.min(html.length, m.index + 5000);
+      const context = html.slice(start, end);
+
+      // عنوان
+      let title = "";
+      const titlePatterns = [
+        /"title"\s*:\s*"([^"]{8,300}?)"/,
+        /"displayTitle"\s*:\s*"([^"]{8,300}?)"/,
+        /"productTitle"\s*:\s*"([^"]{8,300}?)"/,
+        /"subject"\s*:\s*"([^"]{8,300}?)"/,
+        /alt="([^"]{8,300}?)"/,
+      ];
+      for (const t of titlePatterns) {
+        const tm = context.match(t);
+        if (tm && tm[1] && tm[1].length > 5) { title = tm[1]; break; }
+      }
+      if (!title) continue;
+
+      title = title
+        .replace(/\\"/g, '"')
+        .replace(/\\u[\da-f]{4}/gi, x => String.fromCharCode(parseInt(x.slice(2), 16)))
+        .replace(/\\n/g, " ")
+        .replace(/\\t/g, " ")
+        .replace(/\\/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (title.length < 5) continue;
+
+      // صورة
+      let img = "";
+      const imgPatterns = [
+        /"(?:image|imageUrl|mainImage|productImage|imagePath)"\s*:\s*"([^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/i,
+        /(https?:\/\/[^"'\s]+?\.(?:jpg|jpeg|png|webp))/i,
+      ];
+      for (const ip of imgPatterns) {
+        const im = context.match(ip);
+        if (im && im[1]) { img = im[1]; break; }
+      }
+      img = img.replace(/\\u002F/gi, "/").replace(/\\\//g, "/");
+      if (img.startsWith("//")) img = "https:" + img;
+
+      // سعر
+      let price = "";
+      const pricePatterns = [
+        /"salePrice"\s*:\s*\{\s*"formattedPrice"\s*:\s*"([^"]+)"/,
+        /"salePrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
+        /"formattedPrice"\s*:\s*"([^"]+)"/,
+        /"formatedPrice"\s*:\s*"([^"]+)"/,
+        /"price"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
+        /"price"\s*:\s*"?([\d.]+(?:\.[\d]{1,2})?)"?/,
+        /"minPrice"\s*:\s*([\d.]+)/,
+      ];
+      for (const pp of pricePatterns) {
+        const pm = context.match(pp);
+        if (pm && pm[1]) { price = String(pm[1]).replace(/[^\d.]/g, ""); break; }
+      }
+
+      products.push({
+        productId: id,
+        product_id: id,
+        title: title,
+        productTitle: title,
+        image: img,
+        imageUrl: img,
+        salePrice: price,
+        price: price,
+      });
+
+      if (products.length >= 200) break;
     }
-    if (!title) {
-      const t3 = context.match(/alt="([^"]{8,300}?)"/);
-      if (t3 && t3[1]) title = t3[1];
-    }
-    if (!title) continue;
-
-    // تنظيف العنوان
-    title = title
-      .replace(/\\"/g, '"')
-      .replace(/\\u[\da-f]{4}/gi, x => String.fromCharCode(parseInt(x.slice(2), 16)))
-      .replace(/\\n/g, " ")
-      .replace(/\\t/g, " ")
-      .replace(/\\/g, "")
-      .trim();
-    if (title.length < 5) continue;
-
-    // صورة
-    let img = "";
-    const i1 = context.match(/"(?:image|imageUrl|mainImage|productImage)"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i);
-    if (i1 && i1[1]) img = i1[1];
-    if (!img) {
-      const i2 = context.match(/https?:\/\/[^"'\s]+?\.(?:jpg|jpeg|png|webp)/i);
-      if (i2) img = i2[0];
-    }
-    img = img.replace(/\\u002F/gi, "/").replace(/\\\//g, "/");
-    if (img.startsWith("//")) img = "https:" + img;
-
-    // سعر
-    let price = "";
-    const p1 = context.match(/"(?:salePrice|price|formatedPrice|formattedPrice)"\s*:\s*"?([\d.]+)/);
-    if (p1 && p1[1]) price = p1[1];
-    if (!price) {
-      const p2 = context.match(/"value"\s*:\s*([\d.]+)/);
-      if (p2 && p2[1]) price = p2[1];
-    }
-
-    products.push({
-      productId: id,
-      product_id: id,
-      title: title,
-      productTitle: title,
-      image: img,
-      imageUrl: img,
-      salePrice: price,
-      price: price,
-    });
-
-    if (products.length >= 150) break;
+    if (products.length >= 200) break;
   }
 
   return products;
@@ -473,6 +497,9 @@ function collectProducts(obj, found, depth) {
   }
 }
 
+/* ═══════════════════════════════════════════════════════
+   normalizeProduct (محسّن — مع تنظيف السعر)
+   ═══════════════════════════════════════════════════════ */
 function normalizeProduct(p) {
   const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
   let title = "";
@@ -491,6 +518,8 @@ function normalizeProduct(p) {
   else if (typeof p.prices?.salePrice?.value === "number") price = String(p.prices.salePrice.value);
   else if (typeof p.salePrice === "number" || typeof p.salePrice === "string") price = String(p.salePrice);
   else if (typeof p.price === "number" || typeof p.price === "string") price = String(p.price);
+
+  price = String(price).replace(/[^\d.]/g, "");
 
   let url = p.productDetailUrl || p.url || (id ? `https://www.aliexpress.com/item/${id}.html` : "");
   if (url.startsWith("//")) url = "https:" + url;
