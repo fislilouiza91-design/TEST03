@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker Proxy (v10)
-   URL → داخليًا → طبقات بحث (نص + كلمات + صورة محسّن)
+   Smart Shopper — Cloudflare Worker Proxy (v11)
+   محصولات مُقترحة + بحث متعدد + مطابقة صورة محسّنة
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api-sg.aliexpress.com/sync";
@@ -12,7 +12,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders(env) });
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper-proxy", version: 10 }, env);
+      if (url.pathname === "/health") return json({ ok: true, service: "smart-shopper-proxy", version: 11 }, env);
       if (url.pathname === "/api/search" && request.method === "POST") return await handleSearch(request, env);
       if (url.pathname === "/api/deep-search" && request.method === "POST") return await handleDeepSearch(request, env);
       if (url.pathname === "/api/link" && request.method === "POST") return await handleLink(request, env);
@@ -25,56 +25,65 @@ export default {
 };
 
 /* ═══════════════════════════════════════════════════════
-   ⭐ MAIN: Similar products by URL — Multi-Layer Search
-   POST /api/similar-by-url
-   body: { url: "...", maxResults?: 60 }
+   ⭐ MAIN: Similar by URL (v11) — متعدد المصادر
    ═══════════════════════════════════════════════════════ */
 async function handleSimilarByUrl(request, env) {
   const body = await request.json();
-  const { url, maxResults = 60 } = body || {};
+  const { url, maxResults = 80 } = body || {};
   if (!url) return json({ ok: false, error: "url required" }, env, 400);
 
   const productId = extractProductId(url);
   if (!productId) return json({ ok: false, error: "Invalid AliExpress URL" }, env, 400);
 
-  // ─── LAYER 1: جلب صفحة المنتج + استخراج بياناته ───
+  // ═══ LAYER 1: صفحة المنتج ═══
   const productHtml = await fetchHtml(`https://www.aliexpress.com/item/${productId}.html`);
-  if (!productHtml) return json({ ok: false, error: "Failed to fetch product page (blocked or 404)" }, env, 502);
+  if (!productHtml) return json({ ok: false, error: "Failed to fetch product page" }, env, 502);
 
   const source = parseProductPage(productHtml, productId);
   const sourceTokens = tokenize(source.title);
   const sourceImgSig = imageSignature(source.image);
   const sourcePrice = parseFloat(String(source.price).replace(/[^\d.]/g, "")) || 0;
 
-  // ─── LAYER 2: توليد صيغ كلمات مفتاحية متعددة ───
-  const keywordVariants = buildKeywordVariants(source.title, source.category);
-  if (keywordVariants.length === 0) {
-    return json({ ok: false, error: "Could not extract keywords from title", source }, env, 422);
+  // ═══ LAYER 2: ⭐ المنتجات المُقترحة من صفحة المنتج نفسها ═══
+  const recommended = extractRecommendedFromPage(productHtml);
+
+  // ═══ LAYER 3: بحث متعدد الأنماط ═══
+  const keywords = buildKeywordVariants(source.title, source.category);
+  const searchTasks = [];
+  for (const kw of keywords) {
+    const enc = encodeURIComponent(kw);
+    searchTasks.push(
+      fetchHtml(`https://www.aliexpress.com/w/wholesale-${enc}.html`)
+        .then(h => h ? parseSearchPage(h) : []).catch(() => [])
+    );
+    searchTasks.push(
+      fetchHtml(`https://www.aliexpress.com/wholesale?SearchText=${enc}&g=y`)
+        .then(h => h ? parseSearchPage(h) : []).catch(() => [])
+    );
   }
+  const searchResults = await Promise.all(searchTasks);
 
-  // ─── LAYER 3: بحث متوازٍ بكل صيغة ───
-  const searchResponses = await Promise.all(
-    keywordVariants.map(async (kw) => {
-      const html = await fetchHtml(`https://www.aliexpress.com/w/wholesale-${encodeURIComponent(kw)}.html`);
-      return { kw, products: html ? parseSearchPage(html) : [] };
-    })
-  );
-
-  // ─── LAYER 4: دمج + إزالة التكرار (بدون المنتج المصدر) ───
+  // ═══ LAYER 4: دمج ═══
   const seen = new Set([String(productId)]);
   const pool = [];
-  const perKeyword = {};
-  for (const r of searchResponses) {
-    perKeyword[r.kw] = r.products.length;
-    for (const p of r.products) {
-      const id = String(p.product_id);
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      pool.push(p);
-    }
-  }
+  const src = { recommended: 0, keyword: 0 };
 
-  // ─── LAYER 5: تقييم كل منتج (نص + صورة + سعر) ───
+  const pushProduct = (raw) => {
+    const norm = normalizeProduct(raw);
+    if (!norm.product_id || seen.has(norm.product_id)) return;
+    seen.add(norm.product_id);
+    pool.push(norm);
+  };
+
+  for (const p of recommended) pushProduct(p);
+  src.recommended = pool.length;
+
+  for (const list of searchResults) {
+    for (const p of list) pushProduct(p);
+  }
+  src.keyword = pool.length - src.recommended;
+
+  // ═══ LAYER 5: تقييم ═══
   for (const p of pool) {
     const text  = textSimilarity(sourceTokens, tokenize(p.title));
     const image = imageSimilarity(sourceImgSig, imageSignature(p.image));
@@ -88,22 +97,23 @@ async function handleSimilarByUrl(request, env) {
     p.isImageMatch = image >= 0.85;
   }
 
-  // ─── LAYER 6: ترتيب نهائي (صورة → نص → سعر) + إرجاع ───
+  // ═══ LAYER 6: ترتيب ═══
   pool.sort((a, b) => {
     if (a.isImageMatch !== b.isImageMatch) return a.isImageMatch ? -1 : 1;
-    if (Math.abs(b.score.image - a.score.image) > 0.1) return b.score.image - a.score.image;
     if (Math.abs(b.score.text - a.score.text) > 0.1) return b.score.text - a.score.text;
-    return b.score.total - a.score.total;
+    if (Math.abs(b.score.image - a.score.image) > 0.1) return b.score.image - a.score.image;
+    return a.price - b.price;
   });
+
   const top = pool.slice(0, maxResults);
 
   return json({
     ok: true,
     data: {
       source: { product_id: productId, ...source },
-      keywords: keywordVariants,
+      keywords,
       stats: {
-        perKeyword,
+        ...src,
         candidates: pool.length,
         returned: top.length,
         imageMatches: top.filter(p => p.isImageMatch).length,
@@ -114,7 +124,22 @@ async function handleSimilarByUrl(request, env) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   LAYER HELPERS — Keywords / Tokens / Similarity
+   ⭐ استخراج المنتجات المُقترحة من صفحة المنتج
+   ═══════════════════════════════════════════════════════ */
+function extractRecommendedFromPage(html) {
+  const json = findJsonAfter(html, "window._dida_config_._init_data_")
+    || findJsonAfter(html, "_init_data_")
+    || findJsonAfter(html, "window.runParams")
+    || findJsonAfter(html, "window.__INITIAL_STATE__")
+    || findJsonAfter(html, "__NEXT_DATA__");
+  if (!json) return [];
+  const found = [];
+  collectProducts(json, found, 0);
+  return found;
+}
+
+/* ═══════════════════════════════════════════════════════
+   HELPERS — Keywords / Similarity
    ═══════════════════════════════════════════════════════ */
 
 const STOP_WORDS = new Set([
@@ -124,7 +149,7 @@ const STOP_WORDS = new Set([
   "this","that","you","are","but","not","all","can","has","had","was","were","will","would",
   "there","their","they","them","its","into","over","than","then","also","more","most",
   "one","two","three","four","five","set","kit","pack","pcs","piece","pieces","cm","mm",
-  "inch","inches","g","kg","ml","l","usb","led","diy"
+  "inch","inches","g","kg","ml","l","diy"
 ]);
 
 function tokenize(text) {
@@ -139,17 +164,13 @@ function tokenize(text) {
 function buildKeywordVariants(title, category) {
   const tokens = tokenize(title);
   if (tokens.length === 0) return [];
-
   const variants = new Set();
   if (tokens.length >= 2) variants.add(tokens.slice(0, 2).join(" "));
   if (tokens.length >= 3) variants.add(tokens.slice(0, 3).join(" "));
   if (tokens.length >= 5) variants.add(tokens.slice(0, 5).join(" "));
-  if (category && tokens.length >= 2) {
-    variants.add(tokens.slice(0, 3).join(" ") + " " + category);
-  }
+  if (category && tokens.length >= 2) variants.add(tokens.slice(0, 3).join(" ") + " " + category);
   variants.add(tokens.slice(0, 6).join(" "));
-
-  return Array.from(variants).filter(v => v.length > 2).slice(0, 4);
+  return Array.from(variants).filter(v => v.length > 2).slice(0, 5);
 }
 
 function textSimilarity(aTokens, bTokens) {
@@ -163,7 +184,7 @@ function textSimilarity(aTokens, bTokens) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   IMAGE MATCHING — v10 (محسّن)
+   IMAGE MATCHING — v11 (مرن + دقيق)
    ═══════════════════════════════════════════════════════ */
 
 function imageSignature(url) {
@@ -172,29 +193,31 @@ function imageSignature(url) {
     let u = url.trim();
     if (u.startsWith("//")) u = "https:" + u;
 
-    const kf = u.match(/\/kf\/([A-Za-z0-9]+?)(?:[_\.]|$)/);
-    if (kf && kf[1] && kf[1].length >= 8) {
+    // ⭐ النمط الأساسي: /kf/<HASH> (حتى لو فيه لاحقة حجم)
+    const kf = u.match(/\/kf\/([A-Za-z0-9]{8,})/);
+    if (kf) {
       const id = kf[1].toUpperCase();
       return {
         id,
         p6:  id.slice(0, 6),
         p8:  id.slice(0, 8),
+        p10: id.slice(0, 10),
         p12: id.slice(0, 12),
         p16: id.slice(0, 16),
-        len: id.length,
       };
     }
 
+    // نمط بديل
     const alt = u.match(/\/([A-Za-z0-9]{15,})[_\.]/);
-    if (alt && alt[1]) {
+    if (alt) {
       const id = alt[1].toUpperCase();
       return {
         id,
         p6:  id.slice(0, 6),
         p8:  id.slice(0, 8),
+        p10: id.slice(0, 10),
         p12: id.slice(0, 12),
         p16: id.slice(0, 16),
-        len: id.length,
       };
     }
     return null;
@@ -207,8 +230,7 @@ function levenshtein(a, b) {
   if (!b) return a.length;
   const m = a.length, n = b.length;
   if (m > 100 || n > 100) return Math.abs(m - n);
-  let prev = new Array(n + 1);
-  let curr = new Array(n + 1);
+  let prev = new Array(n + 1), curr = new Array(n + 1);
   for (let j = 0; j <= n; j++) prev[j] = j;
   for (let i = 1; i <= m; i++) {
     curr[0] = i;
@@ -224,20 +246,33 @@ function levenshtein(a, b) {
 function imageSimilarity(a, b) {
   if (!a || !b) return 0;
 
+  // 1) تطابق تام (نفس الصورة بنفس الحجم)
   if (a.id === b.id) return 1.0;
-  if (a.p16 && b.p16 && a.p16 === b.p16 && a.p16.length === 16) return 0.95;
-  if (a.p12 && b.p12 && a.p12 === b.p12 && a.p12.length === 12) return 0.85;
-  if (a.p8 && b.p8 && a.p8 === b.p8 && a.p8.length === 8) return 0.68;
-  if (a.p6 && b.p6 && a.p6 === b.p6 && a.p6.length === 6) return 0.42;
 
+  // 2) تطابق 16 حرف (نفس الصورة بحجم مختلف)
+  if (a.p16.length >= 16 && a.p16 === b.p16) return 0.95;
+
+  // 3) تطابق 12 حرف
+  if (a.p12.length >= 12 && a.p12 === b.p12) return 0.82;
+
+  // 4) تطابق 10 أحرف
+  if (a.p10.length >= 10 && a.p10 === b.p10) return 0.65;
+
+  // 5) تطابق 8 أحرف
+  if (a.p8.length >= 8 && a.p8 === b.p8) return 0.45;
+
+  // 6) تطابق 6 أحرف
+  if (a.p6.length >= 6 && a.p6 === b.p6) return 0.22;
+
+  // 7) Levenshtein — فروق صغيرة جدًا
   const maxLen = Math.max(a.id.length, b.id.length);
   if (maxLen > 0) {
     const dist = levenshtein(a.id, b.id);
     const ratio = dist / maxLen;
-    if (ratio <= 0.06) return 0.85;
-    if (ratio <= 0.12) return 0.65;
-    if (ratio <= 0.20) return 0.40;
-    if (ratio <= 0.30) return 0.20;
+    if (ratio <= 0.04) return 0.92;
+    if (ratio <= 0.10) return 0.70;
+    if (ratio <= 0.18) return 0.40;
+    if (ratio <= 0.28) return 0.18;
   }
   return 0;
 }
@@ -251,7 +286,7 @@ function priceSimilarity(a, b) {
 function round3(n) { return Math.round(n * 1000) / 1000; }
 
 /* ═══════════════════════════════════════════════════════
-   URL / FETCH / JSON EXTRACTION
+   URL / FETCH / JSON
    ═══════════════════════════════════════════════════════ */
 
 function extractProductId(input) {
@@ -273,7 +308,6 @@ async function fetchHtml(targetUrl) {
         "Accept-Language": "en-US,en;q=0.9",
         "Cookie": ALI_COOKIE,
         "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
         "Upgrade-Insecure-Requests": "1",
       },
       redirect: "follow",
@@ -314,7 +348,7 @@ function findJsonAfter(html, marker) {
   if (idx === -1) return null;
   const braceIdx = html.indexOf("{", idx + marker.length);
   if (braceIdx === -1) return null;
-  const slice = html.slice(braceIdx, braceIdx + 3_000_000);
+  const slice = html.slice(braceIdx, braceIdx + 5_000_000);
   return extractBalancedJson(slice, 0);
 }
 
@@ -367,7 +401,6 @@ function parseProductPage(html, productId) {
     const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     if (t) info.title = decodeHtml(t[1]).replace(/\s*[-|]\s*AliExpress.*$/i, "").trim();
   }
-
   return info;
 }
 
@@ -404,23 +437,30 @@ function parseSearchPage(html) {
   const json = findJsonAfter(html, "window._dida_config_._init_data_")
     || findJsonAfter(html, "_init_data_")
     || findJsonAfter(html, "window._dida_config_");
-
   if (json) {
     const found = [];
     collectProducts(json, found, 0);
     items = found;
   }
   if (items.length === 0) items = parseSearchHtmlFallback(html);
-  return items.map(normalizeProduct).filter(p => p.product_id);
+  return items;
 }
 
 function collectProducts(obj, found, depth) {
   if (!obj || typeof obj !== "object" || depth > 15) return;
-  if (Array.isArray(obj)) { for (const it of obj) collectProducts(it, found, depth + 1); return; }
+  if (Array.isArray(obj)) {
+    for (const it of obj) collectProducts(it, found, depth + 1);
+    return;
+  }
 
   const pid = obj.productId || obj.product_id || obj.itemId || obj.item_id;
-  const title = obj.title || obj.productTitle || obj.name;
-  if (pid && title) { found.push(obj); return; }
+  const title = obj.title || obj.productTitle || obj.name || obj.subject;
+  const hasTitle = (typeof title === "string" && title.length > 3) ||
+                   (title && typeof title === "object" && (title.displayTitle || title.text));
+
+  if (pid && hasTitle) {
+    found.push(obj);
+  }
 
   for (const k of Object.keys(obj)) {
     if (obj[k] && typeof obj[k] === "object") collectProducts(obj[k], found, depth + 1);
@@ -429,19 +469,26 @@ function collectProducts(obj, found, depth) {
 
 function normalizeProduct(p) {
   const id = String(p.productId || p.product_id || p.itemId || p.item_id || "");
-  let img = p.image
-         || p.imageUrl
-         || p.productImage
-         || p.imagePath
-         || p.product_main_image_url
-         || p.mainImage
-         || p.thumb
-         || "";
-  if (img && img.startsWith("//")) img = "https:" + img;
 
+  // ⭐ عنوان (نص أو كائن)
+  let title = "";
+  const t = p.title || p.productTitle || p.name || p.subject;
+  if (typeof t === "string") title = t;
+  else if (t && typeof t === "object") title = t.displayTitle || t.text || t.value || "";
+
+  // ⭐ صورة (نص أو كائن)
+  let img = "";
+  const i = p.image || p.imageUrl || p.productImage || p.imagePath
+         || p.mainImage || p.thumb || p.product_main_image_url;
+  if (typeof i === "string") img = i;
+  else if (i && typeof i === "object") img = i.imgUrl || i.url || i.src || "";
+  if (img.startsWith("//")) img = "https:" + img;
+
+  // ⭐ سعر
   let price = "";
   if (typeof p.prices?.salePrice?.formattedPrice === "string") price = p.prices.salePrice.formattedPrice;
   else if (typeof p.prices?.salePrice?.value === "number")     price = String(p.prices.salePrice.value);
+  else if (typeof p.prices?.salePrice?.formattedActivityPrice === "string") price = p.prices.salePrice.formattedActivityPrice;
   else if (typeof p.salePrice === "string" || typeof p.salePrice === "number") price = String(p.salePrice);
   else if (typeof p.price === "string" || typeof p.price === "number")         price = String(p.price);
 
@@ -452,7 +499,7 @@ function normalizeProduct(p) {
 
   return {
     product_id: id,
-    title: p.title || p.productTitle || p.name || "",
+    title,
     image: img,
     price,
     currency,
@@ -476,7 +523,7 @@ function parseSearchHtmlFallback(html) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   (Routes القديمة كما هي — Affiliate API)
+   Affiliate API routes (كما هي)
    ═══════════════════════════════════════════════════════ */
 
 async function handleSearch(request, env) {
