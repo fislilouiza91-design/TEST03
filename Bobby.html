@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v45 MEGA — ORIGINAL)
+   Smart Shopper — Content Script (v45 MEGA)
    5-tier progressive filter + Coupon detection + Accurate price.
    ═══════════════════════════════════════════════════════ */
 
@@ -17,6 +17,8 @@
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
+
+  // ⭐ رمز البلد للشحن - غيّره حسب بلدك (DZ، SA، EG، MA، US...)
   const SHIP_TO_COUNTRY = "DZ";
 
   let currentProduct = null;
@@ -334,8 +336,10 @@
     return payload.data;
   }
 
+  // ⭐ فحص الكوبونات للمنتجات
   async function fetchCouponsForProducts(productIds) {
     if (!productIds || !productIds.length) return {};
+
     try {
       const res = await fetch(`${WORKER_URL}/api/coupon-check`, {
         method: "POST",
@@ -346,6 +350,7 @@
           country: SHIP_TO_COUNTRY
         }),
       });
+
       if (res.ok) {
         const data = await res.json();
         if (data.ok) return data.data.coupons || {};
@@ -356,6 +361,7 @@
     return {};
   }
 
+  // ⭐ جلب السعر الدقيق عند النقر
   async function fetchAccuratePriceAndOpen(productId, fallbackUrl, cardElement) {
     if (cardElement) {
       cardElement.style.opacity = "0.6";
@@ -411,11 +417,8 @@
     }
   }
 
-  /* ═══════════════════════════════════════════════════════
-     scoreProduct — v45 الأصلي + إصلاح السعر الفاضي
-     ═══════════════════════════════════════════════════════ */
   function scoreProduct(p, ctx) {
-    let price = parseFloat(p.target_sale_price || p.sale_price || 0);
+    const price = parseFloat(p.target_sale_price || p.sale_price || 0);
     const oldP = parseFloat(p.target_original_price || p.original_price || 0);
     const rating = parseFloat(String(p.evaluate_rate || "0").replace("%", "")) / 20;
     const title = p.product_title || p.product_name || "";
@@ -423,9 +426,6 @@
     const store = (p.shop_name || p.store_name || "").trim();
     const img = p.product_main_image_url || "";
     const imageHash = extractImageHash(img);
-
-    // ⭐ الإصلاح الوحيد: إذا السعر فاضي، نستخدم السعر المرجعي مؤقتًا
-    if (!price || isNaN(price)) price = ctx.referencePrice || 0;
 
     if (!id || !price || !title) return null;
     if (id === ctx.productId) return null;
@@ -616,8 +616,6 @@
 
       const data = await fetchMegaSearch(queries);
       const raw = data?.products || [];
-      console.log(`[Smart Shopper] Raw: ${raw.length}`);
-      console.log(`[Smart Shopper] Worker stats:`, data?.stats);
 
       const ctx = {
         productId: currentProduct.id,
@@ -636,11 +634,10 @@
         if (s) scored.push(s);
       }
 
-      console.log(`[Smart Shopper] Scored: ${scored.length}`);
-
       const picked = pickProgressive(scored, ctx);
       sellers = rankProducts(picked);
 
+      // ⭐ فحص الكوبونات
       try {
         const productIds = sellers.map(s => s._id).filter(Boolean);
         const couponsMap = await fetchCouponsForProducts(productIds);
@@ -656,8 +653,6 @@
       } catch (e) {
         console.error("[Smart Shopper] Coupon merge error:", e);
       }
-
-      console.log(`[Smart Shopper] ✅ FINAL: ${sellers.length}`);
 
       updateSourceLabel(sellers.length > 0 ? "smart" : "none");
       renderList();
@@ -761,8 +756,11 @@
       else if (activeFilter === "best" && rank === 1) badge = `<span class="ss-badge ss-badge-best">${T("bestValueTag")}</span>`;
       else if (isCheap) badge = `<span class="ss-badge ss-badge-cheap">${T("bestPrice")}</span>`;
 
+      // ⭐ شارة الكوبون
       const couponClass = s.hasCoupon ? "ss-has-coupon" : "";
-      const couponBadge = s.hasCoupon ? `<span class="ss-badge ss-badge-coupon">🎟️ COUPON</span>` : "";
+      const couponBadge = s.hasCoupon
+        ? `<span class="ss-badge ss-badge-coupon">🎟️ COUPON</span>`
+        : "";
       const couponHint = s.hasCoupon && s.couponInfo?.discount
         ? `<span class="ss-coupon-hint">🎁 ${esc(s.couponInfo.discount)}</span>`
         : (s.hasCoupon ? `<span class="ss-coupon-hint">🎁 كوبون متاح</span>` : "");
