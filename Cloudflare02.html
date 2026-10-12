@@ -1,0 +1,289 @@
+/* ═══════════════════════════════════════════════════════
+   Smart Shopper — Cloudflare Worker Proxy (v7.5 MEGA)
+   50 queries × 3 pages × 2 sorts = 300 parallel requests
+   ═══════════════════════════════════════════════════════ */
+
+const API_BASE = "https://api-sg.aliexpress.com/sync";
+
+export default {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders(env) });
+    }
+    const url = new URL(request.url);
+    try {
+      if (url.pathname === "/health") {
+        return json({ ok: true, service: "smart-shopper-proxy", version: "7.5-mega" }, env);
+      }
+      if (url.pathname === "/api/search" && request.method === "POST") {
+        return await handleSearch(request, env);
+      }
+      if (url.pathname === "/api/deep-search" && request.method === "POST") {
+        return await handleDeepSearch(request, env);
+      }
+      if (url.pathname === "/api/link" && request.method === "POST") {
+        return await handleLink(request, env);
+      }
+      return json({ ok: false, error: "Route not found" }, env, 404);
+    } catch (err) {
+      return json({ ok: false, error: String(err), stack: err.stack }, env, 500);
+    }
+  },
+};
+
+/* ═══════════════════════════════════════════════════════
+   HANDLERS
+   ═══════════════════════════════════════════════════════ */
+
+async function handleSearch(request, env) {
+  const body = await request.json();
+  const { keyword, page = 1, pageSize = 50, currency = "USD" } = body;
+  if (!keyword) return json({ ok: false, error: "keyword required" }, env, 400);
+
+  const params = {
+    method: "aliexpress.affiliate.product.query",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    keywords: keyword,
+    page_no: String(page),
+    page_size: String(pageSize),
+    currency,
+    target_currency: currency,
+    target_language: "EN",
+    ship_to_country: "US",
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
+}
+
+/* ═══════════════════════════════════════════════════════
+   ⭐⭐ MEGA DEEP SEARCH v7.5
+   كل استعلام → 3 صفحات × 2 ترتيبات = 6 طلبات
+   ═══════════════════════════════════════════════════════ */
+async function handleDeepSearch(request, env) {
+  const body = await request.json();
+  const { queries = [], currency = "USD", country = "US" } = body;
+
+  if (!Array.isArray(queries) || queries.length === 0) {
+    return json({ ok: false, error: "queries array required" }, env, 400);
+  }
+
+  // ⭐ نرفع الحد من 30 → 50
+  const MAX_QUERIES = 50;
+  const cleanQueries = queries.slice(0, MAX_QUERIES);
+
+  console.log(`[Worker v7.5] MEGA: ${cleanQueries.length} base queries`);
+
+  // ⭐ نبني طلبات مُوسّعة
+  const requests = [];
+  for (const q of cleanQueries) {
+    const keyword = (typeof q === "string" ? q : q.keywords || "").trim();
+    const name = typeof q === "object" ? (q.name || keyword) : keyword;
+    const size = typeof q === "object" ? (q.pageSize || 50) : 50;
+
+    if (!keyword) continue;
+
+    // 3 صفحات × 2 ترتيبات = 6 طلبات لكل كلمة
+    // الترتيب الافتراضي + صفحة 1
+    requests.push({ name: `${name}-p1`, keyword, page: 1, size, sort: "" });
+    // صفحة 2
+    requests.push({ name: `${name}-p2`, keyword, page: 2, size, sort: "" });
+    // صفحة 3
+    requests.push({ name: `${name}-p3`, keyword, page: 3, size, sort: "" });
+    // ترتيب السعر (الأرخص)
+    requests.push({ name: `${name}-cheap`, keyword, page: 1, size, sort: "SALE_PRICE_ASC" });
+    // ترتيب المبيعات
+    requests.push({ name: `${name}-sold`, keyword, page: 1, size, sort: "LAST_VOLUME_DESC" });
+    // ترتيب الخصم
+    requests.push({ name: `${name}-disc`, keyword, page: 1, size, sort: "DISCOUNT_DESC" });
+  }
+
+  console.log(`[Worker v7.5] Executing ${requests.length} parallel requests`);
+
+  // ⭐ تنفيذ بالتوازي مع retry
+  const promises = requests.map(async (req) => {
+    try {
+      const products = await callWithRetry(req, env, currency, country, 2);
+      return { name: req.name, keyword: req.keyword, count: products.length, products };
+    } catch (e) {
+      return { name: req.name, keyword: req.keyword, count: 0, products: [], error: e.message };
+    }
+  });
+
+  const results = await Promise.all(promises);
+
+  // دمج بدون تكرار
+  const seen = new Set();
+  const merged = [];
+  const stats = {};
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (const r of results) {
+    stats[r.name] = r.count;
+    if (r.error) errorCount++; else successCount++;
+
+    for (const p of r.products) {
+      const id = String(p.product_id || "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(p);
+    }
+  }
+
+  console.log(`[Worker v7.5] ✅ Unique: ${merged.length} | OK: ${successCount} | ERR: ${errorCount}`);
+
+  return json({
+    ok: true,
+    data: {
+      total: merged.length,
+      products: merged,
+      stats: {
+        queriesCount: requests.length,
+        baseQueries: cleanQueries.length,
+        successCount,
+        errorCount,
+        perQuery: stats,
+      },
+    }
+  }, env);
+}
+
+/* ═══════════════════════════════════════════════════════
+   استدعاء مع Retry و Timeout
+   ═══════════════════════════════════════════════════════ */
+async function callWithRetry(req, env, currency, country, maxRetries = 2) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const params = {
+        method: "aliexpress.affiliate.product.query",
+        app_key: env.ALI_APP_KEY,
+        timestamp: Date.now(),
+        format: "json",
+        v: "2.0",
+        sign_method: "md5",
+        keywords: req.keyword,
+        page_no: String(req.page),
+        page_size: String(req.size),
+        currency,
+        target_currency: currency,
+        target_language: "EN",
+        ship_to_country: country,
+        tracking_id: env.ALI_TRACKING_ID,
+      };
+
+      if (req.sort) params.sort = req.sort;
+
+      // Timeout 8 ثواني
+      const result = await Promise.race([
+        callAliExpress(params, env),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 8000))
+      ]);
+
+      const products = extractProducts(result);
+      if (products.length > 0) return products;
+
+      // إذا فاضي، أعد المحاولة
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 300));
+        continue;
+      }
+      return products;
+    } catch (e) {
+      lastError = e;
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+  }
+
+  throw lastError || new Error("All retries failed");
+}
+
+function extractProducts(apiResult) {
+  try {
+    const resp = apiResult?.aliexpress_affiliate_product_query_response;
+    const products = resp?.resp_result?.result?.products?.product || [];
+    return Array.isArray(products) ? products : (products ? [products] : []);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function handleLink(request, env) {
+  const body = await request.json();
+  const { urls = [] } = body;
+  if (!Array.isArray(urls) || urls.length === 0) {
+    return json({ ok: false, error: "urls required" }, env, 400);
+  }
+  const params = {
+    method: "aliexpress.affiliate.link.generate",
+    app_key: env.ALI_APP_KEY,
+    timestamp: Date.now(),
+    format: "json",
+    v: "2.0",
+    sign_method: "md5",
+    promotion_link_type: "0",
+    source_values: urls.join(","),
+    tracking_id: env.ALI_TRACKING_ID,
+  };
+  const result = await callAliExpress(params, env);
+  return json({ ok: true, data: result }, env);
+}
+
+/* ═══════════════════════════════════════════════════════
+   CORE
+   ═══════════════════════════════════════════════════════ */
+
+async function callAliExpress(params, env) {
+  const signed = await signRequest(params, env.ALI_APP_SECRET);
+  const query = new URLSearchParams(signed).toString();
+
+  const res = await fetch(`${API_BASE}?${query}`, {
+    method: "GET",
+    headers: { "Accept": "application/json" },
+  });
+
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (_) { return { raw: text }; }
+}
+
+async function signRequest(params, secret) {
+  const sortedKeys = Object.keys(params).sort();
+  let base = "";
+  for (const k of sortedKeys) base += k + String(params[k]);
+  const hash = await md5Hex(secret + base + secret);
+  return { ...params, sign: hash };
+}
+
+async function md5Hex(str) {
+  const data = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest("MD5", data);
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+}
+
+function corsHeaders(env) {
+  return {
+    "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function json(data, env, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(env) },
+  });
+}
