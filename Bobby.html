@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Content Script (v51 HYBRID IMAGE+TEXT)
-   🔍 بحث هجين: API + المتصفح (صورة + عنوان + موديل)
+   Smart Shopper — Content Script (v52 HYBRID FULL)
+   🔍 بحث منفصل في المتصفح (صورة + عنوان + موديل) ثم دمج مع API
    ⭐ الشحن الحقيقي لكل منتج
    ⭐ اللغة تتبع المتصفح
    ═══════════════════════════════════════════════════════ */
@@ -25,7 +25,7 @@
   };
   function tr(key) { return L10N[key]?.[BROWSER_LANG] || L10N[key]?.en || key; }
 
-  console.log(`[Smart Shopper] v51 HYBRID IMAGE+TEXT | Lang: ${LANG} | Browser: ${BROWSER_LANG}`);
+  console.log(`[Smart Shopper] v52 HYBRID FULL | Lang: ${LANG} | Browser: ${BROWSER_LANG}`);
 
   const PANEL_ID = "ss-floating-panel";
   const WORKER_URL = "https://cold-art-c5df.fislilouiza91.workers.dev";
@@ -246,25 +246,33 @@
     try {
       const res = await fetch(url, {
         credentials: "include",
+        method: "GET",
         headers: {
-          "Accept": "text/html,application/xhtml+xml,application/json,*/*",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
           "Accept-Language": navigator.language || "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+          "Upgrade-Insecure-Requests": "1",
         },
         signal: ctrl.signal,
       });
       clearTimeout(timer);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        console.warn(`[fetch] ${res.status} ${url.slice(0, 80)}`);
+        return null;
+      }
       const txt = await res.text();
-      if (!txt || txt.length < 1500) return null;
+      if (!txt || txt.length < 1000) return null;
       return txt;
     } catch (e) {
       clearTimeout(timer);
+      console.warn(`[fetch] error: ${e.message} — ${url.slice(0, 80)}`);
       return null;
     }
   }
 
   /* ═══════════════════════════════════════════════════════
-     ⭐⭐⭐ بحث في المتصفح — نص كامل + صورة + موديل
+     ⭐⭐⭐ بحث في المتصفح — 9 endpoints
      ═══════════════════════════════════════════════════════ */
   async function searchInBrowser() {
     const fullTitle = (currentProduct?.title || "").slice(0, 100).trim();
@@ -276,33 +284,34 @@
 
     const enc = encodeURIComponent(fullTitle);
     const imgEnc = imageUrl ? encodeURIComponent(imageUrl) : "";
-
     const endpoints = [];
 
     // بحث بالصورة
     if (imageUrl) {
-      endpoints.push({ name: "IMG-wholesale", url: `https://www.aliexpress.com/wholesale?SearchText=&imageUrl=${imgEnc}&g=y` });
       endpoints.push({ name: "IMG-fn", url: `https://www.aliexpress.com/fn/search-pc/index?image_url=${imgEnc}&page=1&g=y` });
-      endpoints.push({ name: "IMG-pdp", url: `https://www.aliexpress.com/w/wholesale-image.html?imageUrl=${imgEnc}` });
+      endpoints.push({ name: "IMG-wholesale", url: `https://www.aliexpress.com/wholesale?imageUrl=${imgEnc}&g=y` });
     }
 
     // بحث بالعنوان الكامل
     if (fullTitle) {
       endpoints.push({ name: "TXT-fn-1", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=1&g=y&sortType=total_tranpro_desc` });
       endpoints.push({ name: "TXT-fn-2", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=2&g=y&sortType=total_tranpro_desc` });
-      endpoints.push({ name: "TXT-wholesale-1", url: `https://www.aliexpress.com/w/wholesale-${enc}.html` });
-      endpoints.push({ name: "TXT-wholesale-2", url: `https://www.aliexpress.com/w/wholesale-${enc}.html?page=2` });
+      endpoints.push({ name: "TXT-fn-3", url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${enc}&page=3&g=y&sortType=total_tranpro_desc` });
+      endpoints.push({ name: "TXT-ws-1", url: `https://www.aliexpress.com/w/wholesale-${enc}.html` });
+      endpoints.push({ name: "TXT-ws-2", url: `https://www.aliexpress.com/w/wholesale-${enc}.html?page=2` });
       endpoints.push({ name: "TXT-search", url: `https://www.aliexpress.com/wholesale?SearchText=${enc}&page=1` });
     }
 
-    // بحث بموديل + براند
-    if (model) endpoints.push({ name: `MODEL-${model}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(model)}&page=1&g=y` });
+    // بحث بالموديل
+    if (model) {
+      endpoints.push({ name: `MDL-${model}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(model)}&page=1&g=y` });
+    }
+    // بحث بالبراند + موديل
     if (brand && model) {
-      const bm = encodeURIComponent(`${brand} ${model}`);
-      endpoints.push({ name: `BM-${brand}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${bm}&page=1&g=y` });
+      endpoints.push({ name: `BM-${brand}`, url: `https://www.aliexpress.com/fn/search-pc/index?SearchText=${encodeURIComponent(brand + " " + model)}&page=1&g=y` });
     }
 
-    console.log(`[Smart Shopper] 🌐 Browser search: ${endpoints.length} endpoints`);
+    console.log(`[Smart Shopper] 🌐 BROWSER SEARCH — ${endpoints.length} endpoints`);
 
     const results = await Promise.allSettled(
       endpoints.map(e => fetchWithTimeout(e.url, 10000).then(html => ({ name: e.name, html })))
@@ -311,10 +320,14 @@
     const all = [];
     const seen = new Set();
     let successCount = 0;
+    let failCount = 0;
 
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
-      if (r.status !== "fulfilled" || !r.value || !r.value.html) continue;
+      if (r.status !== "fulfilled" || !r.value || !r.value.html) {
+        failCount++;
+        continue;
+      }
       successCount++;
       const products = extractProductsFromHtml(r.value.html);
       let added = 0;
@@ -324,10 +337,10 @@
         all.push(p);
         added++;
       }
-      console.log(`  → ${r.value.name}: ${added} new (total ${all.length})`);
+      console.log(`  ✓ ${r.value.name}: +${added} (total ${all.length})`);
     }
 
-    console.log(`[Smart Shopper] 🌐 Browser search: ${all.length} products from ${successCount}/${endpoints.length} endpoints`);
+    console.log(`[Smart Shopper] 🌐 BROWSER RESULT: ${all.length} products (${successCount} OK, ${failCount} fail)`);
     return all;
   }
 
@@ -336,22 +349,53 @@
      ═══════════════════════════════════════════════════════ */
   function extractProductsFromHtml(html) {
     if (!html) return [];
+    const products = [];
+    const seen = new Set();
+
     const trimmed = html.trim();
 
+    // 1) JSON مباشر
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         const json = JSON.parse(trimmed);
         const found = [];
         collectJsonProducts(json, found, 0);
-        if (found.length > 0) return found;
+        if (found.length > 0) {
+          console.log(`[extract] JSON direct: ${found.length}`);
+          return found;
+        }
       } catch (_) {}
     }
 
-    const products = [];
-    const seen = new Set();
+    // 2) JSON مضمّن في script tags
+    const scriptJsonRe = /window\._dida_config_\._init_data_\s*=\s*(\{[\s\S]{100,2000000}?\});/;
+    const initDataRe = /window\.__INIT_DATA__\s*=\s*(\{[\s\S]{100,2000000}?\});/;
+    const runParamsRe = /window\.runParams\s*=\s*(\{[\s\S]{100,2000000}?\});/;
+
+    for (const re of [scriptJsonRe, initDataRe, runParamsRe]) {
+      const m = html.match(re);
+      if (m && m[1]) {
+        try {
+          const json = JSON.parse(m[1]);
+          const found = [];
+          collectJsonProducts(json, found, 0);
+          for (const p of found) {
+            if (seen.has(p._id)) continue;
+            seen.add(p._id);
+            products.push(p);
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (products.length > 0) {
+      console.log(`[extract] JSON embedded: ${products.length}`);
+      return products;
+    }
+
+    // 3) Regex على /item/
     const re = /\/item\/(\d{6,})\.html/g;
     let m;
-
     while ((m = re.exec(html)) !== null) {
       const id = m[1];
       if (seen.has(id)) continue;
@@ -380,12 +424,7 @@
       if (title.length < 5) continue;
 
       let img = "";
-      const iPatterns = [
-        /"image"\s*:\s*"([^"]+?\/kf\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/i,
-        /"imageUrl"\s*:\s*"([^"]+?)"/i,
-        /"imgUrl"\s*:\s*"([^"]+?)"/i,
-        /"mainImage"\s*:\s*"([^"]+?)"/i,
-      ];
+      const iPatterns = [/"(?:image|imageUrl|imgUrl|mainImage)"\s*:\s*"([^"]+?\/kf\/[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/i];
       for (const ip of iPatterns) {
         const im = ctx.match(ip);
         if (im && im[1]) { img = im[1]; break; }
@@ -395,41 +434,33 @@
 
       let price = 0;
       const pPatterns = [
-        /"salePrice"\s*:\s*\{\s*"formattedPrice"\s*:\s*"([^"]+)"/,
         /"salePrice"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
         /"formattedPrice"\s*:\s*"([^"]+)"/,
-        /"price"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
         /"price"\s*:\s*"?([\d.]+)/,
-        /"minPrice"\s*:\s*([\d.]+)/,
       ];
       for (const pp of pPatterns) {
         const pm = ctx.match(pp);
-        if (pm && pm[1]) {
-          const v = parseFloat(String(pm[1]).replace(/[^\d.]/g, ""));
-          if (v > 0 && v < 100000) { price = v; break; }
-        }
+        if (pm && pm[1]) { const v = parseFloat(String(pm[1]).replace(/[^\d.]/g, "")); if (v > 0 && v < 100000) { price = v; break; } }
       }
 
       let store = "";
-      const sm = ctx.match(/"storeName"\s*:\s*"([^"]{2,80})"/);
-      if (sm) store = sm[1];
+      const sm = ctx.match(/"storeName"\s*:\s*"([^"]{2,80})"/); if (sm) store = sm[1];
 
       let rating = 0;
-      const rm = ctx.match(/"averageStar"\s*:\s*"?([\d.]+)/);
-      if (rm) { const r = parseFloat(rm[1]); if (r > 0 && r <= 5) rating = +r.toFixed(1); }
+      const rm = ctx.match(/"averageStar"\s*:\s*"?([\d.]+)/); if (rm) { const r = parseFloat(rm[1]); if (r > 0 && r <= 5) rating = +r.toFixed(1); }
 
       let sold = 0;
-      const vm = ctx.match(/"tradeDesc"\s*:\s*"([^"]+)"/);
-      if (vm) { const n = parseInt(vm[1].replace(/[^\d]/g, "")); if (n > 0) sold = n; }
+      const vm = ctx.match(/"tradeDesc"\s*:\s*"([^"]+)"/); if (vm) { const n = parseInt(vm[1].replace(/[^\d]/g, "")); if (n > 0) sold = n; }
 
       products.push({
         _id: id, title, img, price, store: store || "AliExpress", rating, sold,
         link: `https://www.aliexpress.com/item/${id}.html`,
         fromBrowser: true, shippingFree: false, shippingPrice: 0, hasShippingInfo: false,
       });
-
       if (products.length >= 200) break;
     }
+
+    if (products.length > 0) console.log(`[extract] Regex: ${products.length}`);
     return products;
   }
 
@@ -476,7 +507,7 @@
   }
 
   /* ═══════════════════════════════════════════════════════
-     جلب الشحن من صفحة المنتج
+     جلب الشحن
      ═══════════════════════════════════════════════════════ */
   function extractShippingFromProductPage(html) {
     if (!html) return { free: false, price: 0, hasInfo: false };
@@ -529,7 +560,7 @@
   }
 
   /* ═══════════════════════════════════════════════════════
-     ⭐⭐⭐ Hybrid Search
+     ⭐⭐⭐ Hybrid Search — المتصفح أولاً ثم API
      ═══════════════════════════════════════════════════════ */
   async function doHybridSearch() {
     if (isScanning) return;
@@ -537,19 +568,30 @@
 
     try {
       const t0 = Date.now();
-      const kws = getKeywords(currentProduct.title);
-      console.log(`[Smart Shopper] 🔍 Hybrid: API + Browser (image + title)`);
+      console.log("═══════════════════════════════════════════");
+      console.log("[Smart Shopper] 🔍 HYBRID SEARCH — API + Browser");
+      console.log("═══════════════════════════════════════════");
 
-      renderProgress(tr("searching"), 0, 1);
+      renderProgress("🌐 بحث في المتصفح...", 0, 1);
 
-      const [apiData, browserProducts] = await Promise.all([
-        fetchMegaSearch(buildMegaQueries(currentProduct.title)).catch(() => ({ products: [] })),
-        searchInBrowser(),
-      ]);
+      // 1) بحث المتصفح (منفصل)
+      const browserProducts = await searchInBrowser();
+      console.log(`[Smart Shopper] 🌐 Browser done: ${browserProducts.length} products`);
 
+      if (browserProducts.length > 0) {
+        renderProgress(`🌐 المتصفح: ${browserProducts.length} — جاري API...`, 1, 2);
+      } else {
+        renderProgress("🌐 المتصفح: 0 — جاري API...", 1, 2);
+      }
+
+      // 2) API
+      const apiData = await fetchMegaSearch(buildMegaQueries(currentProduct.title))
+        .catch(() => ({ products: [] }));
       const apiRaw = apiData?.products || [];
-      console.log(`[Smart Shopper] 📡 API: ${apiRaw.length} | 🌐 Browser: ${browserProducts.length}`);
+      console.log(`[Smart Shopper] 📡 API: ${apiRaw.length} products`);
 
+      // 3) تقييم
+      const kws = getKeywords(currentProduct.title);
       const ctx = {
         productId: currentProduct.id,
         brand: extractBrand(currentProduct.title),
@@ -566,7 +608,6 @@
       const browserScored = [];
       for (const p of browserProducts) {
         if (p._id === currentProduct.id) continue;
-        if (!p.title || p.title.length < 5) continue;
         const pFormatted = {
           product_id: p._id, product_title: p.title, product_main_image_url: p.img,
           target_sale_price: p.price, shop_name: p.store, lastest_volume: p.sold,
@@ -577,8 +618,9 @@
         if (s) { s.fromBrowser = true; browserScored.push(s); }
       }
 
-      console.log(`[Smart Shopper] ✅ API: ${apiScored.length} | Browser: ${browserScored.length}`);
+      console.log(`[Smart Shopper] API scored: ${apiScored.length} | Browser scored: ${browserScored.length}`);
 
+      // 4) دمج
       const seen = new Set();
       const merged = [];
       const sortFn = (a, b) => {
@@ -600,25 +642,23 @@
 
       if (merged.length === 0) { sellers = []; renderEmpty(); return; }
 
+      // 5) الشحن
       const toFetch = merged.slice(0, MAX_SHIPPING_FETCH);
-      if (toFetch.length > 0) {
-        renderProgress(tr("checkingShipping"), 0, toFetch.length);
-        const shippingResults = await batchFetchShipping(toFetch, FETCH_CONCURRENCY, (done, total) => {
-          renderProgress(tr("checkingShipping"), done, total);
-        });
-        toFetch.forEach((p, i) => {
-          const s = shippingResults[i];
-          if (s && s.hasInfo) { p.shippingFree = s.free; p.shippingPrice = s.price; p.hasShippingInfo = true; }
-        });
-      }
+      renderProgress(`🚚 جلب الشحن لـ ${toFetch.length} منتج...`, 0, toFetch.length);
+      const shippingResults = await batchFetchShipping(toFetch, FETCH_CONCURRENCY, (done, total) => {
+        renderProgress(`🚚 جلب الشحن: ${done}/${total}`, done, total);
+      });
+      toFetch.forEach((p, i) => {
+        const s = shippingResults[i];
+        if (s && s.hasInfo) { p.shippingFree = s.free; p.shippingPrice = s.price; p.hasShippingInfo = true; }
+      });
 
       sellers = merged;
-      const elapsed = Date.now() - t0;
-      console.log(`[Smart Shopper] ✅ Done in ${elapsed}ms`);
+      console.log(`[Smart Shopper] ✅ Done in ${Date.now() - t0}ms`);
       updateSourceLabel("hybrid");
       renderList();
     } catch (e) {
-      console.error("[Smart Shopper] Hybrid search error:", e);
+      console.error("[Smart Shopper] Hybrid error:", e);
       sellers = [];
       renderEmpty();
     } finally {
@@ -864,7 +904,7 @@
   async function run() {
     await sleep(800);
     currentProduct = extractProduct();
-    console.log("[Smart Shopper] v51 HYBRID IMAGE+TEXT ready");
+    console.log("[Smart Shopper] v52 HYBRID FULL ready");
     if (!currentProduct.title || currentProduct.title.length < 5) return;
     buildPanel();
     await doScan();
@@ -879,5 +919,5 @@
   });
 
   run();
-  console.log("[Smart Shopper] v51 ready.");
+  console.log("[Smart Shopper] v52 ready.");
 })();
