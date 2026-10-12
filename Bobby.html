@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════
-   Smart Shopper — Cloudflare Worker (v12 ULTRA FAST)
+   Smart Shopper — Cloudflare Worker (v12 ULTRA FAST + DIAG)
    ⚡ هدف: أقل من 7 ثواني
    🎯 طلب واحد + استخراج كل شيء من نفس الصفحة
+   🔬 + endpoint تشخيصي /api/diag
    ═══════════════════════════════════════════════════════ */
 
 const API_BASE = "https://api.scrapingant.com/v2/general";
@@ -20,6 +21,37 @@ export default {
           mode: "ultra-fast (1-2 requests)"
         }, env);
       }
+
+      // 🔬 تشخيص: يختبر ScrapingAnt مباشرة ويعرض ما يرجعه
+      if (url.pathname === "/api/diag") {
+        const testUrl = "https://www.aliexpress.com/w/wholesale-wifi-repeater.html";
+        const params = new URLSearchParams({
+          url: testUrl,
+          "x-api-key": env.SCRAPINGANT_API_KEY || "",
+          browser: "false",
+          proxy_type: "datacenter",
+          proxy_country: "us",
+          return_page_source: "true",
+        });
+        const apiUrl = `${API_BASE}?${params.toString()}`;
+        try {
+          const res = await fetch(apiUrl);
+          const txt = await res.text();
+          return json({
+            ok: true,
+            status: res.status,
+            length: txt.length,
+            first500: txt.slice(0, 500),
+            hasItem: /\/item\/\d{6,}/.test(txt),
+            hasCaptcha: /punish|captcha|slider|_sec_|verify/i.test(txt.slice(0, 3000)),
+            hasInitData: /__INIT_DATA__|_dida_config_|window\.runParams/.test(txt),
+            hasAliExpress: /aliexpress/i.test(txt.slice(0, 2000)),
+          }, env);
+        } catch (e) {
+          return json({ ok: false, error: e.message }, env);
+        }
+      }
+
       if (url.pathname === "/api/similar-by-url" && request.method === "POST") {
         return await handleSimilarByUrl(request, env);
       }
@@ -85,7 +117,7 @@ async function fetchViaScrapingAnt(targetUrl, env, retries = 5) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   ⚡ /api/similar-by-url — طلب واحد فقط (وأحيانًا 2)
+   ⚡ /api/similar-by-url — طلب واحد فقط
    ═══════════════════════════════════════════════════════ */
 async function handleSimilarByUrl(request, env) {
   const t0 = Date.now();
@@ -96,7 +128,6 @@ async function handleSimilarByUrl(request, env) {
   const productId = extractProductId(url);
   if (!productId) return json({ ok: false, error: "Invalid URL" }, env, 400);
 
-  // ⚡ ⚡ ⚡ طلب واحد فقط — صفحة المنتج
   console.log(`[Worker v12] 🚀 Single fetch: product page`);
   const productHtml = await fetchViaScrapingAnt(
     `https://www.aliexpress.com/item/${productId}.html`, env
@@ -104,7 +135,7 @@ async function handleSimilarByUrl(request, env) {
   if (!productHtml) {
     return json({
       ok: false,
-      error: "Failed to fetch product page",
+      error: "Failed to fetch product page (check /api/diag)",
       elapsed: Date.now() - t0,
     }, env, 502);
   }
@@ -122,7 +153,7 @@ async function handleSimilarByUrl(request, env) {
   const allFromPage = extractRecommendedFromPage(productHtml);
   console.log(`[Worker v12] Recommended from page: ${allFromPage.length}`);
 
-  // ⚡ فقط إذا الصفحة ما فيها منتجات كافية (نادر جدًا)
+  // ⚡ بحث إضافي فقط إذا الصفحة ما فيها منتجات كافية
   let extraProducts = [];
   if (allFromPage.length < 15) {
     console.log(`[Worker v12] Only ${allFromPage.length} — extra search`);
@@ -193,7 +224,7 @@ async function handleSimilarByUrl(request, env) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   /api/deep-search — للتوافق مع content.js (سريع جدًا)
+   /api/deep-search — للتوافق مع content.js
    ═══════════════════════════════════════════════════════ */
 async function handleDeepSearch(request, env) {
   const t0 = Date.now();
@@ -204,7 +235,6 @@ async function handleDeepSearch(request, env) {
     return json({ ok: false, error: "queries array required" }, env, 400);
   }
 
-  // ⚡ استعلامان فقط للسرعة
   const cleanQueries = queries.slice(0, 2);
 
   const promises = cleanQueries.map(async (q) => {
@@ -318,13 +348,9 @@ function extractFromHtml(html) {
   return links;
 }
 
-/**
- * ⭐ موسّع — يبحث في كل JSON مُدمج بالصفحة
- */
 function extractRecommendedFromPage(html) {
   const found = [];
 
-  // نحاول كل المؤشرات المحتملة
   const markers = [
     "window._dida_config_._init_data_",
     "window._init_data_",
@@ -343,7 +369,6 @@ function extractRecommendedFromPage(html) {
     }
   }
 
-  // إزالة التكرار
   const seen = new Set();
   const unique = [];
   for (const p of found) {
