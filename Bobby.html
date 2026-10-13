@@ -1,6 +1,7 @@
 /* ============================================
    Smart Shopper - Cloudflare Worker
    ScrapingAnt (Primary) + ScraperAPI (Fallback)
+   + Smart Retry (Concurrency vs Quota)
    + Daily Cron Auto-Recovery
    ============================================ */
 
@@ -23,6 +24,9 @@ export default {
     try {
       const url = new URL(request.url);
 
+      // ========================================
+      // /health
+      // ========================================
       if (url.pathname === '/health') {
         const statuses = await getProviderStatuses(env);
         return json({
@@ -36,6 +40,9 @@ export default {
         }, 200, corsHeaders);
       }
 
+      // ========================================
+      // /fetch
+      // ========================================
       if (url.pathname === '/fetch') {
         const targetUrl = url.searchParams.get('url');
         if (!targetUrl) return json({ error: 'Missing url' }, 400, corsHeaders);
@@ -78,16 +85,25 @@ export default {
         });
       }
 
+      // ========================================
+      // /providers
+      // ========================================
       if (url.pathname === '/providers') {
         const statuses = await getProviderStatuses(env);
         return json(statuses, 200, corsHeaders);
       }
 
+      // ========================================
+      // /run-health-check
+      // ========================================
       if (url.pathname === '/run-health-check') {
         ctx.waitUntil(healthCheckAllProviders(env));
         return json({ success: true, message: 'Health check started' }, 200, corsHeaders);
       }
 
+      // ========================================
+      // /reset-provider
+      // ========================================
       if (url.pathname === '/reset-provider') {
         const provider = url.searchParams.get('provider');
         if (!provider) return json({ error: 'Missing provider' }, 400, corsHeaders);
@@ -95,6 +111,9 @@ export default {
         return json({ success: true, reset: provider }, 200, corsHeaders);
       }
 
+      // ========================================
+      // /stats
+      // ========================================
       if (url.pathname === '/stats') {
         const stats = await getNeonStats(env);
         return json(stats, 200, corsHeaders);
@@ -113,6 +132,9 @@ export default {
   }
 };
 
+/* ============================================
+   Circuit Breaker + Fallback + Smart Retry
+   ============================================ */
 async function fetchWithFallback(targetUrl, env) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY, fn: fetchFromScrapingAnt },
@@ -124,24 +146,48 @@ async function fetchWithFallback(targetUrl, env) {
   for (const provider of providers) {
     const status = await getProviderStatus(provider.name, env);
 
+    // ⛔ إذا كان معطلاً → تخطاه
     if (status.disabled) {
       console.log(`[CircuitBreaker] ${provider.name} disabled - skip`);
       continue;
     }
 
-    try {
-      console.log(`[CircuitBreaker] Trying ${provider.name}...`);
-      const html = await provider.fn(targetUrl, provider.key);
+    // 🔁 3 محاولات لكل مزود عند خطأ concurrency مؤقت
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[CircuitBreaker] Trying ${provider.name} (attempt ${attempt}/3)...`);
+        const html = await provider.fn(targetUrl, provider.key);
 
-      if (html && html.length > 5000) {
-        console.log(`[CircuitBreaker] Success via ${provider.name}`);
-        return { html, provider: provider.name };
-      }
-    } catch (e) {
-      console.warn(`[CircuitBreaker] ${provider.name} error:`, e.message);
+        if (html && html.length > 5000) {
+          console.log(`[CircuitBreaker] ✅ Success via ${provider.name}`);
+          return { html, provider: provider.name };
+        }
+      } catch (e) {
+        const errType = classifyError(e);
+        console.warn(`[CircuitBreaker] ${provider.name} attempt ${attempt}: ${errType} - ${e.message.slice(0, 100)}`);
 
-      if (isQuotaError(e)) {
-        await disableProvider(provider.name, e.message, status, env);
+        // 🔴 نفاد رصيد حقيقي → عطّل المزود وانتقل للتالي
+        if (errType === 'QUOTA') {
+          await disableProvider(provider.name, e.message, status, env);
+          console.log(`[CircuitBreaker] 🔴 ${provider.name} DISABLED (quota exhausted)`);
+          break; // اخرج من حلقة المحاولات
+        }
+
+        // 🟡 concurrency limit أو rate limit → انتظر ثم أعد
+        if (errType === 'CONCURRENCY' || errType === 'RATE') {
+          if (attempt < 3) {
+            const waitMs = 2000 * attempt; // 2s, 4s
+            console.log(`[CircuitBreaker] ⏳ Waiting ${waitMs}ms before retry...`);
+            await sleep(waitMs);
+            continue;
+          } else {
+            console.warn(`[CircuitBreaker] ${provider.name} still busy after 3 attempts - trying next`);
+            break;
+          }
+        }
+
+        // ⚪ خطأ عام (network, timeout, etc) → انتقل للتالي
+        break;
       }
     }
   }
@@ -149,6 +195,47 @@ async function fetchWithFallback(targetUrl, env) {
   return { html: null, provider: null };
 }
 
+/* ============================================
+   تصنيف الأخطاء
+   ============================================ */
+function classifyError(error) {
+  const msg = String(error.message || '').toLowerCase();
+
+  // 🟡 Concurrency limit (مؤقت)
+  if (msg.includes('concurrency') ||
+      msg.includes('too many') ||
+      msg.includes('simultaneous') ||
+      msg.includes('busy')) {
+    return 'CONCURRENCY';
+  }
+
+  // 🟡 Rate limit (مؤقت)
+  if (msg.includes('429') || msg.includes('rate limit')) {
+    return 'RATE';
+  }
+
+  // 🔴 نفاد رصيد حقيقي
+  if (msg.includes('credits exhausted') ||
+      msg.includes('quota exceeded') ||
+      msg.includes('out of credits') ||
+      msg.includes('no more credits') ||
+      msg.includes('insufficient credits') ||
+      msg.includes('credit balance') ||
+      msg.includes('subscription required') ||
+      msg.includes('payment required')) {
+    return 'QUOTA';
+  }
+
+  return 'OTHER';
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/* ============================================
+   Daily Health Check (Cron)
+   ============================================ */
 async function healthCheckAllProviders(env) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY },
@@ -194,11 +281,14 @@ async function testProvider(providerName, apiKey) {
 
     return html && html.length > 20;
   } catch (e) {
-    console.warn(`[Cron] ${providerName} test failed:`, e.message);
+    console.warn(`[Cron] ${providerName} test failed:`, e.message.slice(0, 100));
     return false;
   }
 }
 
+/* ============================================
+   Fetch from ScrapingAnt
+   ============================================ */
 async function fetchFromScrapingAnt(targetUrl, apiKey) {
   const url = new URL('https://api.scrapingant.com/v2/general');
   url.searchParams.set('x-api-key', apiKey);
@@ -211,19 +301,41 @@ async function fetchFromScrapingAnt(targetUrl, apiKey) {
   if (!res.ok) {
     let errBody = '';
     try { errBody = await res.text(); } catch (e) {}
+    const lowerBody = errBody.toLowerCase();
 
-    if (res.status === 402 || /credit|quota|exceed|limit/i.test(errBody)) {
-      throw new Error(`402 credits exhausted: ${errBody.slice(0, 150)}`);
+    // 🟡 Concurrency limit
+    if (lowerBody.includes('concurrency') ||
+        lowerBody.includes('free user concurrency')) {
+      throw new Error(`CONCURRENCY_LIMIT: ${errBody.slice(0, 200)}`);
     }
+
+    // 🟡 Rate limit
+    if (res.status === 429 || lowerBody.includes('rate limit')) {
+      throw new Error(`429 rate limit: ${errBody.slice(0, 200)}`);
+    }
+
+    // 🔴 نفاد رصيد حقيقي
+    if (lowerBody.includes('credits exhausted') ||
+        lowerBody.includes('quota exceeded') ||
+        lowerBody.includes('out of credits') ||
+        lowerBody.includes('no credits')) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 200)}`);
+    }
+
+    // ⚪ Auth errors
     if (res.status === 401 || res.status === 403) {
       throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
     }
+
     throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
   }
 
   return await res.text();
 }
 
+/* ============================================
+   Fetch from ScraperAPI
+   ============================================ */
 async function fetchFromScraperAPI(targetUrl, apiKey) {
   const url = new URL('https://api.scraperapi.com/');
   url.searchParams.set('api_key', apiKey);
@@ -236,27 +348,40 @@ async function fetchFromScraperAPI(targetUrl, apiKey) {
   if (!res.ok) {
     let errBody = '';
     try { errBody = await res.text(); } catch (e) {}
+    const lowerBody = errBody.toLowerCase();
 
-    if (res.status === 402 || /credit|quota|exceed|limit/i.test(errBody)) {
-      throw new Error(`402 credits exhausted: ${errBody.slice(0, 150)}`);
+    // 🟡 Concurrency limit
+    if (lowerBody.includes('concurrency') ||
+        lowerBody.includes('too many concurrent')) {
+      throw new Error(`CONCURRENCY_LIMIT: ${errBody.slice(0, 200)}`);
     }
+
+    // 🟡 Rate limit
+    if (res.status === 429 || lowerBody.includes('rate limit')) {
+      throw new Error(`429 rate limit: ${errBody.slice(0, 200)}`);
+    }
+
+    // 🔴 نفاد رصيد حقيقي
+    if (lowerBody.includes('credits exhausted') ||
+        lowerBody.includes('no credits') ||
+        lowerBody.includes('quota exceeded')) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 200)}`);
+    }
+
+    // ⚪ Auth errors
     if (res.status === 401 || res.status === 403) {
       throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
     }
+
     throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
   }
 
   return await res.text();
 }
 
-function isQuotaError(error) {
-  const msg = String(error.message || '').toLowerCase();
-  return msg.includes('402') || msg.includes('quota') ||
-         msg.includes('credit') || msg.includes('exceed') ||
-         msg.includes('exhaust') || msg.includes('insufficient') ||
-         msg.includes('out of');
-}
-
+/* ============================================
+   Disable Provider (Circuit Breaker)
+   ============================================ */
 async function disableProvider(providerName, reason, currentStatus, env) {
   if (!env.PROVIDER_KV) return;
 
@@ -291,6 +416,9 @@ async function disableProvider(providerName, reason, currentStatus, env) {
   console.log(`[CircuitBreaker] ${providerName} disabled (failure #${consecutiveFailures})`);
 }
 
+/* ============================================
+   Provider Status Management
+   ============================================ */
 async function getProviderStatus(providerName, env) {
   if (!env.PROVIDER_KV) return { disabled: false };
   try {
@@ -335,6 +463,9 @@ function formatStatus(name, status, configured) {
   };
 }
 
+/* ============================================
+   Neon Cache
+   ============================================ */
 async function hashUrl(url) {
   const encoder = new TextEncoder();
   const data = encoder.encode(url);
