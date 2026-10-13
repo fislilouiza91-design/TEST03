@@ -1,20 +1,29 @@
 /* Smart Shopper - background service worker */
+
+// إعدادات جلب النتائج
+const MAX_PAGES = 10;          // الحد الأقصى لعدد الصفحات (كل صفحة ~20 منتج)
+const DELAY_BETWEEN_PAGES = 1200; // انتظار 1.2 ثانية بين كل صفحة (لتجنب الحظر)
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'SMART_SEARCH') return;
   (async () => {
     try {
       const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const url = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-      const res = await fetch(url, {
-        headers: {
-          'Accept-Language': 'en-US,en;q=0.9',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
-        }
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+      
+      const allItems = await fetchAllPages(baseUrl, MAX_PAGES);
+      
+      // إزالة المنتجات المكررة بناءً على الـ id
+      const uniqueItems = deduplicateById(allItems);
+      
+      console.log('[Smart Shopper] Total fetched:', allItems.length, '| Unique:', uniqueItems.length);
+      
+      sendResponse({ 
+        ok: true, 
+        items: uniqueItems,           // كل النتائج بدون قص
+        searchUrl: baseUrl,
+        count: uniqueItems.length     // إضافة عدد النتائج للواجهة
       });
-      const html = await res.text();
-      let items = parseItems(html);
-      if (!items.length) items = fallbackIds(html);
-      sendResponse({ ok: true, items: items.slice(0, 8), searchUrl: url });
     } catch (e) {
       sendResponse({ ok: false, error: String(e) });
     }
@@ -22,6 +31,74 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async response
 });
 
+/* ---------- جلب عدة صفحات ---------- */
+async function fetchAllPages(baseUrl, maxPages) {
+  const allItems = [];
+  
+  for (let page = 1; page <= maxPages; page++) {
+    try {
+      const url = baseUrl + '&page=' + page;
+      console.log('[Smart Shopper] Fetching page', page);
+      
+      const res = await fetch(url, {
+        headers: {
+          'Accept-Language': 'en-US,en;q=0.9',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+        }
+      });
+      
+      if (!res.ok) {
+        console.warn('[Smart Shopper] Page', page, 'HTTP error:', res.status);
+        if (res.status === 429 || res.status === 403) {
+          // حظر مؤقت - نوقف الجلب
+          console.warn('[Smart Shopper] Blocked! Stopping fetch.');
+          break;
+        }
+        continue;
+      }
+      
+      const html = await res.text();
+      let items = parseItems(html);
+      
+      // إذا لم توجد نتائج، نجرب الطريقة الاحتياطية
+      if (!items.length) items = fallbackIds(html);
+      
+      // إذا كانت الصفحة فارغة، هذا يعني أننا وصلنا للنهاية
+      if (!items.length) {
+        console.log('[Smart Shopper] Page', page, 'empty. Stopping.');
+        break;
+      }
+      
+      allItems.push(...items);
+      console.log('[Smart Shopper] Page', page, 'got', items.length, 'items');
+      
+      // انتظار بين الصفحات (إلا بعد آخر صفحة)
+      if (page < maxPages) {
+        await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES));
+      }
+    } catch (e) {
+      console.warn('[Smart Shopper] Error on page', page, ':', e);
+      // نستمر في المحاولة للصفحة التالية
+    }
+  }
+  
+  return allItems;
+}
+
+/* ---------- إزالة التكرار ---------- */
+function deduplicateById(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    if (!it || !it.id) continue;
+    if (seen.has(it.id)) continue;
+    seen.add(it.id);
+    out.push(it);
+  }
+  return out;
+}
+
+/* ---------- استخراج المنتجات من HTML ---------- */
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
@@ -46,25 +123,49 @@ function parseItems(html) {
       const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
       const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '';
       const sold = o.tradeDesc || o.sold || o.soldCount || '';
-      out.push({ id: String(id), title, img, price, oldPrice, discount, store, rating, sold,
-                 link: 'https://www.aliexpress.com/item/' + id + '.html' });
+      out.push({ 
+        id: String(id), 
+        title, 
+        img, 
+        price, 
+        oldPrice, 
+        discount, 
+        store, 
+        rating, 
+        sold,
+        link: 'https://www.aliexpress.com/item/' + id + '.html' 
+      });
     } catch (e) { /* skip bad item */ }
   }
   return out;
 }
 
+/* ---------- الطريقة الاحتياطية لاستخراج الـ IDs ---------- */
 function fallbackIds(html) {
   const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set(); const out = [];
+  const seen = new Set(); 
+  const out = [];
   let m;
-  while ((m = re.exec(html)) && out.length < 8) {
+  while ((m = re.exec(html))) {
     if (seen.has(m[1])) continue;
     seen.add(m[1]);
-    out.push({ id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '', discount: '', store: 'AliExpress', rating: '', sold: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
+    out.push({ 
+      id: m[1], 
+      title: 'Produit similaire', 
+      img: '', 
+      price: '', 
+      oldPrice: '', 
+      discount: '', 
+      store: 'AliExpress', 
+      rating: '', 
+      sold: '', 
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html' 
+    });
   }
   return out;
 }
 
+/* ---------- استخراج مصفوفة JSON من HTML ---------- */
 function extractJsonArray(html, marker) {
   const i = html.indexOf(marker);
   if (i < 0) return null;
@@ -86,4 +187,6 @@ function extractJsonArray(html, marker) {
   return null;
 }
 
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function clean(s) { 
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); 
+}
