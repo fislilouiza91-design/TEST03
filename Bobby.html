@@ -1,406 +1,246 @@
 /* ============================================
-   Smart Shopper - Responsive Compact Layout
-   Fixed: right side cut-off + responsive
+   Smart Shopper - Background Service Worker
+   Fixed: store name extraction
    ============================================ */
 
-* {
-    box-sizing: border-box;
+const MAX_PAGES = 8;
+const PARALLEL_BATCH = 3;
+const DELAY_BETWEEN_BATCHES = 400;
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
+
+  (async () => {
+    try {
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+
+      const seenIds = new Set();
+      let firstBatchSent = false;
+      let totalFetched = 0;
+
+      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
+        const pages = [];
+        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
+          pages.push(batch + i + 1);
+        }
+
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
+        const newItems = [];
+        let emptyPages = 0;
+
+        for (const items of results) {
+          if (!items || !items.length) { emptyPages++; continue; }
+          for (const it of items) {
+            if (!it || !it.id || seenIds.has(it.id)) continue;
+            seenIds.add(it.id);
+            newItems.push(it);
+          }
+        }
+
+        totalFetched += newItems.length;
+
+        if (newItems.length > 0 && tabId) {
+          if (!firstBatchSent) {
+            sendResponse({ ok: true, items: newItems, searchUrl: baseUrl, done: false, count: newItems.length });
+            firstBatchSent = true;
+          } else {
+            try {
+              chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_UPDATE', items: newItems, searchUrl: baseUrl });
+            } catch (e) {}
+          }
+        }
+
+        if (emptyPages === pages.length) break;
+        if (batch + PARALLEL_BATCH < MAX_PAGES) await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+      }
+
+      if (tabId) {
+        try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }); } catch (e) {}
+      }
+      if (!firstBatchSent) sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+
+  return true;
+});
+
+/* ---------- استخراج النص من أي قيمة ---------- */
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : '';
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
+      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
+      'price', 'storeName', 'desc', 'label'];
+    for (const k of keys) {
+      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    }
+    for (const k in v) {
+      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    }
+    return '';
+  }
+  return String(v);
 }
 
-#ss-panel {
-    position: fixed;
-    top: 60px;
-    right: 12px;
-    width: 340px;
-    max-width: calc(100vw - 24px);
-    max-height: calc(100vh - 80px);
-    background: #ffffff;
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    direction: ltr;
-    user-select: none;
-    border: 1px solid rgba(0, 0, 0, 0.08);
+/* ---------- استخراج اسم المتجر (شامل) ---------- */
+function extractStore(o) {
+  const candidates = [
+    o.storeName,
+    o.sellerName,
+    o.shopName,
+    o.companyName,
+    o.sellerAdminName,
+    o.storeAdminName,
+    o.store && o.store.storeName,
+    o.store && o.store.name,
+    o.store && o.store.sellerName,
+    o.store && o.store.companyName,
+    o.seller && o.seller.name,
+    o.seller && o.seller.storeName,
+    o.seller && o.seller.companyName,
+    o.shop && o.shop.name,
+    o.shopInfo && o.shopInfo.name,
+    o.storeInfo && o.storeInfo.name
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim() && c !== 'undefined' && c !== 'null' && c !== 'AliExpress') {
+      return c.trim();
+    }
+  }
+  return 'AliExpress';
 }
 
-/* ---------- Header ---------- */
-.ss-header {
-    display: flex;
-    align-items: center;
-    padding: 10px 12px;
-    background: #2b2b2b;
-    cursor: grab;
-    flex-shrink: 0;
-    color: white;
-    border-radius: 10px 10px 0 0;
-}
-.ss-header:active { cursor: grabbing; }
-
-.ss-logo {
-    background: #ff4747;
-    color: white;
-    font-weight: 900;
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 15px;
-    margin-right: 8px;
-    flex-shrink: 0;
+/* ---------- جلب صفحة ---------- */
+async function fetchPage(baseUrl, page) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const res = await fetch(url, {
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    return [];
+  }
 }
 
-.ss-titles { flex-grow: 1; min-width: 0; overflow: hidden; }
+/* ---------- استخراج المنتجات ---------- */
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
 
-.ss-header .ss-title {
-    font-size: 13px;
-    font-weight: 700;
-    color: #fff;
-    line-height: 1.2;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
 
-.ss-sub {
-    font-size: 9.5px;
-    color: rgba(255, 255, 255, 0.65);
-    margin-top: 1px;
-    font-weight: 400;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
 
-.ss-header-btns { display: flex; gap: 2px; flex-shrink: 0; }
+      let img = '';
+      if (o.image) {
+        if (typeof o.image === 'string') img = o.image;
+        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
+      }
+      if (!img && o.picUrl) {
+        if (typeof o.picUrl === 'string') img = o.picUrl;
+        else img = o.picUrl.imgUrl || o.picUrl.url || '';
+      }
+      if (img && img.startsWith('//')) img = 'https:' + img;
 
-.ss-hbtn {
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.7);
-    padding: 4px 6px;
-    border-radius: 4px;
-    transition: background 0.2s, color 0.2s;
-    line-height: 1;
-    font-weight: 600;
-}
-.ss-hbtn:hover {
-    background: rgba(255, 255, 255, 0.15);
-    color: #fff;
-}
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
+                    sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
+      const discount = extractText(o.discount || sale.discount || '');
 
-/* ---------- Body ---------- */
-.ss-body {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    flex-grow: 1;
-    background: #fff;
-    min-height: 0;
-}
+      const store = extractStore(o);
 
-/* ---------- Tabs (scrollable) ---------- */
-.ss-tabs {
-    display: flex;
-    overflow-x: auto;
-    padding: 8px 10px;
-    white-space: nowrap;
-    background: #fff;
-    flex-shrink: 0;
-    gap: 5px;
-    border-bottom: 1px solid #f0f0f0;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-}
-.ss-tabs::-webkit-scrollbar { display: none; }
+      const rating = extractText(
+        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
+        o.averageStarRate || o.starRating || ''
+      );
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
 
-.ss-tab {
-    padding: 5px 10px;
-    font-size: 10.5px;
-    color: #666;
-    cursor: pointer;
-    border-radius: 20px;
-    transition: all 0.2s;
-    font-weight: 600;
-    background: transparent;
-    border: 1px solid #e0e0e0;
-    white-space: nowrap;
-    user-select: none;
-    flex-shrink: 0;
-}
-.ss-tab.active {
-    color: #fff;
-    background: #1a1a1a;
-    border-color: #1a1a1a;
-}
-.ss-tab:hover:not(.active):not(.ss-tab-counting) {
-    background: #f5f5f5;
+      const shipping = extractText(o.logisticsDesc || o.shipping || '');
+      const shippingFree = o.freeShipping ||
+                           (typeof shipping === 'string' && /free|gratuit/i.test(shipping));
+
+      const badges = [];
+      if (o.isChoice) badges.push('Choice');
+      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
+
+      out.push({
+        id: String(id),
+        title: title || 'Produit similaire',
+        img, price, oldPrice, discount, store, rating, sold,
+        shipping, shippingFree, badges,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
+    } catch (e) {}
+  }
+  return out;
 }
 
-.ss-tab.ss-tab-counting {
-    background: #fff8e1;
-    border-color: #ffcc80;
-    color: #e65100;
-    cursor: wait;
-    pointer-events: none;
-    animation: ss-pulse 1.2s ease-in-out infinite;
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '',
+      discount: '', store: 'AliExpress', rating: '', sold: '',
+      shipping: '', shippingFree: false, badges: [],
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
+  }
+  return out;
 }
 
-@keyframes ss-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.65; }
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
 }
 
-/* ---------- List ---------- */
-.ss-list {
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 6px 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: calc(100vh - 260px);
-    min-height: 200px;
-    overscroll-behavior: contain;
-    flex-grow: 1;
-}
-.ss-list::-webkit-scrollbar { width: 5px; }
-.ss-list::-webkit-scrollbar-track { background: transparent; }
-.ss-list::-webkit-scrollbar-thumb { background-color: #ccc; border-radius: 3px; }
-.ss-list::-webkit-scrollbar-thumb:hover { background-color: #999; }
-
-/* ---------- Product Card ---------- */
-.ss-card {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: #fff;
-    border: 1px solid #e8e8e8;
-    border-radius: 8px;
-    padding: 7px;
-    position: relative;
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.2s ease;
-    min-height: 68px;
-    cursor: pointer;
-    width: 100%;
-    overflow: hidden;
-}
-.ss-card:hover {
-    border-color: #ff4747;
-    box-shadow: 0 2px 10px rgba(255, 71, 71, 0.1);
-}
-
-.ss-rank-badge {
-    position: absolute;
-    top: 5px;
-    left: 5px;
-    color: white;
-    font-size: 9px;
-    font-weight: 900;
-    width: 17px;
-    height: 17px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 3;
-    line-height: 1;
-}
-
-.ss-thumb-wrapper {
-    flex-shrink: 0;
-    width: 58px;
-    height: 58px;
-    border-radius: 6px;
-    overflow: hidden;
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-    position: relative;
-}
-.ss-thumb {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-.ss-thumb-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    color: #ccc;
-}
-
-.ss-card-content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 3px;
-    padding-left: 4px;
-    overflow: hidden;
-}
-
-.ss-card-title {
-    font-size: 10.5px;
-    color: #222;
-    line-height: 1.3;
-    font-weight: 500;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-    max-height: 28px;
-}
-
-.ss-card-meta {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 9px;
-    color: #999;
-    line-height: 1.2;
-    overflow: hidden;
-    white-space: nowrap;
-}
-
-.ss-store-name {
-    color: #888;
-    font-weight: 500;
-    max-width: 80px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.ss-rating {
-    color: #f5a623;
-    font-weight: 600;
-    flex-shrink: 0;
-}
-
-.ss-sold {
-    color: #999;
-    flex-shrink: 0;
-}
-
-/* ---------- Discount Box (Green) ---------- */
-.ss-discount-box {
-    flex-shrink: 0;
-    background: #e8f8f0;
-    border: 1px solid #c6ecd8;
-    border-radius: 6px;
-    padding: 5px 6px;
-    min-width: 56px;
-    max-width: 70px;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
-}
-
-.ss-price-main {
-    font-size: 12px;
-    font-weight: 800;
-    color: #00a854;
-    line-height: 1.1;
-    letter-spacing: -0.3px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.ss-discount-label {
-    font-size: 9px;
-    font-weight: 700;
-    color: #00a854;
-    line-height: 1.1;
-    white-space: nowrap;
-}
-
-.ss-discount-box.ss-no-discount {
-    background: #f5f5f5;
-    border-color: #e8e8e8;
-}
-.ss-discount-box.ss-no-discount .ss-price-main {
-    color: #666;
-    font-size: 11px;
-}
-
-/* ---------- Messages ---------- */
-.ss-msg {
-    text-align: center;
-    padding: 40px 20px;
-    font-size: 13px;
-    color: #888;
-    line-height: 1.6;
-    font-weight: 500;
-}
-.ss-msg-icon {
-    font-size: 40px;
-    margin-bottom: 10px;
-    display: block;
-    opacity: 0.5;
-}
-
-/* ---------- Footer ---------- */
-.ss-footer {
-    padding: 8px;
-    text-align: center;
-    border-top: 1px solid #f0f0f0;
-    background: #fafafa;
-    flex-shrink: 0;
-    border-radius: 0 0 10px 10px;
-}
-.ss-footer-link {
-    font-size: 11px;
-    color: #2f80ed;
-    text-decoration: none;
-    font-weight: 600;
-    display: inline-block;
-    padding: 5px 12px;
-    background: #f0f7ff;
-    border-radius: 16px;
-    transition: all 0.2s;
-}
-.ss-footer-link:hover {
-    background: #e0efff;
-}
-.ss-loading-more {
-    font-size: 9.5px;
-    color: #999;
-    margin-top: 5px;
-    text-align: center;
-    font-weight: 500;
-}
-
-/* ---------- Skeleton ---------- */
-.skel {
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-    background-size: 200% 100%;
-    animation: ss-skel 1.5s infinite;
-    border-radius: 4px;
-    pointer-events: none;
-}
-.skel.line { height: 9px; width: 100%; margin-bottom: 5px; }
-.skel.line.short { width: 60%; }
-.skel.ss-thumb-wrapper { width: 58px; height: 58px; }
-.skel.ss-discount-box { width: 56px; height: 40px; }
-.skel.ss-rank-badge { width: 17px; height: 17px; border-radius: 50%; }
-
-@keyframes ss-skel {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
