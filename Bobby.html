@@ -1,38 +1,234 @@
-{
-  "manifest_version": 3,
-  "name": "Smart Shopper",
-  "version": "1.0.0",
-  "description": "Trouvez le meilleur prix pour le même produit sur AliExpress",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage"
-  ],
-  "host_permissions": [
-    "https://*.aliexpress.com/*",
-    "https://*.aliexpress.us/*"
-  ],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://*.aliexpress.com/*",
-        "https://*.aliexpress.us/*"
-      ],
-      "js": ["content.js"],
-      "css": ["styles.css"],
-      "run_at": "document_idle"
+/* ============================================
+   Smart Shopper - Background Service Worker
+   ============================================ */
+
+const MAX_PAGES = 8;
+const PARALLEL_BATCH = 3;
+const DELAY_BETWEEN_BATCHES = 400;
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
+
+  (async () => {
+    try {
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+
+      const seenIds = new Set();
+      let firstBatchSent = false;
+      let totalFetched = 0;
+
+      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
+        const pages = [];
+        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
+          pages.push(batch + i + 1);
+        }
+
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
+
+        const newItems = [];
+        let emptyPages = 0;
+
+        for (const items of results) {
+          if (!items || !items.length) { emptyPages++; continue; }
+          for (const it of items) {
+            if (!it || !it.id || seenIds.has(it.id)) continue;
+            seenIds.add(it.id);
+            newItems.push(it);
+          }
+        }
+
+        totalFetched += newItems.length;
+
+        if (newItems.length > 0 && tabId) {
+          if (!firstBatchSent) {
+            sendResponse({
+              ok: true,
+              items: newItems,
+              searchUrl: baseUrl,
+              done: false,
+              count: newItems.length
+            });
+            firstBatchSent = true;
+          } else {
+            try {
+              chrome.tabs.sendMessage(tabId, {
+                type: 'SMART_SEARCH_UPDATE',
+                items: newItems,
+                searchUrl: baseUrl
+              });
+            } catch (e) {}
+          }
+        }
+
+        if (emptyPages === pages.length) break;
+
+        if (batch + PARALLEL_BATCH < MAX_PAGES) {
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+        }
+      }
+
+      if (tabId) {
+        try {
+          chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched });
+        } catch (e) {}
+      }
+
+      if (!firstBatchSent) {
+        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+      }
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
     }
-  ],
-  "icons": {
-    "16": "icon16.png",
-    "32": "icon32.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
-  },
-  "action": {
-    "default_title": "Smart Shopper"
+  })();
+
+  return true;
+});
+
+async function fetchPage(baseUrl, page) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const res = await fetch(url, {
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    return [];
   }
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+
+      const title = clean(o.title || (o.item && o.item.title) || '');
+
+      let img = (o.image && (o.image.imgUrl || o.image.imageUrl)) || o.picUrl || o.imageUrl || '';
+      if (typeof img === 'object') img = img.imgUrl || img.imageUrl || '';
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice ||
+                    sale.minActivityPrice || sale.minPrice ||
+                    p.formatedPrice || '';
+      const oldPrice = orig.formatedPrice || orig.minPrice || '';
+      const discount = o.discount || sale.discount || '';
+
+      const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
+      const storeUrl = (o.store && o.store.storeUrl) || o.storeUrl || '';
+
+      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar))
+                     || o.averageStarRate || o.starRating || '';
+      const sold = o.tradeDesc || o.sold || o.soldCount || '';
+      const reviews = (o.evaluation && o.evaluation.totalValidNum) || o.reviewCount || '';
+
+      const shipping = o.logisticsDesc || o.shipping || '';
+      const shippingFree = o.freeShipping ||
+                           (o.logisticsDesc && /free/i.test(o.logisticsDesc)) ||
+                           (o.shipping && /free/i.test(o.shipping));
+
+      const badges = [];
+      if (o.isChoice) badges.push('Choice');
+      if (o.isLocalReturn) badges.push('LocalReturn');
+      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
+
+      out.push({
+        id: String(id),
+        title,
+        img,
+        price,
+        oldPrice,
+        discount,
+        store,
+        storeUrl,
+        rating,
+        sold,
+        reviews,
+        shipping,
+        shippingFree,
+        badges,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1],
+      title: 'Produit similaire',
+      img: '',
+      price: '',
+      oldPrice: '',
+      discount: '',
+      store: 'AliExpress',
+      storeUrl: '',
+      rating: '',
+      sold: '',
+      reviews: '',
+      shipping: '',
+      shippingFree: false,
+      badges: [],
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
+  }
+  return out;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') {
+      depth--;
+      if (depth === 0) return html.slice(j, k + 1);
+    }
+  }
+  return null;
+}
+
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
