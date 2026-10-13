@@ -1,318 +1,406 @@
 /* ============================================
-   Smart Shopper - Background Service Worker
-   Fixed: [object Object] issue
+   Smart Shopper - Content Script
+   With Countdown Tabs + Smart Sorting
    ============================================ */
+(function () {
+  'use strict';
+  if (window.__smartShopper) return;
+  window.__smartShopper = true;
 
-const MAX_PAGES = 8;
-const PARALLEL_BATCH = 3;
-const DELAY_BETWEEN_BATCHES = 400;
+  const PANEL_ID = 'ss-panel';
+  const BATCH_SIZE = 15;
+  const ESTIMATED_SEARCH_TIME = 9000;
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'SMART_SEARCH') return;
-  const tabId = sender.tab && sender.tab.id;
+  let currentKey = '';
+  let cachedItems = [];
+  let cachedSortedItems = [];
+  let cachedSearchUrl = '';
+  let activeTab = 0;
+  let closed = false;
+  let renderedCount = 0;
+  let imageObserver = null;
+  let isLoadingMore = false;
 
-  (async () => {
-    try {
-      const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+  let searchComplete = false;
+  let searchStartTime = 0;
 
-      const seenIds = new Set();
-      let firstBatchSent = false;
-      let totalFetched = 0;
+  let pendingTabEl = null;
+  let pendingInterval = null;
 
-      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
-        const pages = [];
-        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
-          pages.push(batch + i + 1);
-        }
+  /* ---------- utils ---------- */
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  const soldNum = s => { const t = String(s || '').toLowerCase().replace(/,/g, ''); const m = t.match(/(\d+(?:\.\d+)?)\s*(k)?/); if (!m) return 0; let v = parseFloat(m[1]); if (m[2]) v *= 1000; return v; };
+  const discNum = s => num(String(s || '').replace('-', ''));
 
-        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
-
-        const newItems = [];
-        let emptyPages = 0;
-
-        for (const items of results) {
-          if (!items || !items.length) { emptyPages++; continue; }
-          for (const it of items) {
-            if (!it || !it.id || seenIds.has(it.id)) continue;
-            seenIds.add(it.id);
-            newItems.push(it);
-          }
-        }
-
-        totalFetched += newItems.length;
-        console.log('[Smart Shopper BG] Batch', Math.floor(batch / PARALLEL_BATCH) + 1,
-                    '- new items:', newItems.length);
-
-        if (newItems.length > 0 && tabId) {
-          if (!firstBatchSent) {
-            sendResponse({
-              ok: true,
-              items: newItems,
-              searchUrl: baseUrl,
-              done: false,
-              count: newItems.length
-            });
-            firstBatchSent = true;
-          } else {
-            try {
-              chrome.tabs.sendMessage(tabId, {
-                type: 'SMART_SEARCH_UPDATE',
-                items: newItems,
-                searchUrl: baseUrl
-              });
-            } catch (e) {}
-          }
-        }
-
-        if (emptyPages === pages.length) break;
-
-        if (batch + PARALLEL_BATCH < MAX_PAGES) {
-          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
-        }
-      }
-
-      console.log('[Smart Shopper BG] Total:', totalFetched);
-
-      if (tabId) {
-        try {
-          chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched });
-        } catch (e) {}
-      }
-
-      if (!firstBatchSent) {
-        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
-      }
-    } catch (e) {
-      console.error('[Smart Shopper BG] Error:', e);
-      sendResponse({ ok: false, error: String(e) });
+  function stars(rating) {
+    const r = parseFloat(rating) || 0;
+    const full = Math.floor(r);
+    const half = (r - full) >= 0.5;
+    let out = '';
+    for (let i = 0; i < 5; i++) {
+      if (i < full) out += '★';
+      else if (i === full && half) out += '★';
+      else out += '☆';
     }
-  })();
+    return out;
+  }
 
-  return true;
-});
+  /* ---------- product detection ---------- */
+  function detectProduct() {
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const sc of scripts) {
+        const data = JSON.parse(sc.textContent);
+        const arr = Array.isArray(data) ? data : [data];
+        for (const node of arr) {
+          const g = n => { if (!n) return null; if (n['@type'] === 'Product') return n; if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } } if (n['@graph']) { const r = g(n['@graph']); if (r) return r; } return null; };
+          const p = g(node);
+          if (p && p.name) return { title: String(p.name).slice(0, 160) };
+        }
+      }
+    } catch (e) {}
+    const ogType = document.querySelector('meta[property="og:type"]');
+    const isProduct = ogType && /product/i.test(ogType.content || '');
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    const title = ogTitle ? ogTitle.content.trim() : (document.title || '').replace(/[|\-–—].*$/, '').trim();
+    const hasPrice = !!document.querySelector('[itemprop="price"], [class*="price" i], meta[itemprop="price"], [id*="price" i]');
+    if ((isProduct || hasPrice) && title.length > 8) return { title: title.slice(0, 160) };
+    return null;
+  }
 
-/* ============================================
-   استخراج النص من أي نوع قيمة (نص، رقم، كائن)
-   ============================================ */
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : '';
-  if (typeof v === 'object') {
-    // جرّب الحقول الشائعة بالترتيب
-    const keys = [
-      'displayTitle', 'text', 'title', 'value', 'name',
-      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
-      'price', 'storeName', 'desc', 'label'
+  /* ---------- panel DOM ---------- */
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="ss-header" id="ss-header">
+        <div class="ss-logo">S</div>
+        <div class="ss-titles">
+          <div class="ss-title">Smart Shopper</div>
+          <div class="ss-sub">Même produit - autres vendeurs ✓</div>
+        </div>
+        <div class="ss-header-btns">
+          <button class="ss-hbtn" id="ss-refresh" title="Actualiser">⟳</button>
+          <button class="ss-hbtn" id="ss-minimize" title="Réduire">–</button>
+          <button class="ss-hbtn" id="ss-close" title="Fermer">✕</button>
+        </div>
+      </div>
+      <div class="ss-body" id="ss-body">
+        <div class="ss-tabs" id="ss-tabs">
+          <span class="ss-tab active" data-i="0">🛍️ Tous</span>
+          <span class="ss-tab" data-i="1">💰 Moins cher</span>
+          <span class="ss-tab" data-i="2">⭐ Mieux noté</span>
+          <span class="ss-tab" data-i="3">🔥 Meilleure remise</span>
+          <span class="ss-tab" data-i="4">📈 Plus vendu</span>
+        </div>
+        <div class="ss-list" id="ss-list"></div>
+        <div class="ss-footer" id="ss-footer"></div>
+      </div>`;
+    document.documentElement.appendChild(panel);
+
+    document.getElementById('ss-close').onclick = () => { closed = true; panel.remove(); };
+    document.getElementById('ss-minimize').onclick = () => {
+      const b = document.getElementById('ss-body');
+      b.style.display = b.style.display === 'none' ? '' : 'none';
+    };
+    document.getElementById('ss-refresh').onclick = () => { closed = false; currentKey = ''; scan(); };
+    document.getElementById('ss-tabs').addEventListener('click', onTabClick);
+    document.getElementById('ss-list').addEventListener('scroll', onScroll, { passive: true });
+    makeDraggable(panel, document.getElementById('ss-header'));
+  }
+
+  /* ---------- Tabs ---------- */
+  function onTabClick(e) {
+    const t = e.target.closest('.ss-tab');
+    if (!t) return;
+    const newTab = +t.dataset.i;
+    if (newTab === activeTab && !t.classList.contains('ss-tab-counting')) return;
+
+    if (searchComplete) {
+      activateTab(t, newTab);
+    } else {
+      if (pendingTabEl && pendingTabEl !== t) restoreTab(pendingTabEl);
+      pendingTabEl = t;
+      startPendingCountdown(t);
+    }
+  }
+
+  function activateTab(t, newTab) {
+    if (pendingInterval) { clearInterval(pendingInterval); pendingInterval = null; }
+    if (pendingTabEl) { restoreTab(pendingTabEl); pendingTabEl = null; }
+
+    activeTab = newTab;
+    document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x === t));
+    cachedSortedItems = [];
+    renderedCount = 0;
+    renderList(true);
+  }
+
+  function restoreTab(t) {
+    if (t.dataset.originalText) {
+      t.textContent = t.dataset.originalText;
+      delete t.dataset.originalText;
+    }
+    t.classList.remove('ss-tab-counting');
+  }
+
+  function startPendingCountdown(tabEl) {
+    if (!tabEl.dataset.originalText) {
+      tabEl.dataset.originalText = tabEl.textContent;
+    }
+    tabEl.classList.add('ss-tab-counting');
+
+    const updateCountdown = () => {
+      if (searchComplete) {
+        activateTab(tabEl, +tabEl.dataset.i);
+        return;
+      }
+      const elapsed = Date.now() - searchStartTime;
+      const remaining = Math.max(1, Math.ceil((ESTIMATED_SEARCH_TIME - elapsed) / 1000));
+      tabEl.textContent = `⏳ ${remaining}s`;
+    };
+
+    updateCountdown();
+    if (pendingInterval) clearInterval(pendingInterval);
+    pendingInterval = setInterval(updateCountdown, 1000);
+  }
+
+  function onScroll(e) {
+    if (isLoadingMore) return;
+    const list = e.target;
+    if (list.scrollTop + list.clientHeight >= list.scrollHeight - 400) loadMore();
+  }
+
+  function loadMore() {
+    if (renderedCount >= cachedSortedItems.length) return;
+    isLoadingMore = true;
+    requestAnimationFrame(() => { renderList(false); isLoadingMore = false; });
+  }
+
+  function makeDraggable(el, handle) {
+    let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
+    handle.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      drag = true; sx = e.clientX; sy = e.clientY;
+      const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+      el.style.right = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px'; el.style.bottom = 'auto';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      el.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
+      el.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+    });
+    window.addEventListener('mouseup', () => drag = false);
+  }
+
+  /* ---------- rendering ---------- */
+  function skeleton() {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    l.innerHTML = Array.from({ length: 6 }, () =>
+      `<div class="ss-card"><div class="ss-rank-badge skel"></div><div class="ss-thumb-wrapper skel"></div><div class="ss-card-content"><div class="skel line"></div><div class="skel line short"></div></div><div class="ss-discount-box skel"></div></div>`).join('');
+  }
+
+  function message(msg) {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`;
+  }
+
+  function applySort() {
+    if (activeTab === 0) {
+      cachedSortedItems = [...cachedItems];
+      return;
+    }
+    const sorters = [
+      null,
+      (a, b) => num(a.price) - num(b.price) || soldNum(b.sold) - soldNum(a.sold),
+      (a, b) => num(b.rating) - num(a.rating) || num(a.price) - num(b.price),
+      (a, b) => discNum(b.discount) - discNum(a.discount),
+      (a, b) => soldNum(b.sold) - soldNum(a.sold)
     ];
-    for (const k of keys) {
-      if (v[k] != null && typeof v[k] !== 'object') {
-        return String(v[k]);
-      }
-    }
-    // إذا فشل، حاول استخراج أول قيمة نصية
-    for (const k in v) {
-      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
-      if (typeof v[k] === 'number') return String(v[k]);
-    }
-    return '';
+    cachedSortedItems = [...cachedItems].sort(sorters[activeTab] || sorters[1]);
   }
-  return String(v);
-}
 
-/* ============================================
-   جلب صفحة واحدة
-   ============================================ */
-async function fetchPage(baseUrl, page) {
-  try {
-    const url = baseUrl + '&page=' + page;
-    const res = await fetch(url, {
-      headers: {
-        'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
-    return items;
-  } catch (e) {
-    return [];
+  function buildCard(it, i) {
+    const rankColors = ['#00b578', '#2f80ed', '#9b51e0', '#eb5757', '#f2994a', '#219653'];
+    const rankColor = rankColors[i % rankColors.length];
+
+    const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
+    let discountBoxHtml = '';
+    if (discountValue) {
+      discountBoxHtml = `
+        <div class="ss-discount-box">
+          <div class="ss-price-main">${it.price ? esc(it.price) : 'Voir'}</div>
+          <div class="ss-discount-label">-${esc(discountValue)}%</div>
+        </div>`;
+    } else {
+      discountBoxHtml = `
+        <div class="ss-discount-box ss-no-discount">
+          <div class="ss-price-main">${it.price ? esc(it.price) : 'Voir'}</div>
+        </div>`;
+    }
+
+    return `
+      <a class="ss-card" href="${esc(it.link)}" target="_blank" rel="noopener">
+        <div class="ss-rank-badge" style="background:${rankColor}">${i + 1}</div>
+
+        <div class="ss-thumb-wrapper">
+          ${it.img 
+            ? `<img class="ss-thumb" data-src="${esc(it.img)}" alt="">` 
+            : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}
+        </div>
+
+        <div class="ss-card-content">
+          <div class="ss-card-title">${esc(it.title || 'Produit similaire')}</div>
+          <div class="ss-card-meta">
+            <span class="ss-store-name">${esc(it.store)}</span>
+            ${it.rating ? `<span class="ss-rating">★ ${esc(it.rating)}</span>` : ''}
+            ${it.sold ? `<span class="ss-sold">${esc(it.sold)} vendus</span>` : ''}
+          </div>
+        </div>
+
+        ${discountBoxHtml}
+      </a>`;
   }
-}
 
-/* ============================================
-   استخراج المنتجات مع معالجة الكائنات
-   ============================================ */
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-
-      // العنوان - استخراج من كائن أو نص
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-
-      // الصورة - استخراج دفاعي
-      let img = '';
-      if (o.image) {
-        if (typeof o.image === 'string') img = o.image;
-        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
-      }
-      if (!img && o.picUrl) {
-        if (typeof o.picUrl === 'string') img = o.picUrl;
-        else img = o.picUrl.imgUrl || o.picUrl.url || '';
-      }
-      if (!img && o.imageUrl) {
-        if (typeof o.imageUrl === 'string') img = o.imageUrl;
-        else img = o.imageUrl.imgUrl || o.imageUrl.url || '';
-      }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      // الأسعار
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-
-      const price = extractText(
-        sale.formatedActivityPrice ||
-        sale.formatedPrice ||
-        sale.minActivityPrice ||
-        sale.minPrice ||
-        p.formatedPrice ||
-        p.minPrice ||
-        ''
-      );
-      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
-      const discount = extractText(o.discount || sale.discount || '');
-
-      // المتجر
-      let store = 'AliExpress';
-      if (o.store) {
-        if (typeof o.store === 'string') store = o.store;
-        else store = extractText(o.store.storeName || o.store.name || 'AliExpress');
-      } else if (o.storeName) {
-        store = extractText(o.storeName);
-      }
-      if (!store || store === '[object Object]') store = 'AliExpress';
-
-      // التقييمات
-      const rating = extractText(
-        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
-        o.averageStarRate ||
-        o.starRating ||
-        ''
-      );
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      // الشحن
-      const shipping = extractText(o.logisticsDesc || o.shipping || '');
-      const shippingFree = o.freeShipping ||
-                           (typeof shipping === 'string' && /free|gratuit/i.test(shipping));
-
-      const badges = [];
-      if (o.isChoice) badges.push('Choice');
-      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
-
-      out.push({
-        id: String(id),
-        title: title || 'Produit similaire',
-        img,
-        price,
-        oldPrice,
-        discount,
-        store,
-        rating,
-        sold,
-        shipping,
-        shippingFree,
-        badges,
-        link: 'https://www.aliexpress.com/item/' + id + '.html'
+  function setupImageObserver() {
+    if (imageObserver) imageObserver.disconnect();
+    imageObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const img = entry.target;
+          if (img.dataset.src) {
+            img.src = img.dataset.src;
+            img.removeAttribute('data-src');
+          }
+          imageObserver.unobserve(img);
+        }
       });
-    } catch (e) {
-      console.warn('[Smart Shopper BG] Skipped bad item:', e);
+    }, { root: document.getElementById('ss-list'), rootMargin: '300px' });
+  }
+
+  function renderList(reset) {
+    const l = document.getElementById('ss-list'); if (!l) return;
+
+    if (reset) {
+      if (!cachedItems.length) { message('Aucun produit similaire trouvé.'); return; }
+      applySort();
+      l.innerHTML = '';
+      renderedCount = 0;
+      setupImageObserver();
+    }
+
+    if (!cachedSortedItems.length) return;
+
+    const start = renderedCount;
+    const end = Math.min(start + BATCH_SIZE, cachedSortedItems.length);
+    const batch = cachedSortedItems.slice(start, end);
+    if (!batch.length) return;
+
+    const fragment = document.createDocumentFragment();
+    const temp = document.createElement('div');
+    temp.innerHTML = batch.map((it, i) => buildCard(it, start + i)).join('');
+    while (temp.firstChild) fragment.appendChild(temp.firstChild);
+    l.appendChild(fragment);
+    renderedCount = end;
+
+    if (imageObserver) {
+      l.querySelectorAll('img[data-src]').forEach(img => imageObserver.observe(img));
+    }
+
+    updateFooter();
+  }
+
+  function updateFooter() {
+    const f = document.getElementById('ss-footer'); if (!f) return;
+    const remaining = cachedSortedItems.length - renderedCount;
+    if (cachedSearchUrl) {
+      f.innerHTML = `
+        <a href="${esc(cachedSearchUrl)}" target="_blank" rel="noopener" class="ss-footer-link">
+          Voir tout sur AliExpress ↗
+        </a>
+        ${remaining > 0 ? `<div class="ss-loading-more">${renderedCount} / ${cachedSortedItems.length} · Défilez pour plus</div>` : ''}`;
     }
   }
-  return out;
-}
 
-/* ============================================
-   استخراج IDs احتياطي
-   ============================================ */
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set();
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({
-      id: m[1],
-      title: 'Produit similaire',
-      img: '',
-      price: '',
-      oldPrice: '',
-      discount: '',
-      store: 'AliExpress',
-      rating: '',
-      sold: '',
-      shipping: '',
-      shippingFree: false,
-      badges: [],
-      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+  /* ---------- search flow ---------- */
+  function runSearch(title) {
+    buildPanel();
+    const panel = document.getElementById(PANEL_ID);
+    panel.style.display = '';
+
+    cachedItems = [];
+    cachedSortedItems = [];
+    renderedCount = 0;
+    searchComplete = false;
+    searchStartTime = Date.now();
+    activeTab = 0;
+
+    if (pendingInterval) { clearInterval(pendingInterval); pendingInterval = null; }
+    if (pendingTabEl) { restoreTab(pendingTabEl); pendingTabEl = null; }
+
+    document.querySelectorAll('.ss-tab').forEach(x => {
+      x.classList.toggle('active', x.dataset.i === '0');
+    });
+
+    skeleton();
+
+    chrome.runtime.sendMessage({ type: 'SMART_SEARCH', title }, resp => {
+      if (!resp || !document.getElementById(PANEL_ID)) return;
+      if (!resp.ok) { message('Impossible de contacter AliExpress. Réessayez.'); return; }
+      cachedItems = resp.items || [];
+      cachedSearchUrl = resp.searchUrl || '';
+      renderList(true);
     });
   }
-  return out;
-}
 
-/* ============================================
-   استخراج مصفوفة JSON من HTML
-   ============================================ */
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') {
-      depth--;
-      if (depth === 0) return html.slice(j, k + 1);
-    }
+  function scan() {
+    if (closed) return;
+    const p = detectProduct();
+    const key = p ? (location.host + location.pathname + '|' + p.title) : '';
+    if (!p || key === currentKey) return;
+    currentKey = key;
+    runSearch(p.title);
   }
-  return null;
-}
 
-/* ============================================
-   تنظيف النصوص
-   ============================================ */
-function clean(s) {
-  return String(s)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+  /* ---------- streaming updates ---------- */
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg) return;
+
+    if (msg.type === 'SMART_SEARCH_UPDATE') {
+      const newItems = msg.items || [];
+      if (!newItems.length) return;
+      const existingIds = new Set(cachedItems.map(x => x.id));
+      const uniqueNew = newItems.filter(x => !existingIds.has(x.id));
+      if (uniqueNew.length) {
+        cachedItems = cachedItems.concat(uniqueNew);
+        cachedSearchUrl = msg.searchUrl || cachedSearchUrl;
+        const list = document.getElementById('ss-list');
+        const scrollTop = list ? list.scrollTop : 0;
+        applySort();
+        if (list) {
+          list.innerHTML = '';
+          renderedCount = 0;
+          setupImageObserver();
+          renderList(false);
+          list.scrollTop = scrollTop;
+        }
+        updateFooter();
+      }
+    }
+
+    if (msg.type === 'SMART_SEARCH_DONE') {
+      console.log('[Smart Shopper] Search complete. Total:', cachedItems.length);
+      searchComplete = true;
+      if (pendingTabEl) {
+        activateTab(pendingTabEl, +pendingTabEl.dataset.i);
+      }
+      updateFooter();
+    }
+  });
+
+  scan();
+  setInterval(scan, 2500);
+})();
