@@ -1,327 +1,89 @@
-/* styles.css */
+/* Smart Shopper - background service worker */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  (async () => {
+    try {
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const url = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+      const res = await fetch(url, {
+        headers: {
+          'Accept-Language': 'en-US,en;q=0.9',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+        }
+      });
+      const html = await res.text();
+      let items = parseItems(html);
+      if (!items.length) items = fallbackIds(html);
+      sendResponse({ ok: true, items: items.slice(0, 8), searchUrl: url });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+  return true; // async response
+});
 
-/* الحاوية الرئيسية للنافذة */
-#ss-panel {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    width: 340px;
-    max-height: 85vh;
-    background-color: #ffffff;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    direction: ltr;
-    user-select: none;
-}
-
-/* الهيدر (الرأس) */
-.ss-header {
-    display: flex;
-    align-items: center;
-    padding: 12px 14px;
-    border-bottom: 1px solid #f0f0f0;
-    background: #fff;
-    cursor: grab;
-    border-radius: 8px 8px 0 0;
-}
-.ss-header:active {
-    cursor: grabbing;
-}
-
-.ss-logo {
-    background-color: #e62e04;
-    color: white;
-    font-weight: 900;
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    margin-right: 10px;
-}
-
-.ss-titles {
-    flex-grow: 1;
-    display: flex;
-    flex-direction: column;
-}
-
-.ss-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #222;
-    line-height: 1.2;
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const title = clean(o.title || (o.item && o.item.title) || '');
+      let img = (o.image && (o.image.imgUrl || o.image.imageUrl)) || o.image || o.picUrl || o.imageUrl || '';
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || '';
+      const oldPrice = orig.formatedPrice || orig.minPrice || '';
+      const discount = o.discount || sale.discount || '';
+      const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
+      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '';
+      const sold = o.tradeDesc || o.sold || o.soldCount || '';
+      out.push({ id: String(id), title, img, price, oldPrice, discount, store, rating, sold,
+                 link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch (e) { /* skip bad item */ }
+  }
+  return out;
 }
 
-.ss-sub {
-    font-size: 10px;
-    color: #888;
-    margin-top: 2px;
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html)) && out.length < 8) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '', discount: '', store: 'AliExpress', rating: '', sold: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
+  }
+  return out;
 }
 
-.ss-header-btns {
-    display: flex;
-    gap: 6px;
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
 }
 
-.ss-hbtn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 14px;
-    color: #666;
-    padding: 4px 6px;
-    border-radius: 4px;
-    transition: background 0.2s;
-}
-
-.ss-hbtn:hover {
-    background-color: #f5f5f5;
-    color: #000;
-}
-
-/* التبويبات */
-.ss-tabs {
-    display: flex;
-    overflow-x: auto;
-    border-bottom: 1px solid #f0f0f0;
-    padding: 0 10px;
-    white-space: nowrap;
-    background: #fff;
-}
-
-.ss-tabs::-webkit-scrollbar {
-    display: none;
-}
-
-.ss-tab {
-    padding: 10px 12px;
-    font-size: 12px;
-    color: #666;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s;
-}
-
-.ss-tab.active {
-    color: #000;
-    font-weight: 700;
-    border-bottom: 2px solid #000;
-}
-
-.ss-tab:hover:not(.active) {
-    color: #000;
-}
-
-/* قائمة المنتجات */
-.ss-list {
-    overflow-y: auto;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    background: #fff;
-    max-height: calc(85vh - 120px);
-}
-
-.ss-list::-webkit-scrollbar {
-    width: 6px;
-}
-.ss-list::-webkit-scrollbar-thumb {
-    background-color: #ccc;
-    border-radius: 3px;
-}
-
-/* صف المنتج */
-.ss-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px;
-    border: 1px solid #f0f0f0;
-    border-radius: 6px;
-    position: relative;
-    background: #fff;
-    text-decoration: none;
-    color: inherit;
-    transition: box-shadow 0.2s, border-color 0.2s;
-}
-
-.ss-row:hover {
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    border-color: #e0e0e0;
-}
-
-/* ترتيب المنتج (الدائرة الملونة) */
-.ss-rank {
-    position: absolute;
-    top: -6px;
-    left: -6px;
-    color: white;
-    font-size: 11px;
-    font-weight: bold;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2px solid white;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-}
-
-/* صورة المنتج */
-.ss-thumb {
-    width: 64px;
-    height: 64px;
-    flex-shrink: 0;
-    object-fit: contain;
-    border-radius: 4px;
-    background: #fafafa;
-}
-
-.ss-thumb-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    color: #ccc;
-}
-
-/* معلومات المنتج */
-.ss-info {
-    flex-grow: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0; /* لمنع تجاوز النص */
-}
-
-.ss-title {
-    font-size: 11px;
-    color: #333;
-    line-height: 1.3;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-}
-
-.ss-meta-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: 10px;
-    color: #888;
-    align-items: center;
-}
-
-.ss-store {
-    color: #666;
-    font-weight: 500;
-    max-width: 90px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.ss-rating {
-    color: #f5a623;
-}
-
-.ss-sold {
-    color: #888;
-}
-
-/* الأسعار */
-.ss-price-side {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    flex-shrink: 0;
-    gap: 2px;
-}
-
-.ss-price {
-    font-size: 15px;
-    font-weight: 800;
-    color: #e62e04;
-    line-height: 1.2;
-}
-
-.ss-price.ss-open {
-    font-size: 12px;
-    color: #2f80ed;
-    font-weight: 600;
-}
-
-.ss-disc {
-    font-size: 10px;
-    background-color: #e62e04;
-    color: white;
-    padding: 1px 4px;
-    border-radius: 3px;
-    font-weight: bold;
-    line-height: 1;
-}
-
-.ss-old {
-    font-size: 10px;
-    color: #999;
-    text-decoration: line-through;
-}
-
-/* رسائل الحالة والتحميل */
-.ss-msg {
-    text-align: center;
-    padding: 20px;
-    font-size: 12px;
-    color: #888;
-}
-
-/* هيكل التحميل (Skeleton) */
-.skel {
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-    background-size: 200% 100%;
-    animation: ss-skel 1.5s infinite;
-    border-radius: 4px;
-}
-.skel.line { height: 12px; width: 100%; margin-bottom: 6px; }
-.skel.line.short { width: 60%; }
-.skel.ss-rank { background: #f0f0f0; border: none; }
-.skel.ss-thumb { width: 64px; height: 64px; }
-.skel.ss-price-side { width: 50px; height: 30px; }
-
-@keyframes ss-skel {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-}
-
-/* الفوتر */
-.ss-footer {
-    padding: 10px;
-    text-align: center;
-    border-top: 1px solid #f0f0f0;
-    background: #fafafa;
-    border-radius: 0 0 8px 8px;
-}
-
-.ss-footer a {
-    font-size: 12px;
-    color: #2f80ed;
-    text-decoration: none;
-    font-weight: 600;
-}
-
-.ss-footer a:hover {
-    text-decoration: underline;
-}
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
