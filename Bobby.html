@@ -1,246 +1,421 @@
 /* ============================================
-   Smart Shopper - Background Service Worker
-   Fixed: store name extraction
+   Smart Shopper - Cloudflare Worker
+   ScrapingAnt (Primary) + ScraperAPI (Fallback)
+   + Daily Cron Auto-Recovery
    ============================================ */
 
-const MAX_PAGES = 8;
-const PARALLEL_BATCH = 3;
-const DELAY_BETWEEN_BATCHES = 400;
+const CACHE_TTL_SECONDS = 3600;
+const MAX_CONSECUTIVE_FAILURES = 10;
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'SMART_SEARCH') return;
-  const tabId = sender.tab && sender.tab.id;
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400'
+    };
 
-  (async () => {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
     try {
-      const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+      const url = new URL(request.url);
 
-      const seenIds = new Set();
-      let firstBatchSent = false;
-      let totalFetched = 0;
-
-      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
-        const pages = [];
-        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
-          pages.push(batch + i + 1);
-        }
-
-        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
-        const newItems = [];
-        let emptyPages = 0;
-
-        for (const items of results) {
-          if (!items || !items.length) { emptyPages++; continue; }
-          for (const it of items) {
-            if (!it || !it.id || seenIds.has(it.id)) continue;
-            seenIds.add(it.id);
-            newItems.push(it);
+      if (url.pathname === '/health') {
+        const statuses = await getProviderStatuses(env);
+        return json({
+          status: 'ok',
+          cron: 'daily (0 3 * * *)',
+          cache: env.NEON_DATABASE_URL ? 'neon' : 'disabled',
+          providers: {
+            scrapingant: formatStatus('scrapingant', statuses.scrapingant, !!env.SCRAPINGANT_API_KEY),
+            scraperapi: formatStatus('scraperapi', statuses.scraperapi, !!env.SCRAPER_API_KEY)
           }
-        }
-
-        totalFetched += newItems.length;
-
-        if (newItems.length > 0 && tabId) {
-          if (!firstBatchSent) {
-            sendResponse({ ok: true, items: newItems, searchUrl: baseUrl, done: false, count: newItems.length });
-            firstBatchSent = true;
-          } else {
-            try {
-              chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_UPDATE', items: newItems, searchUrl: baseUrl });
-            } catch (e) {}
-          }
-        }
-
-        if (emptyPages === pages.length) break;
-        if (batch + PARALLEL_BATCH < MAX_PAGES) await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+        }, 200, corsHeaders);
       }
 
-      if (tabId) {
-        try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }); } catch (e) {}
+      if (url.pathname === '/fetch') {
+        const targetUrl = url.searchParams.get('url');
+        if (!targetUrl) return json({ error: 'Missing url' }, 400, corsHeaders);
+
+        if (!/^https?:\/\/([a-z0-9-]+\.)?aliexpress\.(com|us)\//i.test(targetUrl)) {
+          return json({ error: 'Only aliexpress.com URLs allowed' }, 400, corsHeaders);
+        }
+
+        const cacheKey = await hashUrl(targetUrl);
+        const cached = await getCacheFromNeon(cacheKey, env);
+        if (cached) {
+          return new Response(cached, {
+            status: 200,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/html; charset=utf-8',
+              'X-Cache': 'HIT'
+            }
+          });
+        }
+
+        const { html, provider } = await fetchWithFallback(targetUrl, env);
+
+        if (!html) {
+          return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
+        }
+
+        if (html.length > 5000) {
+          ctx.waitUntil(saveToCache(cacheKey, html, env));
+        }
+
+        return new Response(html, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Cache': 'MISS',
+            'X-Provider': provider
+          }
+        });
       }
-      if (!firstBatchSent) sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+
+      if (url.pathname === '/providers') {
+        const statuses = await getProviderStatuses(env);
+        return json(statuses, 200, corsHeaders);
+      }
+
+      if (url.pathname === '/run-health-check') {
+        ctx.waitUntil(healthCheckAllProviders(env));
+        return json({ success: true, message: 'Health check started' }, 200, corsHeaders);
+      }
+
+      if (url.pathname === '/reset-provider') {
+        const provider = url.searchParams.get('provider');
+        if (!provider) return json({ error: 'Missing provider' }, 400, corsHeaders);
+        await clearProviderStatus(provider, env);
+        return json({ success: true, reset: provider }, 200, corsHeaders);
+      }
+
+      if (url.pathname === '/stats') {
+        const stats = await getNeonStats(env);
+        return json(stats, 200, corsHeaders);
+      }
+
+      return json({ error: 'Not found' }, 404, corsHeaders);
     } catch (e) {
-      sendResponse({ ok: false, error: String(e) });
+      console.error('[Worker] Error:', e.message);
+      return json({ error: e.message }, 500, corsHeaders);
     }
-  })();
+  },
 
-  return true;
-});
-
-/* ---------- استخراج النص من أي قيمة ---------- */
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : '';
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
-      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
-      'price', 'storeName', 'desc', 'label'];
-    for (const k of keys) {
-      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
-    }
-    for (const k in v) {
-      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
-    }
-    return '';
+  async scheduled(event, env, ctx) {
+    console.log('[Cron] Daily health check at', new Date().toISOString());
+    ctx.waitUntil(healthCheckAllProviders(env));
   }
-  return String(v);
-}
+};
 
-/* ---------- استخراج اسم المتجر (شامل) ---------- */
-function extractStore(o) {
-  const candidates = [
-    o.storeName,
-    o.sellerName,
-    o.shopName,
-    o.companyName,
-    o.sellerAdminName,
-    o.storeAdminName,
-    o.store && o.store.storeName,
-    o.store && o.store.name,
-    o.store && o.store.sellerName,
-    o.store && o.store.companyName,
-    o.seller && o.seller.name,
-    o.seller && o.seller.storeName,
-    o.seller && o.seller.companyName,
-    o.shop && o.shop.name,
-    o.shopInfo && o.shopInfo.name,
-    o.storeInfo && o.storeInfo.name
-  ];
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim() && c !== 'undefined' && c !== 'null' && c !== 'AliExpress') {
-      return c.trim();
-    }
-  }
-  return 'AliExpress';
-}
+async function fetchWithFallback(targetUrl, env) {
+  const providers = [
+    { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY, fn: fetchFromScrapingAnt },
+    { name: 'scraperapi', key: env.SCRAPER_API_KEY, fn: fetchFromScraperAPI }
+  ].filter(p => p.key);
 
-/* ---------- جلب صفحة ---------- */
-async function fetchPage(baseUrl, page) {
-  try {
-    const url = baseUrl + '&page=' + page;
-    const res = await fetch(url, {
-      headers: {
-        'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
-    return items;
-  } catch (e) {
-    return [];
-  }
-}
+  if (!providers.length) throw new Error('No providers configured');
 
-/* ---------- استخراج المنتجات ---------- */
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
+  for (const provider of providers) {
+    const status = await getProviderStatus(provider.name, env);
 
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-
-      let img = '';
-      if (o.image) {
-        if (typeof o.image === 'string') img = o.image;
-        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
-      }
-      if (!img && o.picUrl) {
-        if (typeof o.picUrl === 'string') img = o.picUrl;
-        else img = o.picUrl.imgUrl || o.picUrl.url || '';
-      }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
-                    sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
-      const discount = extractText(o.discount || sale.discount || '');
-
-      const store = extractStore(o);
-
-      const rating = extractText(
-        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
-        o.averageStarRate || o.starRating || ''
-      );
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      const shipping = extractText(o.logisticsDesc || o.shipping || '');
-      const shippingFree = o.freeShipping ||
-                           (typeof shipping === 'string' && /free|gratuit/i.test(shipping));
-
-      const badges = [];
-      if (o.isChoice) badges.push('Choice');
-      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
-
-      out.push({
-        id: String(id),
-        title: title || 'Produit similaire',
-        img, price, oldPrice, discount, store, rating, sold,
-        shipping, shippingFree, badges,
-        link: 'https://www.aliexpress.com/item/' + id + '.html'
-      });
-    } catch (e) {}
-  }
-  return out;
-}
-
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set(); const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({
-      id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '',
-      discount: '', store: 'AliExpress', rating: '', sold: '',
-      shipping: '', shippingFree: false, badges: [],
-      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
-    });
-  }
-  return out;
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
+    if (status.disabled) {
+      console.log(`[CircuitBreaker] ${provider.name} disabled - skip`);
       continue;
     }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+
+    try {
+      console.log(`[CircuitBreaker] Trying ${provider.name}...`);
+      const html = await provider.fn(targetUrl, provider.key);
+
+      if (html && html.length > 5000) {
+        console.log(`[CircuitBreaker] Success via ${provider.name}`);
+        return { html, provider: provider.name };
+      }
+    } catch (e) {
+      console.warn(`[CircuitBreaker] ${provider.name} error:`, e.message);
+
+      if (isQuotaError(e)) {
+        await disableProvider(provider.name, e.message, status, env);
+      }
+    }
   }
-  return null;
+
+  return { html: null, provider: null };
 }
 
-function clean(s) {
-  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+async function healthCheckAllProviders(env) {
+  const providers = [
+    { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY },
+    { name: 'scraperapi', key: env.SCRAPER_API_KEY }
+  ].filter(p => p.key);
+
+  console.log(`[Cron] Checking ${providers.length} providers...`);
+
+  for (const provider of providers) {
+    const status = await getProviderStatus(provider.name, env);
+
+    if (!status.disabled) {
+      console.log(`[Cron] ${provider.name} active - skip`);
+      continue;
+    }
+
+    if (status.permanent) {
+      console.log(`[Cron] ${provider.name} permanently disabled - skip`);
+      continue;
+    }
+
+    console.log(`[Cron] Testing ${provider.name}...`);
+    const recovered = await testProvider(provider.name, provider.key);
+
+    if (recovered) {
+      await clearProviderStatus(provider.name, env);
+      console.log(`[Cron] ${provider.name} RECOVERED!`);
+    } else {
+      await updateLastHealthCheck(provider.name, status, env);
+      console.log(`[Cron] ${provider.name} still disabled`);
+    }
+  }
+
+  console.log('[Cron] Done');
+}
+
+async function testProvider(providerName, apiKey) {
+  try {
+    const testUrl = 'https://httpbin.org/ip';
+    const html = providerName === 'scrapingant'
+      ? await fetchFromScrapingAnt(testUrl, apiKey)
+      : await fetchFromScraperAPI(testUrl, apiKey);
+
+    return html && html.length > 20;
+  } catch (e) {
+    console.warn(`[Cron] ${providerName} test failed:`, e.message);
+    return false;
+  }
+}
+
+async function fetchFromScrapingAnt(targetUrl, apiKey) {
+  const url = new URL('https://api.scrapingant.com/v2/general');
+  url.searchParams.set('x-api-key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('browser', 'false');
+  url.searchParams.set('proxy_country', 'US');
+
+  const res = await fetch(url.toString());
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch (e) {}
+
+    if (res.status === 402 || /credit|quota|exceed|limit/i.test(errBody)) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 150)}`);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
+    }
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
+  }
+
+  return await res.text();
+}
+
+async function fetchFromScraperAPI(targetUrl, apiKey) {
+  const url = new URL('https://api.scraperapi.com/');
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('render', 'false');
+  url.searchParams.set('country_code', 'us');
+
+  const res = await fetch(url.toString());
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch (e) {}
+
+    if (res.status === 402 || /credit|quota|exceed|limit/i.test(errBody)) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 150)}`);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
+    }
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
+  }
+
+  return await res.text();
+}
+
+function isQuotaError(error) {
+  const msg = String(error.message || '').toLowerCase();
+  return msg.includes('402') || msg.includes('quota') ||
+         msg.includes('credit') || msg.includes('exceed') ||
+         msg.includes('exhaust') || msg.includes('insufficient') ||
+         msg.includes('out of');
+}
+
+async function disableProvider(providerName, reason, currentStatus, env) {
+  if (!env.PROVIDER_KV) return;
+
+  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
+
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    const status = {
+      disabled: true,
+      permanent: true,
+      reason: 'Max consecutive failures reached',
+      consecutiveFailures: consecutiveFailures,
+      disabledAt: currentStatus.disabledAt || new Date().toISOString(),
+      lastHealthCheck: new Date().toISOString()
+    };
+    await env.PROVIDER_KV.put(`provider:${providerName}`,
+      JSON.stringify(status), { expirationTtl: 86400 * 30 });
+    console.warn(`[CircuitBreaker] ${providerName} PERMANENTLY disabled`);
+    return;
+  }
+
+  const status = {
+    disabled: true,
+    reason: reason,
+    consecutiveFailures: consecutiveFailures,
+    disabledAt: currentStatus.disabledAt || new Date().toISOString(),
+    lastHealthCheck: new Date().toISOString()
+  };
+
+  await env.PROVIDER_KV.put(`provider:${providerName}`,
+    JSON.stringify(status), { expirationTtl: 86400 * 30 });
+
+  console.log(`[CircuitBreaker] ${providerName} disabled (failure #${consecutiveFailures})`);
+}
+
+async function getProviderStatus(providerName, env) {
+  if (!env.PROVIDER_KV) return { disabled: false };
+  try {
+    const raw = await env.PROVIDER_KV.get(`provider:${providerName}`);
+    if (!raw) return { disabled: false };
+    return JSON.parse(raw);
+  } catch (e) {
+    return { disabled: false };
+  }
+}
+
+async function getProviderStatuses(env) {
+  const statuses = {};
+  for (const p of ['scrapingant', 'scraperapi']) {
+    statuses[p] = await getProviderStatus(p, env);
+  }
+  return statuses;
+}
+
+async function clearProviderStatus(providerName, env) {
+  if (!env.PROVIDER_KV) return;
+  await env.PROVIDER_KV.delete(`provider:${providerName}`);
+  console.log(`[CircuitBreaker] Cleared status for ${providerName}`);
+}
+
+async function updateLastHealthCheck(providerName, status, env) {
+  if (!env.PROVIDER_KV) return;
+  status.lastHealthCheck = new Date().toISOString();
+  await env.PROVIDER_KV.put(`provider:${providerName}`,
+    JSON.stringify(status), { expirationTtl: 86400 * 30 });
+}
+
+function formatStatus(name, status, configured) {
+  return {
+    configured: configured,
+    disabled: status?.disabled || false,
+    permanent: status?.permanent || false,
+    consecutiveFailures: status?.consecutiveFailures || 0,
+    disabledAt: status?.disabledAt || null,
+    lastHealthCheck: status?.lastHealthCheck || null,
+    reason: status?.reason || null
+  };
+}
+
+async function hashUrl(url) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(url);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+async function getCacheFromNeon(cacheKey, env) {
+  if (!env.NEON_DATABASE_URL) return null;
+  try {
+    const result = await neonQuery(
+      'SELECT data FROM search_cache WHERE cache_key = $1 AND expires_at > NOW() LIMIT 1',
+      [cacheKey], env
+    );
+    return result.rows?.[0]?.data || null;
+  } catch (e) {
+    console.warn('[Cache] Read error:', e.message);
+    return null;
+  }
+}
+
+async function saveToCache(cacheKey, html, env) {
+  if (!env.NEON_DATABASE_URL) return;
+  try {
+    const expiresAt = new Date(Date.now() + CACHE_TTL_SECONDS * 1000).toISOString();
+    await neonQuery(
+      `INSERT INTO search_cache (cache_key, data, expires_at)
+       VALUES ($1, $2::jsonb, $3::timestamptz)
+       ON CONFLICT (cache_key)
+       DO UPDATE SET data = $2::jsonb, expires_at = $3::timestamptz`,
+      [cacheKey, JSON.stringify(html), expiresAt], env
+    );
+    console.log('[Cache] Saved:', cacheKey.slice(0, 12));
+  } catch (e) {
+    console.warn('[Cache] Save error:', e.message);
+  }
+}
+
+async function getNeonStats(env) {
+  if (!env.NEON_DATABASE_URL) return { error: 'Neon not configured' };
+  try {
+    const result = await neonQuery(
+      `SELECT 
+        (SELECT COUNT(*) FROM search_cache WHERE expires_at > NOW()) as active_cache,
+        (SELECT COUNT(*) FROM search_cache) as total_cache,
+        (SELECT pg_size_pretty(pg_database_size(current_database()))) as db_size`,
+      [], env
+    );
+    return result.rows?.[0] || {};
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function neonQuery(query, params, env) {
+  const neonUrl = env.NEON_DATABASE_URL;
+  const match = neonUrl.match(/@([^.]+)\./);
+  if (!match) throw new Error('Invalid Neon URL');
+  const projectId = match[1];
+
+  const res = await fetch(`https://${projectId}.neon.tech/sql`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Neon-Connection-String': neonUrl
+    },
+    body: JSON.stringify({ query, params })
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Neon HTTP ${res.status}: ${err.slice(0, 200)}`);
+  }
+
+  return await res.json();
+}
+
+function json(data, status, corsHeaders) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
 }
