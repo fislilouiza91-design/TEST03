@@ -1,13 +1,13 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   Fixed: non-blocking rates + no credentials issue
+   Fixed: credentials + same host + URL fallback
    ============================================ */
 
 const MAX_PAGES = 8;
 const PARALLEL_BATCH = 3;
 const DELAY_BETWEEN_BATCHES = 400;
 
-/* ---------- أسعار الصرف الاحتياطية (فورية) ---------- */
+/* ---------- أسعار الصرف الاحتياطية ---------- */
 const FALLBACK_RATES = {
   USD: 1, EUR: 0.92, GBP: 0.79, JPY: 150, CNY: 7.2, RUB: 92,
   SAR: 3.75, AED: 3.67, KWD: 0.31, QAR: 3.64, EGP: 48,
@@ -15,28 +15,19 @@ const FALLBACK_RATES = {
   THB: 36, VND: 24500, TRY: 32, PLN: 3.9, ILS: 3.7,
   IDR: 15600, MYR: 4.7, MXN: 17, ZAR: 18.5, NGN: 1500,
   MAD: 10, DZD: 134, TND: 3.1, JOD: 0.71, LBP: 89500,
-  IQD: 1310, LYD: 4.85, SDG: 601, SYP: 13000, YER: 250,
-  OMR: 0.385, BHD: 0.376, AFN: 71, PKR: 278, BDT: 110,
-  LKR: 300, NPR: 133, MMK: 2100, KHR: 4100, LAK: 21000,
-  MNT: 3400, KZT: 450, UZS: 12700, AZN: 1.7, GEL: 2.7,
-  AMD: 390, BYN: 3.27, UAH: 41, MDL: 17.8, RSD: 108,
-  BGN: 1.8, HRK: 6.9, RON: 4.58, HUF: 360, CZK: 23,
-  SKK: 0.92, CHF: 0.88, NOK: 10.8, SEK: 10.5, DKK: 6.85,
-  ISK: 138, ALL: 95, MKD: 57, BAM: 1.8
+  IQD: 1310, OMR: 0.385, BHD: 0.376, PKR: 278, BDT: 110,
+  CHF: 0.88, NOK: 10.8, SEK: 10.5, DKK: 6.85, CZK: 23,
+  HUF: 360, RON: 4.58, BGN: 1.8, UAH: 41, KZT: 450
 };
 
 let cachedRates = FALLBACK_RATES;
 let ratesFetched = false;
 
-/* ============================================
-   جلب أسعار الصرف مرة واحدة عند بدء الإضافة
-   (لا يعطّل أي طلب)
-   ============================================ */
+/* ---------- جلب أسعار الصرف في الخلفية (لا يعطّل البحث) ---------- */
 (async function fetchRatesOnStartup() {
   try {
-    console.log('[Smart Shopper BG] Fetching live exchange rates...');
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 ثوان حد أقصى
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     const res = await fetch('https://open.er-api.com/v6/latest/USD', {
       signal: controller.signal
     });
@@ -46,15 +37,15 @@ let ratesFetched = false;
     if (data && data.rates) {
       cachedRates = data.rates;
       ratesFetched = true;
-      console.log('[Smart Shopper BG] Live rates loaded:', Object.keys(data.rates).length, 'currencies');
+      console.log('[Smart Shopper BG] ✓ Live rates loaded:', Object.keys(data.rates).length, 'currencies');
     }
   } catch (e) {
-    console.warn('[Smart Shopper BG] Live rates failed, using fallback:', e.message);
+    console.warn('[Smart Shopper BG] ⚠ Live rates failed, using fallback:', e.message);
   }
 })();
 
 /* ============================================
-   Listener الرئيسي
+   Listener
    ============================================ */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'SMART_SEARCH') return;
@@ -65,16 +56,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const locale = msg.locale || {};
       const currency = (locale.currency || 'USD').toUpperCase();
       const lang = locale.lang || 'en';
+      const host = locale.host || 'www.aliexpress.com';
 
-      console.log('[Smart Shopper BG] Search start | currency:', currency, '| lang:', lang,
-                  '| rates:', ratesFetched ? 'live' : 'fallback');
+      console.log('[Smart Shopper BG] === SEARCH START ===');
+      console.log('[Smart Shopper BG] Host:', host, '| Currency:', currency, '| Lang:', lang);
+      console.log('[Smart Shopper BG] Rates:', ratesFetched ? 'live' : 'fallback');
 
       const q = encodeURIComponent((msg.title || '').slice(0, 90));
 
-      // ============================================
-      // بحث شامل بدون قيود عملة/منطقة
-      // ============================================
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+      // استخدام نفس نطاق الصفحة الحالية
+      const baseUrl = `https://${host}/wholesale?SearchText=${q}&catId=0`;
 
       const seenIds = new Set();
       let firstBatchSent = false;
@@ -86,7 +77,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           pages.push(batch + i + 1);
         }
 
-        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p, lang)));
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p, lang, host)));
 
         const newItems = [];
         let emptyPages = 0;
@@ -108,7 +99,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         totalFetched += newItems.length;
         console.log('[Smart Shopper BG] Batch', Math.floor(batch / PARALLEL_BATCH) + 1,
-                    '- items:', newItems.length);
+                    '- new items:', newItems.length, '| total:', totalFetched);
 
         if (newItems.length > 0 && tabId) {
           if (!firstBatchSent) {
@@ -132,22 +123,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
         }
 
-        if (emptyPages === pages.length) break;
+        if (emptyPages === pages.length) {
+          console.log('[Smart Shopper BG] All pages empty. Stopping.');
+          break;
+        }
         if (batch + PARALLEL_BATCH < MAX_PAGES) {
           await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
         }
       }
 
-      console.log('[Smart Shopper BG] Search done. Total:', totalFetched);
+      console.log('[Smart Shopper BG] === SEARCH DONE === Total:', totalFetched);
 
       if (tabId) {
         try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }); } catch (e) {}
       }
       if (!firstBatchSent) {
-        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true, count: 0 });
       }
     } catch (e) {
-      console.error('[Smart Shopper BG] Error:', e);
+      console.error('[Smart Shopper BG] ❌ Error:', e);
       sendResponse({ ok: false, error: String(e) });
     }
   })();
@@ -156,7 +150,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ============================================
-   تحويل السعر للعملة المستهدفة
+   تحويل السعر
    ============================================ */
 function convertPrice(priceStr, targetCurrency) {
   if (!priceStr || typeof priceStr !== 'string') return priceStr;
@@ -165,7 +159,6 @@ function convertPrice(priceStr, targetCurrency) {
   const usdAmount = parseFloat(m[1]);
   const rate = cachedRates[targetCurrency] || 1;
   const converted = usdAmount * rate;
-
   try {
     return new Intl.NumberFormat('en', {
       style: 'currency',
@@ -199,34 +192,60 @@ function extractText(v) {
   return String(v);
 }
 
-/* ---------- جلب صفحة ---------- */
-async function fetchPage(baseUrl, page, lang) {
-  try {
-    const url = baseUrl + '&page=' + page;
-    const acceptLang = buildAcceptLanguage(lang);
+/* ============================================
+   جلب صفحة مع credentials + fallback URL
+   ============================================ */
+async function fetchPage(baseUrl, page, lang, host) {
+  const acceptLang = buildAcceptLanguage(lang);
 
+  // المحاولة 1: URL الأصلي
+  let items = await tryFetch(baseUrl + '&page=' + page, acceptLang, page, 'format-1');
+  if (items.length) return items;
+
+  // المحاولة 2: URL بديل (modern format)
+  const q = baseUrl.split('SearchText=')[1].split('&')[0];
+  const altUrl = `https://${host}/w/wholesale-${q}.html?page=${page}`;
+  console.log('[Smart Shopper BG] Fallback to alt URL for page', page);
+  items = await tryFetch(altUrl, acceptLang, page, 'format-2');
+  return items;
+}
+
+async function tryFetch(url, acceptLang, page, tag) {
+  try {
     const res = await fetch(url, {
-      // لا credentials - لأنها تسبب مشكلة CORS مع AliExpress
+      credentials: 'include', // ← مهم جداً
       headers: {
         'Accept-Language': acceptLang,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'User-Agent': navigator.userAgent,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     });
 
+    console.log(`[Smart Shopper BG] [${tag}] page ${page} → HTTP ${res.status} | size: ${res.headers.get('content-length') || '?'}`);
+
     if (!res.ok) {
-      console.warn('[Smart Shopper BG] HTTP error page', page, ':', res.status);
+      console.warn(`[Smart Shopper BG] [${tag}] HTTP error: ${res.status}`);
       return [];
     }
 
     const html = await res.text();
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
+    console.log(`[Smart Shopper BG] [${tag}] page ${page} HTML size: ${html.length}`);
 
-    console.log('[Smart Shopper BG] Page', page, '→', items.length, 'items (html size:', html.length, ')');
+    if (html.length < 1000) {
+      console.warn(`[Smart Shopper BG] [${tag}] HTML too small, likely blocked`);
+      return [];
+    }
+
+    let items = parseItems(html);
+    if (!items.length) {
+      console.log(`[Smart Shopper BG] [${tag}] parseItems empty, trying fallback`);
+      items = fallbackIds(html);
+    }
+
+    console.log(`[Smart Shopper BG] [${tag}] page ${page} → ${items.length} items`);
     return items;
   } catch (e) {
-    console.warn('[Smart Shopper BG] Fetch error page', page, ':', e.message);
+    console.error(`[Smart Shopper BG] [${tag}] fetch error page ${page}:`, e.message);
     return [];
   }
 }
@@ -255,12 +274,20 @@ function buildAcceptLanguage(lang) {
   return map[lang] || 'en-US,en;q=0.9';
 }
 
-/* ---------- استخراج المنتجات ---------- */
+/* ============================================
+   استخراج المنتجات
+   ============================================ */
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
+  if (!arrText) {
+    console.log('[Smart Shopper BG] No itemList/gridItems marker found');
+    return [];
+  }
   let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  try { arr = JSON.parse(arrText); } catch (e) {
+    console.warn('[Smart Shopper BG] JSON parse failed:', e.message);
+    return [];
+  }
   if (!Array.isArray(arr)) return [];
 
   const out = [];
