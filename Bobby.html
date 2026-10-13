@@ -1,192 +1,191 @@
-/* Smart Shopper - background service worker */
+/* Smart Shopper - floating panel content script */
+(function () {
+  'use strict';
+  if (window.__smartShopper) return;
+  window.__smartShopper = true;
 
-// إعدادات جلب النتائج
-const MAX_PAGES = 10;          // الحد الأقصى لعدد الصفحات (كل صفحة ~20 منتج)
-const DELAY_BETWEEN_PAGES = 1200; // انتظار 1.2 ثانية بين كل صفحة (لتجنب الحظر)
+  const PANEL_ID = 'ss-panel';
+  let currentKey = '';
+  let cachedItems = [];
+  let cachedSearchUrl = '';
+  let activeTab = 0;
+  let paused = false;
+  let closed = false;
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'SMART_SEARCH') return;
-  (async () => {
+  /* ---------- utils ---------- */
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  const soldNum = s => { const t = String(s || '').toLowerCase().replace(/,/g, ''); const m = t.match(/(\d+(?:\.\d+)?)\s*(k)?/); if (!m) return 0; let v = parseFloat(m[1]); if (m[2]) v *= 1000; return v; };
+  const discNum = s => num(String(s || '').replace('-', ''));
+
+  /* ---------- product detection ---------- */
+  function detectProduct() {
     try {
-      const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-      
-      const allItems = await fetchAllPages(baseUrl, MAX_PAGES);
-      
-      // إزالة المنتجات المكررة بناءً على الـ id
-      const uniqueItems = deduplicateById(allItems);
-      
-      console.log('[Smart Shopper] Total fetched:', allItems.length, '| Unique:', uniqueItems.length);
-      
-      sendResponse({ 
-        ok: true, 
-        items: uniqueItems,           // كل النتائج بدون قص
-        searchUrl: baseUrl,
-        count: uniqueItems.length     // إضافة عدد النتائج للواجهة
-      });
-    } catch (e) {
-      sendResponse({ ok: false, error: String(e) });
-    }
-  })();
-  return true; // async response
-});
-
-/* ---------- جلب عدة صفحات ---------- */
-async function fetchAllPages(baseUrl, maxPages) {
-  const allItems = [];
-  
-  for (let page = 1; page <= maxPages; page++) {
-    try {
-      const url = baseUrl + '&page=' + page;
-      console.log('[Smart Shopper] Fetching page', page);
-      
-      const res = await fetch(url, {
-        headers: {
-          'Accept-Language': 'en-US,en;q=0.9',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const sc of scripts) {
+        const data = JSON.parse(sc.textContent);
+        const arr = Array.isArray(data) ? data : [data];
+        for (const node of arr) {
+          const g = n => { if (!n) return null; if (n['@type'] === 'Product') return n; if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } } if (n['@graph']) { const r = g(n['@graph']); if (r) return r; } return null; };
+          const p = g(node);
+          if (p && p.name) return { title: String(p.name).slice(0, 160) };
         }
-      });
-      
-      if (!res.ok) {
-        console.warn('[Smart Shopper] Page', page, 'HTTP error:', res.status);
-        if (res.status === 429 || res.status === 403) {
-          // حظر مؤقت - نوقف الجلب
-          console.warn('[Smart Shopper] Blocked! Stopping fetch.');
-          break;
-        }
-        continue;
       }
-      
-      const html = await res.text();
-      let items = parseItems(html);
-      
-      // إذا لم توجد نتائج، نجرب الطريقة الاحتياطية
-      if (!items.length) items = fallbackIds(html);
-      
-      // إذا كانت الصفحة فارغة، هذا يعني أننا وصلنا للنهاية
-      if (!items.length) {
-        console.log('[Smart Shopper] Page', page, 'empty. Stopping.');
-        break;
-      }
-      
-      allItems.push(...items);
-      console.log('[Smart Shopper] Page', page, 'got', items.length, 'items');
-      
-      // انتظار بين الصفحات (إلا بعد آخر صفحة)
-      if (page < maxPages) {
-        await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES));
-      }
-    } catch (e) {
-      console.warn('[Smart Shopper] Error on page', page, ':', e);
-      // نستمر في المحاولة للصفحة التالية
-    }
+    } catch (e) {}
+    const ogType = document.querySelector('meta[property="og:type"]');
+    const isProduct = ogType && /product/i.test(ogType.content || '');
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    const title = ogTitle ? ogTitle.content.trim() : (document.title || '').replace(/[|\-–—].*$/, '').trim();
+    const hasPrice = !!document.querySelector('[itemprop="price"], [class*="price" i], meta[itemprop="price"], [id*="price" i]');
+    if ((isProduct || hasPrice) && title.length > 8) return { title: title.slice(0, 160) };
+    return null;
   }
-  
-  return allItems;
-}
 
-/* ---------- إزالة التكرار ---------- */
-function deduplicateById(items) {
-  const seen = new Set();
-  const out = [];
-  for (const it of items) {
-    if (!it || !it.id) continue;
-    if (seen.has(it.id)) continue;
-    seen.add(it.id);
-    out.push(it);
+  /* ---------- panel DOM ---------- */
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="ss-header" id="ss-header">
+        <div class="ss-logo">S</div>
+        <div class="ss-titles">
+          <div class="ss-title">Smart Shopper</div>
+          <div class="ss-sub">Même produit - autres vendeurs ✓</div>
+        </div>
+        <div class="ss-header-btns">
+          <button class="ss-hbtn" id="ss-refresh" title="Actualiser">⟳</button>
+          <button class="ss-hbtn" id="ss-minimize" title="Réduire">–</button>
+          <button class="ss-hbtn" id="ss-close" title="Fermer">✕</button>
+        </div>
+      </div>
+      <div class="ss-body" id="ss-body">
+        <div class="ss-tabs" id="ss-tabs">
+          <span class="ss-tab active" data-i="0">Moins cher</span>
+          <span class="ss-tab" data-i="1">Meilleur rapport</span>
+          <span class="ss-tab" data-i="2">Meilleure remise</span>
+          <span class="ss-tab" data-i="3">Plus vendu</span>
+        </div>
+        <div class="ss-list" id="ss-list"></div>
+        <div class="ss-footer" id="ss-footer"></div>
+      </div>`;
+    document.documentElement.appendChild(panel);
+
+    document.getElementById('ss-close').onclick = () => { closed = true; panel.remove(); };
+    document.getElementById('ss-minimize').onclick = () => {
+      const b = document.getElementById('ss-body');
+      b.style.display = b.style.display === 'none' ? '' : 'none';
+    };
+    document.getElementById('ss-refresh').onclick = () => { closed = false; currentKey = ''; scan(); };
+    
+    document.getElementById('ss-tabs').addEventListener('click', e => {
+      const t = e.target.closest('.ss-tab'); if (!t) return;
+      activeTab = +t.dataset.i;
+      document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x === t));
+      renderList();
+    });
+    makeDraggable(panel, document.getElementById('ss-header'));
   }
-  return out;
-}
 
-/* ---------- استخراج المنتجات من HTML ---------- */
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const title = clean(o.title || (o.item && o.item.title) || '');
-      let img = (o.image && (o.image.imgUrl || o.image.imageUrl)) || o.image || o.picUrl || o.imageUrl || '';
-      if (img && img.startsWith('//')) img = 'https:' + img;
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-      const price = sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || '';
-      const oldPrice = orig.formatedPrice || orig.minPrice || '';
-      const discount = o.discount || sale.discount || '';
-      const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
-      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '';
-      const sold = o.tradeDesc || o.sold || o.soldCount || '';
-      out.push({ 
-        id: String(id), 
-        title, 
-        img, 
-        price, 
-        oldPrice, 
-        discount, 
-        store, 
-        rating, 
-        sold,
-        link: 'https://www.aliexpress.com/item/' + id + '.html' 
-      });
-    } catch (e) { /* skip bad item */ }
+  function makeDraggable(el, handle) {
+    let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
+    handle.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      drag = true; sx = e.clientX; sy = e.clientY;
+      const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+      el.style.right = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px'; el.style.bottom = 'auto';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      el.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
+      el.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+    });
+    window.addEventListener('mouseup', () => drag = false);
   }
-  return out;
-}
 
-/* ---------- الطريقة الاحتياطية لاستخراج الـ IDs ---------- */
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set(); 
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({ 
-      id: m[1], 
-      title: 'Produit similaire', 
-      img: '', 
-      price: '', 
-      oldPrice: '', 
-      discount: '', 
-      store: 'AliExpress', 
-      rating: '', 
-      sold: '', 
-      link: 'https://www.aliexpress.com/item/' + m[1] + '.html' 
+  /* ---------- rendering ---------- */
+  function skeleton() {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    l.innerHTML = Array.from({ length: 6 }, () =>
+      `<div class="ss-row"><div class="ss-rank skel"></div><div class="ss-thumb skel"></div><div class="ss-info"><div class="skel line"></div><div class="skel line short"></div></div><div class="ss-price-side skel"></div></div>`).join('');
+  }
+
+  function message(msg) {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    l.innerHTML = `<div class="ss-msg">${esc(msg)}</div>`;
+  }
+
+  function renderList() {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    const sorters = [
+      (a, b) => num(a.price) - num(b.price) || soldNum(b.sold) - soldNum(a.sold),
+      (a, b) => num(b.rating) - num(a.rating) || num(a.price) - num(b.price),
+      (a, b) => discNum(b.discount) - discNum(a.discount),
+      (a, b) => soldNum(b.sold) - soldNum(a.sold)
+    ];
+    
+    // عرض كل النتائج الموجودة في cachedItems (بدون أي قص)
+    const items = [...cachedItems].sort(sorters[activeTab] || sorters[0]);
+    
+    if (!items.length) { message('Aucun produit similaire trouvé.'); return; }
+    const rankColors = ['#00b578', '#2f80ed', '#9b51e0', '#eb5757', '#f2994a', '#219653'];
+    
+    l.innerHTML = items.map((it, i) => `
+      <a class="ss-row" href="${esc(it.link)}" target="_blank" rel="noopener">
+        <div class="ss-rank" style="background:${rankColors[i % rankColors.length]}">${i + 1}</div>
+        ${it.img ? `<img class="ss-thumb" src="${esc(it.img)}" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}
+        <div class="ss-info">
+          <div class="ss-title">${esc(it.title || 'Produit similaire')}</div>
+          <div class="ss-meta-row">
+            <span class="ss-store">${esc(it.store)}</span>
+            ${it.rating ? `<span class="ss-rating">★ ${esc(it.rating)}</span>` : ''}
+            ${it.sold ? `<span class="ss-sold">${esc(it.sold)} vendus</span>` : ''}
+          </div>
+        </div>
+        <div class="ss-price-side">
+          ${it.price ? `<div class="ss-price">${esc(it.price)}</div>` : '<div class="ss-price ss-open">Voir</div>'}
+          ${it.discount ? `<span class="ss-disc">-${esc(String(it.discount).replace('-', ''))}%</span>` : ''}
+          ${it.oldPrice && num(it.oldPrice) > num(it.price) ? `<div class="ss-old">${esc(it.oldPrice)}</div>` : ''}
+        </div>
+      </a>`).join('');
+      
+    const f = document.getElementById('ss-footer');
+    if (f) f.innerHTML = cachedSearchUrl ? `<a href="${esc(cachedSearchUrl)}" target="_blank" rel="noopener">Tout afficher sur AliExpress (${items.length} résultats) ↗</a>` : '';
+  }
+
+  /* ---------- search flow ---------- */
+  function runSearch(title) {
+    buildPanel();
+    const panel = document.getElementById(PANEL_ID);
+    panel.style.display = '';
+    skeleton();
+    
+    chrome.runtime.sendMessage({ type: 'SMART_SEARCH', title }, resp => {
+      if (!resp || !document.getElementById(PANEL_ID)) return;
+      if (!resp.ok) { message('Impossible de contacter AliExpress. Réessayez.'); return; }
+      
+      cachedItems = resp.items || [];
+      cachedSearchUrl = resp.searchUrl || '';
+      
+      // سجل في الكونسول لمعرفة عدد النتائج المستلمة
+      console.log(`[Smart Shopper] Received ${cachedItems.length} items from background.`);
+      
+      renderList();
     });
   }
-  return out;
-}
 
-/* ---------- استخراج مصفوفة JSON من HTML ---------- */
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  function scan() {
+    if (closed || paused) return;
+    const p = detectProduct();
+    const key = p ? (location.host + location.pathname + '|' + p.title) : '';
+    if (!p || key === currentKey) return;
+    currentKey = key;
+    runSearch(p.title);
   }
-  return null;
-}
 
-function clean(s) { 
-  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); 
-}
+  /* ---------- boot + SPA monitoring ---------- */
+  scan();
+  setInterval(scan, 2500);
+  window.addEventListener('scroll', () => { }, { passive: true });
+})();
