@@ -1,511 +1,295 @@
 /* ============================================
-   Smart Shopper - Professional Rich UI
+   Smart Shopper - Background Service Worker
+   Version: Rich Data + Parallel Fetch + Streaming
    ============================================ */
 
-#ss-panel {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    width: 380px;
-    max-height: 88vh;
-    background: #ffffff;
-    border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    direction: ltr;
-    user-select: none;
-    border: 1px solid rgba(0, 0, 0, 0.06);
+const MAX_PAGES = 8;                // العدد الإجمالي للصفحات
+const PARALLEL_BATCH = 3;           // عدد الصفحات المجلوبة في نفس الوقت
+const DELAY_BETWEEN_BATCHES = 400;  // انتظار قصير بين كل مجموعة (ms)
+
+/* ---------- Listener الرئيسي ---------- */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
+
+  (async () => {
+    try {
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+
+      const seenIds = new Set();
+      let firstBatchSent = false;
+      let totalFetched = 0;
+
+      // جلب الصفحات على دفعات متوازية
+      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
+        const pages = [];
+        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
+          pages.push(batch + i + 1);
+        }
+
+        // جلب كل صفحات الدفعة في نفس الوقت
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
+
+        // تجميع النتائج الجديدة
+        const newItems = [];
+        let emptyPages = 0;
+
+        for (const items of results) {
+          if (!items || !items.length) { emptyPages++; continue; }
+          for (const it of items) {
+            if (!it || !it.id || seenIds.has(it.id)) continue;
+            seenIds.add(it.id);
+            newItems.push(it);
+          }
+        }
+
+        totalFetched += newItems.length;
+        console.log('[Smart Shopper BG] Batch', Math.floor(batch / PARALLEL_BATCH) + 1,
+                    '- pages:', pages.join(','), '- new items:', newItems.length);
+
+        // إرسال النتائج الجديدة فوراً للـ content script (Streaming)
+        if (newItems.length > 0 && tabId) {
+          if (!firstBatchSent) {
+            // الدفعة الأولى: نرد على الرسالة الأصلية
+            sendResponse({
+              ok: true,
+              items: newItems,
+              searchUrl: baseUrl,
+              done: false,
+              count: newItems.length
+            });
+            firstBatchSent = true;
+          } else {
+            // الدفعات التالية: نرسل تحديثاً
+            try {
+              chrome.tabs.sendMessage(tabId, {
+                type: 'SMART_SEARCH_UPDATE',
+                items: newItems,
+                searchUrl: baseUrl
+              });
+            } catch (e) {
+              console.warn('[Smart Shopper BG] Failed to send update:', e);
+            }
+          }
+        }
+
+        // إذا كانت كل الصفحات فارغة، أوقف الجلب
+        if (emptyPages === pages.length) {
+          console.log('[Smart Shopper BG] All pages empty. Stopping.');
+          break;
+        }
+
+        // انتظار قصير قبل الدفعة التالية
+        if (batch + PARALLEL_BATCH < MAX_PAGES) {
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+        }
+      }
+
+      console.log('[Smart Shopper BG] Total unique items fetched:', totalFetched);
+
+      // إعلام النهاية
+      if (tabId) {
+        try {
+          chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched });
+        } catch (e) {}
+      }
+
+      // إذا لم يُرسل شيء بعد (حالة نادرة جداً)
+      if (!firstBatchSent) {
+        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+      }
+    } catch (e) {
+      console.error('[Smart Shopper BG] Error:', e);
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+
+  return true; // async response
+});
+
+/* ============================================
+   جلب صفحة واحدة من AliExpress
+   ============================================ */
+async function fetchPage(baseUrl, page) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const res = await fetch(url, {
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+
+    if (!res.ok) {
+      console.warn('[Smart Shopper BG] Page', page, 'HTTP', res.status);
+      return [];
+    }
+
+    const html = await res.text();
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    console.warn('[Smart Shopper BG] Fetch error page', page, ':', e);
+    return [];
+  }
 }
 
-/* ---------- Header ---------- */
-.ss-header {
-    display: flex;
-    align-items: center;
-    padding: 14px 16px;
-    background: linear-gradient(135deg, #ff5e3a 0%, #e62e04 100%);
-    cursor: grab;
-    flex-shrink: 0;
-    color: white;
+/* ============================================
+   استخراج المنتجات مع كل البيانات الغنية
+   ============================================ */
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+
+      // العنوان
+      const title = clean(o.title || (o.item && o.item.title) || '');
+
+      // الصورة
+      let img = (o.image && (o.image.imgUrl || o.image.imageUrl)) || o.picUrl || o.imageUrl || '';
+      if (typeof img === 'object') img = img.imgUrl || img.imageUrl || '';
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      // الأسعار
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice ||
+                    sale.minActivityPrice || sale.minPrice ||
+                    p.formatedPrice || '';
+      const oldPrice = orig.formatedPrice || orig.minPrice || '';
+      const discount = o.discount || sale.discount || '';
+
+      // المتجر
+      const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
+      const storeUrl = (o.store && o.store.storeUrl) || o.storeUrl || '';
+
+      // التقييمات
+      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar))
+                     || o.averageStarRate || o.starRating || '';
+      const sold = o.tradeDesc || o.sold || o.soldCount || '';
+      const reviews = (o.evaluation && o.evaluation.totalValidNum) || o.reviewCount || '';
+
+      // الشحن
+      const shipping = o.logisticsDesc || o.shipping || '';
+      const shippingFree = o.freeShipping ||
+                           (o.logisticsDesc && /free/i.test(o.logisticsDesc)) ||
+                           (o.shipping && /free/i.test(o.shipping));
+      const deliveryDays = o.deliveryDate || o.deliveryDays || '';
+
+      // الشارات (Badges)
+      const badges = [];
+      if (o.isChoice) badges.push('Choice');
+      if (o.isLocalReturn) badges.push('LocalReturn');
+      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
+      if (o.isTopRatedSeller) badges.push('TopRated');
+
+      out.push({
+        id: String(id),
+        title,
+        img,
+        price,
+        oldPrice,
+        discount,
+        store,
+        storeUrl,
+        rating,
+        sold,
+        reviews,
+        shipping,
+        shippingFree,
+        deliveryDays,
+        badges,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
+    } catch (e) {
+      // تجاهل المنتجات التي بها أخطاء
+    }
+  }
+  return out;
 }
 
-.ss-header:active { cursor: grabbing; }
-
-.ss-logo {
-    background: rgba(255, 255, 255, 0.22);
-    color: white;
-    font-weight: 900;
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    margin-right: 12px;
-    flex-shrink: 0;
-    backdrop-filter: blur(10px);
-    border: 1.5px solid rgba(255, 255, 255, 0.35);
+/* ============================================
+   استخراج IDs كطريقة احتياطية
+   ============================================ */
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1],
+      title: 'Produit similaire',
+      img: '',
+      price: '',
+      oldPrice: '',
+      discount: '',
+      store: 'AliExpress',
+      storeUrl: '',
+      rating: '',
+      sold: '',
+      reviews: '',
+      shipping: '',
+      shippingFree: false,
+      deliveryDays: '',
+      badges: [],
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
+  }
+  return out;
 }
 
-.ss-titles { flex-grow: 1; min-width: 0; }
+/* ============================================
+   استخراج مصفوفة JSON من HTML
+   ============================================ */
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
 
-.ss-header .ss-title {
-    font-size: 15px;
-    font-weight: 800;
-    color: #fff;
-    line-height: 1.2;
-    letter-spacing: 0.2px;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') {
+      depth--;
+      if (depth === 0) return html.slice(j, k + 1);
+    }
+  }
+  return null;
 }
 
-.ss-sub {
-    font-size: 10.5px;
-    color: rgba(255, 255, 255, 0.85);
-    margin-top: 2px;
-    font-weight: 500;
-}
-
-.ss-header-btns { display: flex; gap: 4px; }
-
-.ss-hbtn {
-    background: rgba(255, 255, 255, 0.15);
-    border: none;
-    cursor: pointer;
-    font-size: 14px;
-    color: #fff;
-    padding: 5px 8px;
-    border-radius: 6px;
-    transition: background 0.2s;
-    line-height: 1;
-    font-weight: 600;
-}
-
-.ss-hbtn:hover { background: rgba(255, 255, 255, 0.3); }
-
-/* ---------- Body ---------- */
-.ss-body {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    flex-grow: 1;
-    background: #f8f9fb;
-}
-
-/* ---------- Tabs ---------- */
-.ss-tabs {
-    display: flex;
-    overflow-x: auto;
-    padding: 10px 10px 0 10px;
-    white-space: nowrap;
-    background: #fff;
-    flex-shrink: 0;
-    gap: 4px;
-}
-
-.ss-tabs::-webkit-scrollbar { display: none; }
-
-.ss-tab {
-    padding: 8px 12px;
-    font-size: 11.5px;
-    color: #666;
-    cursor: pointer;
-    border-radius: 20px;
-    transition: all 0.2s;
-    font-weight: 600;
-    background: #f5f5f5;
-    border: 1px solid transparent;
-}
-
-.ss-tab.active {
-    color: #fff;
-    background: linear-gradient(135deg, #ff5e3a 0%, #e62e04 100%);
-    box-shadow: 0 3px 10px rgba(230, 46, 4, 0.3);
-}
-
-.ss-tab:hover:not(.active) { background: #ebebeb; }
-
-/* ---------- Stats ---------- */
-.ss-stats {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
-    padding: 10px;
-    background: #fff;
-    border-bottom: 1px solid #f0f0f0;
-    flex-shrink: 0;
-}
-
-.ss-stat {
-    text-align: center;
-    padding: 6px 4px;
-    background: #f8f9fb;
-    border-radius: 8px;
-    transition: transform 0.2s;
-}
-
-.ss-stat-label {
-    font-size: 9px;
-    color: #999;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-}
-
-.ss-stat-value {
-    font-size: 13px;
-    font-weight: 800;
-    color: #222;
-    margin-top: 2px;
-    line-height: 1.2;
-}
-
-.ss-stat-green { color: #00b578; }
-.ss-stat-red { color: #e62e04; }
-
-/* ---------- List ---------- */
-.ss-list {
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: calc(88vh - 250px);
-    min-height: 200px;
-    overscroll-behavior: contain;
-    content-visibility: auto;
-}
-
-.ss-list::-webkit-scrollbar { width: 8px; }
-.ss-list::-webkit-scrollbar-track { background: transparent; }
-.ss-list::-webkit-scrollbar-thumb { background-color: #ccc; border-radius: 4px; }
-.ss-list::-webkit-scrollbar-thumb:hover { background-color: #aaa; }
-
-/* ---------- Product Card ---------- */
-.ss-card {
-    display: block;
-    background: #fff;
-    border: 1px solid #eef0f3;
-    border-radius: 10px;
-    padding: 12px;
-    position: relative;
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    contain: layout style paint;
-    content-visibility: auto;
-    contain-intrinsic-size: 200px;
-    cursor: pointer;
-}
-
-.ss-card:hover {
-    border-color: #ff5e3a;
-    box-shadow: 0 8px 24px rgba(230, 46, 4, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
-    transform: translateY(-2px);
-}
-
-/* Rank badge */
-.ss-rank-badge {
-    position: absolute;
-    top: -8px;
-    left: -8px;
-    color: white;
-    font-size: 11px;
-    font-weight: 900;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2.5px solid white;
-    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.2);
-    z-index: 2;
-}
-
-/* Card top: image + title + rating + store */
-.ss-card-top {
-    display: flex;
-    gap: 12px;
-    margin-bottom: 8px;
-}
-
-.ss-thumb-wrapper {
-    flex-shrink: 0;
-    width: 80px;
-    height: 80px;
-    border-radius: 8px;
-    overflow: hidden;
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-    position: relative;
-}
-
-.ss-thumb {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-
-.ss-thumb-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 32px;
-    color: #ccc;
-}
-
-.ss-info {
-    flex-grow: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    overflow: hidden;
-}
-
-.ss-card-title {
-    font-size: 12px;
-    color: #222;
-    line-height: 1.35;
-    font-weight: 600;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-    margin-bottom: 2px;
-}
-
-.ss-rating-block {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-}
-
-.ss-stars {
-    color: #ffa726;
-    font-size: 12px;
-    letter-spacing: -1px;
-    line-height: 1;
-}
-
-.ss-rating-val {
-    color: #666;
-    font-weight: 700;
-    font-size: 10.5px;
-}
-
-.ss-store-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 10.5px;
-    color: #888;
-    overflow: hidden;
-}
-
-.ss-store-icon { font-size: 10px; }
-
-.ss-store-name {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-weight: 500;
-}
-
-/* Badges row */
-.ss-badges-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: 8px;
-}
-
-.ss-badge {
-    font-size: 9.5px;
-    padding: 3px 7px;
-    border-radius: 4px;
-    font-weight: 700;
-    color: white;
-    white-space: nowrap;
-    letter-spacing: 0.2px;
-}
-
-.ss-badge-rank { background: #00b578; }
-.ss-badge-ship { background: #2f80ed; }
-.ss-badge-choice { background: linear-gradient(135deg, #ff5e3a, #e62e04); }
-
-/* Card bottom: price + meta */
-.ss-card-bottom {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    padding-top: 8px;
-    border-top: 1px dashed #f0f0f0;
-    gap: 8px;
-}
-
-.ss-price-block { flex-shrink: 0; }
-
-.ss-price {
-    font-size: 20px;
-    font-weight: 900;
-    color: #e62e04;
-    line-height: 1;
-    letter-spacing: -0.5px;
-}
-
-.ss-price.ss-open {
-    font-size: 13px;
-    color: #2f80ed;
-    font-weight: 700;
-}
-
-.ss-price-sub {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 4px;
-}
-
-.ss-old {
-    font-size: 11px;
-    color: #999;
-    text-decoration: line-through;
-    font-weight: 500;
-}
-
-.ss-disc {
-    font-size: 10px;
-    background: #fff2ef;
-    color: #e62e04;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-weight: 800;
-    border: 1px solid #ffe0d6;
-}
-
-.ss-meta-block {
-    text-align: right;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    align-items: flex-end;
-}
-
-.ss-sold, .ss-shipping {
-    font-size: 10.5px;
-    color: #666;
-    font-weight: 500;
-    white-space: nowrap;
-}
-
-.ss-shipping-free { color: #00b578; font-weight: 700; }
-
-/* CTA */
-.ss-cta {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 6px;
-    margin-top: 8px;
-    padding: 7px;
-    background: linear-gradient(135deg, #fff5f2 0%, #fff2ef 100%);
-    border-radius: 6px;
-    font-size: 11.5px;
-    font-weight: 700;
-    color: #e62e04;
-    transition: all 0.2s;
-    border: 1px solid transparent;
-}
-
-.ss-card:hover .ss-cta {
-    background: linear-gradient(135deg, #ff5e3a 0%, #e62e04 100%);
-    color: white;
-    border-color: transparent;
-}
-
-.ss-cta-arrow {
-    transition: transform 0.2s;
-    font-size: 13px;
-}
-
-.ss-card:hover .ss-cta-arrow { transform: translateX(4px); }
-
-/* ---------- Messages ---------- */
-.ss-msg {
-    text-align: center;
-    padding: 40px 20px;
-    font-size: 13px;
-    color: #888;
-    line-height: 1.6;
-    font-weight: 500;
-}
-
-.ss-msg-icon {
-    font-size: 42px;
-    margin-bottom: 12px;
-    display: block;
-    opacity: 0.6;
-}
-
-/* ---------- Footer ---------- */
-.ss-footer {
-    padding: 12px;
-    text-align: center;
-    border-top: 1px solid #f0f0f0;
-    background: #fff;
-    border-radius: 0 0 12px 12px;
-    flex-shrink: 0;
-}
-
-.ss-footer-link {
-    font-size: 12px;
-    color: #2f80ed;
-    text-decoration: none;
-    font-weight: 700;
-    display: inline-block;
-    padding: 6px 14px;
-    background: #f0f7ff;
-    border-radius: 20px;
-    transition: all 0.2s;
-}
-
-.ss-footer-link:hover {
-    background: #e0efff;
-    transform: translateY(-1px);
-}
-
-.ss-loading-more {
-    font-size: 10.5px;
-    color: #999;
-    margin-top: 8px;
-    text-align: center;
-    font-weight: 500;
-}
-
-.ss-loading-more.ss-done { color: #00b578; font-weight: 700; }
-
-/* ---------- Skeleton ---------- */
-.skel {
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-    background-size: 200% 100%;
-    animation: ss-skel 1.5s infinite;
-    border-radius: 4px;
-    pointer-events: none;
-}
-
-.skel.line { height: 12px; width: 100%; margin-bottom: 8px; }
-.skel.line.short { width: 60%; }
-.skel.ss-thumb { width: 80px; height: 80px; border-radius: 8px; }
-
-@keyframes ss-skel {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+/* ============================================
+   تنظيف النصوص من وسوم HTML
+   ============================================ */
+function clean(s) {
+  return String(s)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
