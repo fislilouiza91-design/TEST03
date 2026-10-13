@@ -1,306 +1,412 @@
-/* Smart Shopper - floating panel content script (Streaming Version) */
-(function () {
-  'use strict';
-  if (window.__smartShopper) return;
-  window.__smartShopper = true;
+/* ============================================
+   Smart Shopper - Styles
+   ============================================ */
 
-  const PANEL_ID = 'ss-panel';
-  const BATCH_SIZE = 20;
+/* ---------- الحاوية الرئيسية للنافذة ---------- */
+#ss-panel {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    width: 350px;
+    max-height: 85vh;
+    background-color: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    z-index: 999999;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    direction: ltr;
+    user-select: none;
+}
 
-  let currentKey = '';
-  let cachedItems = [];
-  let cachedSortedItems = [];
-  let cachedSearchUrl = '';
-  let activeTab = 0;
-  let closed = false;
-  let renderedCount = 0;
-  let imageObserver = null;
-  let isLoadingMore = false;
+/* ---------- الهيدر (الرأس) ---------- */
+.ss-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 14px;
+    border-bottom: 1px solid #f0f0f0;
+    background: #fff;
+    cursor: grab;
+    border-radius: 8px 8px 0 0;
+    flex-shrink: 0;
+}
 
-  /* ---------- utils ---------- */
-  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
-  const soldNum = s => { const t = String(s || '').toLowerCase().replace(/,/g, ''); const m = t.match(/(\d+(?:\.\d+)?)\s*(k)?/); if (!m) return 0; let v = parseFloat(m[1]); if (m[2]) v *= 1000; return v; };
-  const discNum = s => num(String(s || '').replace('-', ''));
+.ss-header:active {
+    cursor: grabbing;
+}
 
-  /* ---------- product detection ---------- */
-  function detectProduct() {
-    try {
-      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-      for (const sc of scripts) {
-        const data = JSON.parse(sc.textContent);
-        const arr = Array.isArray(data) ? data : [data];
-        for (const node of arr) {
-          const g = n => { if (!n) return null; if (n['@type'] === 'Product') return n; if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } } if (n['@graph']) { const r = g(n['@graph']); if (r) return r; } return null; };
-          const p = g(node);
-          if (p && p.name) return { title: String(p.name).slice(0, 160) };
-        }
-      }
-    } catch (e) {}
-    const ogType = document.querySelector('meta[property="og:type"]');
-    const isProduct = ogType && /product/i.test(ogType.content || '');
-    const ogTitle = document.querySelector('meta[property="og:title"]');
-    const title = ogTitle ? ogTitle.content.trim() : (document.title || '').replace(/[|\-–—].*$/, '').trim();
-    const hasPrice = !!document.querySelector('[itemprop="price"], [class*="price" i], meta[itemprop="price"], [id*="price" i]');
-    if ((isProduct || hasPrice) && title.length > 8) return { title: title.slice(0, 160) };
-    return null;
-  }
+.ss-logo {
+    background-color: #e62e04;
+    color: white;
+    font-weight: 900;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    margin-right: 10px;
+    flex-shrink: 0;
+}
 
-  /* ---------- panel DOM ---------- */
-  function buildPanel() {
-    if (document.getElementById(PANEL_ID)) return;
-    const panel = document.createElement('div');
-    panel.id = PANEL_ID;
-    panel.innerHTML = `
-      <div class="ss-header" id="ss-header">
-        <div class="ss-logo">S</div>
-        <div class="ss-titles">
-          <div class="ss-title">Smart Shopper</div>
-          <div class="ss-sub">Même produit - autres vendeurs ✓</div>
-        </div>
-        <div class="ss-header-btns">
-          <button class="ss-hbtn" id="ss-refresh" title="Actualiser">⟳</button>
-          <button class="ss-hbtn" id="ss-minimize" title="Réduire">–</button>
-          <button class="ss-hbtn" id="ss-close" title="Fermer">✕</button>
-        </div>
-      </div>
-      <div class="ss-body" id="ss-body">
-        <div class="ss-tabs" id="ss-tabs">
-          <span class="ss-tab active" data-i="0">Moins cher</span>
-          <span class="ss-tab" data-i="1">Meilleur rapport</span>
-          <span class="ss-tab" data-i="2">Meilleure remise</span>
-          <span class="ss-tab" data-i="3">Plus vendu</span>
-        </div>
-        <div class="ss-list" id="ss-list"></div>
-        <div class="ss-footer" id="ss-footer"></div>
-      </div>`;
-    document.documentElement.appendChild(panel);
+.ss-titles {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
 
-    document.getElementById('ss-close').onclick = () => { closed = true; panel.remove(); };
-    document.getElementById('ss-minimize').onclick = () => {
-      const b = document.getElementById('ss-body');
-      b.style.display = b.style.display === 'none' ? '' : 'none';
-    };
-    document.getElementById('ss-refresh').onclick = () => { closed = false; currentKey = ''; scan(); };
-    document.getElementById('ss-tabs').addEventListener('click', e => {
-      const t = e.target.closest('.ss-tab'); if (!t) return;
-      activeTab = +t.dataset.i;
-      document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x === t));
-      cachedSortedItems = [];
-      renderedCount = 0;
-      renderList(true);
-    });
-    document.getElementById('ss-list').addEventListener('scroll', onScroll, { passive: true });
-    makeDraggable(panel, document.getElementById('ss-header'));
-  }
+.ss-header .ss-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #222;
+    line-height: 1.2;
+}
 
-  function onScroll(e) {
-    if (isLoadingMore) return;
-    const list = e.target;
-    if (list.scrollTop + list.clientHeight >= list.scrollHeight - 300) loadMore();
-  }
+.ss-sub {
+    font-size: 10px;
+    color: #888;
+    margin-top: 2px;
+}
 
-  function loadMore() {
-    if (renderedCount >= cachedSortedItems.length) return;
-    isLoadingMore = true;
-    requestAnimationFrame(() => { renderList(false); isLoadingMore = false; });
-  }
+.ss-header-btns {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
 
-  function makeDraggable(el, handle) {
-    let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
-    handle.addEventListener('mousedown', e => {
-      if (e.target.closest('button')) return;
-      drag = true; sx = e.clientX; sy = e.clientY;
-      const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
-      el.style.right = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px'; el.style.bottom = 'auto';
-      e.preventDefault();
-    });
-    window.addEventListener('mousemove', e => {
-      if (!drag) return;
-      el.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
-      el.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
-    });
-    window.addEventListener('mouseup', () => drag = false);
-  }
+.ss-hbtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    color: #666;
+    padding: 4px 6px;
+    border-radius: 4px;
+    transition: background 0.2s, color 0.2s;
+    line-height: 1;
+}
 
-  /* ---------- rendering ---------- */
-  function skeleton() {
-    const l = document.getElementById('ss-list'); if (!l) return;
-    l.innerHTML = Array.from({ length: 4 }, () =>
-      `<div class="ss-row"><div class="ss-rank skel"></div><div class="ss-thumb skel"></div><div class="ss-info"><div class="skel line"></div><div class="skel line short"></div></div><div class="ss-price-side skel"></div></div>`).join('');
-  }
+.ss-hbtn:hover {
+    background-color: #f5f5f5;
+    color: #000;
+}
 
-  function message(msg) {
-    const l = document.getElementById('ss-list'); if (!l) return;
-    l.innerHTML = `<div class="ss-msg">${esc(msg)}</div>`;
-  }
+/* ---------- جسم النافذة ---------- */
+.ss-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-grow: 1;
+}
 
-  function applySort() {
-    const sorters = [
-      (a, b) => num(a.price) - num(b.price) || soldNum(b.sold) - soldNum(a.sold),
-      (a, b) => num(b.rating) - num(a.rating) || num(a.price) - num(b.price),
-      (a, b) => discNum(b.discount) - discNum(a.discount),
-      (a, b) => soldNum(b.sold) - soldNum(a.sold)
-    ];
-    cachedSortedItems = [...cachedItems].sort(sorters[activeTab] || sorters[0]);
-  }
+/* ---------- التبويبات ---------- */
+.ss-tabs {
+    display: flex;
+    overflow-x: auto;
+    border-bottom: 1px solid #f0f0f0;
+    padding: 0 8px;
+    white-space: nowrap;
+    background: #fff;
+    flex-shrink: 0;
+}
 
-  function buildRowHTML(it, i) {
-    const rankColors = ['#00b578', '#2f80ed', '#9b51e0', '#eb5757', '#f2994a', '#219653'];
-    return `
-      <a class="ss-row" href="${esc(it.link)}" target="_blank" rel="noopener">
-        <div class="ss-rank" style="background:${rankColors[i % rankColors.length]}">${i + 1}</div>
-        ${it.img 
-          ? `<img class="ss-thumb" data-src="${esc(it.img)}" loading="lazy" onerror="this.style.visibility='hidden'">` 
-          : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}
-        <div class="ss-info">
-          <div class="ss-title">${esc(it.title || 'Produit similaire')}</div>
-          <div class="ss-meta-row">
-            <span class="ss-store">${esc(it.store)}</span>
-            ${it.rating ? `<span class="ss-rating">★ ${esc(it.rating)}</span>` : ''}
-            ${it.sold ? `<span class="ss-sold">${esc(it.sold)} vendus</span>` : ''}
-          </div>
-        </div>
-        <div class="ss-price-side">
-          ${it.price ? `<div class="ss-price">${esc(it.price)}</div>` : '<div class="ss-price ss-open">Voir</div>'}
-          ${it.discount ? `<span class="ss-disc">-${esc(String(it.discount).replace('-', ''))}%</span>` : ''}
-          ${it.oldPrice && num(it.oldPrice) > num(it.price) ? `<div class="ss-old">${esc(it.oldPrice)}</div>` : ''}
-        </div>
-      </a>`;
-  }
+.ss-tabs::-webkit-scrollbar {
+    display: none;
+}
 
-  function setupImageObserver() {
-    if (imageObserver) imageObserver.disconnect();
-    imageObserver = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const img = entry.target;
-          if (img.dataset.src) {
-            img.src = img.dataset.src;
-            img.removeAttribute('data-src');
-          }
-          imageObserver.unobserve(img);
-        }
-      });
-    }, { root: document.getElementById('ss-list'), rootMargin: '200px' });
-  }
+.ss-tab {
+    padding: 10px 10px;
+    font-size: 11.5px;
+    color: #666;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    user-select: none;
+}
 
-  function renderList(reset) {
-    const l = document.getElementById('ss-list'); if (!l) return;
+.ss-tab.active {
+    color: #000;
+    font-weight: 700;
+    border-bottom: 2px solid #000;
+}
 
-    if (reset) {
-      if (!cachedItems.length) { message('Aucun produit similaire trouvé.'); return; }
-      applySort();
-      l.innerHTML = '';
-      renderedCount = 0;
-      setupImageObserver();
+.ss-tab:hover:not(.active) {
+    color: #000;
+}
+
+/* ---------- قائمة المنتجات ---------- */
+.ss-list {
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: #fff;
+    max-height: calc(85vh - 160px);
+    min-height: 200px;
+    overscroll-behavior: contain;
+    /* تحسين الأداء: المتصفح يتجاهل رسم الصفوف خارج الشاشة */
+    content-visibility: auto;
+}
+
+.ss-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.ss-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.ss-list::-webkit-scrollbar-thumb {
+    background-color: #ccc;
+    border-radius: 3px;
+}
+
+.ss-list::-webkit-scrollbar-thumb:hover {
+    background-color: #aaa;
+}
+
+/* ---------- صف المنتج ---------- */
+.ss-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+    position: relative;
+    background: #fff;
+    text-decoration: none;
+    color: inherit;
+    transition: box-shadow 0.2s, border-color 0.2s, transform 0.15s;
+    /* تحسين الأداء لكل صف */
+    contain: layout style paint;
+    content-visibility: auto;
+    contain-intrinsic-size: 82px;
+}
+
+.ss-row:hover {
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    border-color: #e0e0e0;
+}
+
+/* ترتيب المنتج (الدائرة الملونة) */
+.ss-rank {
+    position: absolute;
+    top: -6px;
+    left: -6px;
+    color: white;
+    font-size: 10px;
+    font-weight: bold;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid white;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1;
+}
+
+/* ---------- صورة المنتج ---------- */
+.ss-thumb {
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    object-fit: contain;
+    border-radius: 4px;
+    background: #fafafa;
+    border: 1px solid #f5f5f5;
+}
+
+.ss-thumb-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    color: #ccc;
+    background: #fafafa;
+}
+
+/* ---------- معلومات المنتج ---------- */
+.ss-info {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.ss-info .ss-title {
+    font-size: 11px;
+    color: #333;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+    font-weight: 500;
+}
+
+.ss-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 10px;
+    color: #888;
+    align-items: center;
+    line-height: 1.2;
+}
+
+.ss-store {
+    color: #666;
+    font-weight: 500;
+    max-width: 90px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ss-rating {
+    color: #f5a623;
+    font-weight: 500;
+}
+
+.ss-sold {
+    color: #888;
+}
+
+/* ---------- الأسعار ---------- */
+.ss-price-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    gap: 2px;
+    min-width: 62px;
+}
+
+.ss-price {
+    font-size: 15px;
+    font-weight: 800;
+    color: #e62e04;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.ss-price.ss-open {
+    font-size: 11px;
+    color: #2f80ed;
+    font-weight: 600;
+}
+
+.ss-disc {
+    font-size: 10px;
+    background-color: #e62e04;
+    color: white;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-weight: bold;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.ss-old {
+    font-size: 10px;
+    color: #999;
+    text-decoration: line-through;
+    white-space: nowrap;
+}
+
+/* ---------- رسائل الحالة ---------- */
+.ss-msg {
+    text-align: center;
+    padding: 30px 20px;
+    font-size: 12px;
+    color: #888;
+    line-height: 1.5;
+}
+
+/* ---------- الفوتر ---------- */
+.ss-footer {
+    padding: 10px;
+    text-align: center;
+    border-top: 1px solid #f0f0f0;
+    background: #fafafa;
+    border-radius: 0 0 8px 8px;
+    flex-shrink: 0;
+}
+
+.ss-footer a {
+    font-size: 12px;
+    color: #2f80ed;
+    text-decoration: none;
+    font-weight: 600;
+    display: inline-block;
+}
+
+.ss-footer a:hover {
+    text-decoration: underline;
+}
+
+.ss-loading-more {
+    font-size: 10px;
+    color: #999;
+    margin-top: 6px;
+    text-align: center;
+    font-weight: normal;
+}
+
+/* ---------- هيكل التحميل (Skeleton) ---------- */
+.skel {
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 200% 100%;
+    animation: ss-skel 1.5s infinite;
+    border-radius: 4px;
+    pointer-events: none;
+}
+
+.skel.line {
+    height: 12px;
+    width: 100%;
+    margin-bottom: 6px;
+}
+
+.skel.line.short {
+    width: 60%;
+}
+
+.skel.ss-rank {
+    background: #f0f0f0;
+    border: none;
+    box-shadow: none;
+}
+
+.skel.ss-thumb {
+    width: 64px;
+    height: 64px;
+    border: none;
+}
+
+.skel.ss-price-side {
+    width: 50px;
+    height: 30px;
+}
+
+@keyframes ss-skel {
+    0% {
+        background-position: 200% 0;
     }
-
-    if (!cachedSortedItems.length) return;
-
-    const start = renderedCount;
-    const end = Math.min(start + BATCH_SIZE, cachedSortedItems.length);
-    const batch = cachedSortedItems.slice(start, end);
-    if (!batch.length) return;
-
-    const fragment = document.createDocumentFragment();
-    const temp = document.createElement('div');
-    temp.innerHTML = batch.map((it, i) => buildRowHTML(it, start + i)).join('');
-    while (temp.firstChild) fragment.appendChild(temp.firstChild);
-    l.appendChild(fragment);
-    renderedCount = end;
-
-    if (imageObserver) {
-      l.querySelectorAll('img[data-src]').forEach(img => imageObserver.observe(img));
+    100% {
+        background-position: -200% 0;
     }
-
-    updateFooter();
-  }
-
-  function updateFooter() {
-    const f = document.getElementById('ss-footer'); if (!f) return;
-    const remaining = cachedSortedItems.length - renderedCount;
-    if (cachedSearchUrl) {
-      f.innerHTML = `<a href="${esc(cachedSearchUrl)}" target="_blank" rel="noopener">
-           Tout afficher sur AliExpress (${cachedSortedItems.length} résultats)
-         </a>
-         ${remaining > 0 ? `<div class="ss-loading-more">${renderedCount} / ${cachedSortedItems.length} · Défilez pour plus</div>` : ''}`;
-    }
-  }
-
-  /* ---------- search flow ---------- */
-  function runSearch(title) {
-    buildPanel();
-    const panel = document.getElementById(PANEL_ID);
-    panel.style.display = '';
-    cachedItems = [];
-    cachedSortedItems = [];
-    renderedCount = 0;
-    skeleton();
-
-    chrome.runtime.sendMessage({ type: 'SMART_SEARCH', title }, resp => {
-      if (!resp || !document.getElementById(PANEL_ID)) return;
-      if (!resp.ok) { message('Impossible de contacter AliExpress. Réessayez.'); return; }
-      // الدفعة الأولى وصلت
-      cachedItems = resp.items || [];
-      cachedSearchUrl = resp.searchUrl || '';
-      console.log(`[Smart Shopper] First batch: ${cachedItems.length} items`);
-      renderList(true);
-    });
-  }
-
-  function scan() {
-    if (closed) return;
-    const p = detectProduct();
-    const key = p ? (location.host + location.pathname + '|' + p.title) : '';
-    if (!p || key === currentKey) return;
-    currentKey = key;
-    runSearch(p.title);
-  }
-
-  /* ---------- استقبال تحديثات البث التدريجي ---------- */
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg) return;
-    
-    if (msg.type === 'SMART_SEARCH_UPDATE') {
-      // دفعة جديدة وصلت - نضيفها ونعيد العرض
-      const newItems = msg.items || [];
-      if (!newItems.length) return;
-      
-      // إضافة العناصر الجديدة (تجنب التكرار)
-      const existingIds = new Set(cachedItems.map(x => x.id));
-      const uniqueNew = newItems.filter(x => !existingIds.has(x.id));
-      
-      if (uniqueNew.length) {
-        cachedItems = cachedItems.concat(uniqueNew);
-        cachedSearchUrl = msg.searchUrl || cachedSearchUrl;
-        console.log(`[Smart Shopper] +${uniqueNew.length} items (total: ${cachedItems.length})`);
-        
-        // إعادة الترتيب وإعادة العرض من الصفر (لأن الترتيب تغيّر)
-        // لكن نحافظ على موضع التمرير قدر الإمكان
-        const list = document.getElementById('ss-list');
-        const scrollTop = list ? list.scrollTop : 0;
-        
-        applySort();
-        // إعادة بناء الصفوف الأولى فقط للحفاظ على السرعة
-        if (list) {
-          list.innerHTML = '';
-          renderedCount = 0;
-          setupImageObserver();
-          renderList(false);
-          list.scrollTop = scrollTop;
-        }
-        updateFooter();
-      }
-    }
-    
-    if (msg.type === 'SMART_SEARCH_DONE') {
-      console.log('[Smart Shopper] All pages loaded. Total:', cachedItems.length);
-      updateFooter();
-    }
-  });
-
-  /* ---------- boot + SPA monitoring ---------- */
-  scan();
-  setInterval(scan, 2500);
-})();
+}
