@@ -20,7 +20,6 @@
 
   /* ---------- product detection ---------- */
   function detectProduct() {
-    // JSON-LD Product
     try {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const sc of scripts) {
@@ -33,7 +32,6 @@
         }
       }
     } catch (e) {}
-    // OpenGraph product signals
     const ogType = document.querySelector('meta[property="og:type"]');
     const isProduct = ogType && /product/i.test(ogType.content || '');
     const ogTitle = document.querySelector('meta[property="og:title"]');
@@ -128,13 +126,19 @@
     const items = [...cachedItems].sort(sorters[activeTab] || sorters[0]).slice(0, 6);
     if (!items.length) { message('Aucun produit similaire trouvé.'); return; }
     const rankColors = ['#00b578', '#2f80ed', '#9b51e0', '#eb5757', '#f2994a', '#219653'];
+    
+    // تم إضافة عنوان المنتج (ss-title) هنا ليطابق الصورة
     l.innerHTML = items.map((it, i) => `
       <a class="ss-row" href="${esc(it.link)}" target="_blank" rel="noopener">
         <div class="ss-rank" style="background:${rankColors[i % rankColors.length]}">${i + 1}</div>
         ${it.img ? `<img class="ss-thumb" src="${esc(it.img)}" loading="lazy" onerror="this.style.visibility='hidden'">` : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}
         <div class="ss-info">
-          <div class="ss-store">${esc(it.store)}</div>
-          <div class="ss-meta">${it.rating ? '★ ' + esc(it.rating) + ' · ' : ''}${it.sold ? esc(it.sold) + ' vendus' : ''}</div>
+          <div class="ss-title">${esc(it.title || 'Produit similaire')}</div>
+          <div class="ss-meta-row">
+            <span class="ss-store">${esc(it.store)}</span>
+            ${it.rating ? `<span class="ss-rating">★ ${esc(it.rating)}</span>` : ''}
+            ${it.sold ? `<span class="ss-sold">${esc(it.sold)} vendus</span>` : ''}
+          </div>
         </div>
         <div class="ss-price-side">
           ${it.price ? `<div class="ss-price">${esc(it.price)}</div>` : '<div class="ss-price ss-open">Voir</div>'}
@@ -142,6 +146,7 @@
           ${it.oldPrice && num(it.oldPrice) > num(it.price) ? `<div class="ss-old">${esc(it.oldPrice)}</div>` : ''}
         </div>
       </a>`).join('');
+      
     const f = document.getElementById('ss-footer');
     if (f) f.innerHTML = cachedSearchUrl ? `<a href="${esc(cachedSearchUrl)}" target="_blank" rel="noopener">Tout afficher sur AliExpress ↗</a>` : '';
   }
@@ -173,5 +178,5 @@
   /* ---------- boot + SPA monitoring ---------- */
   scan();
   setInterval(scan, 2500);
-  window.addEventListener('scroll', () => { /* keep panel above content via fixed position */ }, { passive: true });
+  window.addEventListener('scroll', () => { }, { passive: true });
 })();
