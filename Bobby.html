@@ -1,384 +1,325 @@
 /* ============================================
-   Smart Shopper - Clean Layout
-   No store name - Only rating + sales
+   Smart Shopper - Background Service Worker
+   Global search + Currency conversion
    ============================================ */
 
-* {
-    box-sizing: border-box;
+const MAX_PAGES = 8;
+const PARALLEL_BATCH = 3;
+const DELAY_BETWEEN_BATCHES = 400;
+const RATES_CACHE_TTL = 3600000; // ساعة
+
+let cachedRates = null;
+let ratesCacheTime = 0;
+
+/* ---------- أسعار الصرف الاحتياطية ---------- */
+const FALLBACK_RATES = {
+  USD: 1, EUR: 0.92, GBP: 0.79, JPY: 150, CNY: 7.2, RUB: 92,
+  SAR: 3.75, AED: 3.67, KWD: 0.31, QAR: 3.64, EGP: 48,
+  BRL: 5.0, CAD: 1.36, AUD: 1.52, INR: 83, KRW: 1330,
+  THB: 36, VND: 24500, TRY: 32, PLN: 3.9, ILS: 3.7,
+  IDR: 15600, MYR: 4.7, MXN: 17, ZAR: 18.5, NGN: 1500
+};
+
+/* ---------- جلب أسعار الصرف (مرة واحدة) ---------- */
+async function getExchangeRates() {
+  if (cachedRates && Date.now() - ratesCacheTime < RATES_CACHE_TTL) {
+    return cachedRates;
+  }
+  try {
+    const res = await fetch('https://open.er-api.com/v6/latest/USD');
+    const data = await res.json();
+    if (data && data.rates) {
+      cachedRates = data.rates;
+      ratesCacheTime = Date.now();
+      console.log('[Smart Shopper BG] Rates loaded:', Object.keys(data.rates).length, 'currencies');
+      return cachedRates;
+    }
+  } catch (e) {
+    console.warn('[Smart Shopper BG] Rates API failed, using fallback:', e);
+  }
+  cachedRates = FALLBACK_RATES;
+  ratesCacheTime = Date.now();
+  return cachedRates;
 }
 
-#ss-panel {
-    position: fixed;
-    top: 60px;
-    right: 15px;
-    width: 380px;
-    max-width: calc(100vw - 30px);
-    max-height: calc(100vh - 80px);
-    background: #ffffff;
-    border-radius: 10px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    direction: ltr;
-    user-select: none;
-    border: 1px solid rgba(0, 0, 0, 0.08);
+/* ---------- تحويل السعر ---------- */
+function convertPrice(priceStr, rates, targetCurrency) {
+  if (!priceStr || typeof priceStr !== 'string') return priceStr;
+  // استخرج الرقم
+  const m = priceStr.replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  if (!m) return priceStr;
+  const usd = parseFloat(m[1]);
+  const rate = rates[targetCurrency] || 1;
+  const converted = usd * rate;
+  // تنسيق بالعملة الهدف
+  try {
+    return new Intl.NumberFormat('en', {
+      style: 'currency',
+      currency: targetCurrency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(converted);
+  } catch (e) {
+    return converted.toFixed(2) + ' ' + targetCurrency;
+  }
 }
 
-/* ---------- Header ---------- */
-.ss-header {
-    display: flex;
-    align-items: center;
-    padding: 10px 12px;
-    background: #2b2b2b;
-    cursor: grab;
-    flex-shrink: 0;
-    color: white;
-    border-radius: 10px 10px 0 0;
-}
-.ss-header:active { cursor: grabbing; }
+/* ---------- Listener ---------- */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
 
-.ss-logo {
-    background: #ff4747;
-    color: white;
-    font-weight: 900;
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 15px;
-    margin-right: 8px;
-    flex-shrink: 0;
-}
+  (async () => {
+    try {
+      const locale = msg.locale || {};
+      const currency = (locale.currency || 'USD').toUpperCase();
+      const lang = locale.lang || 'en';
 
-.ss-titles { flex-grow: 1; min-width: 0; overflow: hidden; }
+      console.log('[Smart Shopper BG] Target currency:', currency, '| lang:', lang);
 
-.ss-header .ss-title {
-    font-size: 13px;
-    font-weight: 700;
-    color: #fff;
-    line-height: 1.2;
-}
+      // جلب أسعار الصرف
+      const rates = await getExchangeRates();
 
-.ss-sub {
-    font-size: 9.5px;
-    color: rgba(255, 255, 255, 0.65);
-    margin-top: 1px;
-}
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      
+      // ============================================
+      // بحث شامل - بدون currency أو shipToCountry
+      // ============================================
+      const baseUrl = `https://www.aliexpress.com/wholesale?SearchText=${q}&catId=0`;
 
-.ss-header-btns { display: flex; gap: 2px; flex-shrink: 0; }
+      const seenIds = new Set();
+      let firstBatchSent = false;
+      let totalFetched = 0;
 
-.ss-hbtn {
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    font-size: 13px;
-    color: rgba(255, 255, 255, 0.75);
-    padding: 5px 7px;
-    border-radius: 4px;
-    transition: background 0.2s, color 0.2s;
-    line-height: 1;
-    font-weight: 600;
-}
-.ss-hbtn:hover {
-    background: rgba(255, 255, 255, 0.18);
-    color: #fff;
-}
+      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
+        const pages = [];
+        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
+          pages.push(batch + i + 1);
+        }
 
-/* ---------- Body ---------- */
-.ss-body {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    flex-grow: 1;
-    background: #fff;
-    min-height: 0;
-}
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p, lang)));
 
-/* ---------- Tabs (wrap to multiple rows) ---------- */
-.ss-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    padding: 8px 10px;
-    gap: 5px;
-    background: #fff;
-    border-bottom: 1px solid #f0f0f0;
-    flex-shrink: 0;
-}
+        const newItems = [];
+        let emptyPages = 0;
 
-.ss-tab {
-    padding: 5px 10px;
-    font-size: 10.5px;
-    color: #555;
-    cursor: pointer;
-    border-radius: 16px;
-    transition: all 0.2s;
-    font-weight: 600;
-    background: #f7f7f7;
-    border: 1px solid #e5e5e5;
-    white-space: nowrap;
-    user-select: none;
-}
-.ss-tab.active {
-    color: #fff;
-    background: #1a1a1a;
-    border-color: #1a1a1a;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-}
-.ss-tab:hover:not(.active):not(.ss-tab-counting) {
-    background: #efefef;
-    border-color: #d0d0d0;
-}
+        for (const items of results) {
+          if (!items || !items.length) { emptyPages++; continue; }
+          for (const it of items) {
+            if (!it || !it.id || seenIds.has(it.id)) continue;
+            seenIds.add(it.id);
+            // تحويل السعر إلى العملة المحلية
+            if (it.price && currency !== 'USD') {
+              it.price = convertPrice(it.price, rates, currency);
+            }
+            if (it.oldPrice && currency !== 'USD') {
+              it.oldPrice = convertPrice(it.oldPrice, rates, currency);
+            }
+            newItems.push(it);
+          }
+        }
 
-.ss-tab.ss-tab-counting {
-    background: #fff8e1;
-    border-color: #ffcc80;
-    color: #e65100;
-    cursor: wait;
-    pointer-events: none;
-    animation: ss-pulse 1.2s ease-in-out infinite;
-}
+        totalFetched += newItems.length;
+        console.log('[Smart Shopper BG] Batch', Math.floor(batch / PARALLEL_BATCH) + 1,
+                    '- items:', newItems.length);
 
-@keyframes ss-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
-}
+        if (newItems.length > 0 && tabId) {
+          if (!firstBatchSent) {
+            sendResponse({
+              ok: true,
+              items: newItems,
+              searchUrl: baseUrl,
+              currency: currency,
+              done: false,
+              count: newItems.length
+            });
+            firstBatchSent = true;
+          } else {
+            try {
+              chrome.tabs.sendMessage(tabId, {
+                type: 'SMART_SEARCH_UPDATE',
+                items: newItems,
+                searchUrl: baseUrl
+              });
+            } catch (e) {}
+          }
+        }
 
-/* ---------- List ---------- */
-.ss-list {
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 6px 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: calc(100vh - 260px);
-    min-height: 200px;
-    overscroll-behavior: contain;
-    flex-grow: 1;
-}
-.ss-list::-webkit-scrollbar { width: 5px; }
-.ss-list::-webkit-scrollbar-track { background: transparent; }
-.ss-list::-webkit-scrollbar-thumb { background-color: #ccc; border-radius: 3px; }
-.ss-list::-webkit-scrollbar-thumb:hover { background-color: #999; }
+        if (emptyPages === pages.length) break;
+        if (batch + PARALLEL_BATCH < MAX_PAGES) {
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+        }
+      }
 
-/* ---------- Product Card ---------- */
-.ss-card {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: #fff;
-    border: 1px solid #e8e8e8;
-    border-radius: 8px;
-    padding: 8px;
-    position: relative;
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.2s ease;
-    min-height: 72px;
-    cursor: pointer;
-    width: 100%;
-    overflow: hidden;
-}
-.ss-card:hover {
-    border-color: #ff4747;
-    box-shadow: 0 2px 10px rgba(255, 71, 71, 0.1);
+      if (tabId) {
+        try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }); } catch (e) {}
+      }
+      if (!firstBatchSent) sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+    } catch (e) {
+      console.error('[Smart Shopper BG] Error:', e);
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+
+  return true;
+});
+
+/* ---------- استخراج النص ---------- */
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : '';
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
+      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
+      'price', 'desc', 'label'];
+    for (const k of keys) {
+      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    }
+    for (const k in v) {
+      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    }
+    return '';
+  }
+  return String(v);
 }
 
-.ss-thumb-wrapper {
-    flex-shrink: 0;
-    width: 62px;
-    height: 62px;
-    border-radius: 6px;
-    overflow: hidden;
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-}
-.ss-thumb {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    display: block;
-}
-.ss-thumb-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    color: #ccc;
-}
-
-.ss-card-content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 6px;
-    overflow: hidden;
+/* ---------- جلب صفحة ---------- */
+async function fetchPage(baseUrl, page, lang) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const acceptLang = buildAcceptLanguage(lang);
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: {
+        'Accept-Language': acceptLang,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    return [];
+  }
 }
 
-.ss-card-title {
-    font-size: 11.5px;
-    color: #222;
-    line-height: 1.3;
-    font-weight: 500;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-    max-height: 30px;
+function buildAcceptLanguage(lang) {
+  const map = {
+    ar: 'ar-SA,ar;q=0.9,en;q=0.8',
+    de: 'de-DE,de;q=0.9,en;q=0.8',
+    en: 'en-US,en;q=0.9',
+    es: 'es-ES,es;q=0.9,en;q=0.8',
+    fr: 'fr-FR,fr;q=0.9,en;q=0.8',
+    he: 'he-IL,he;q=0.9,en;q=0.8',
+    id: 'id-ID,id;q=0.9,en;q=0.8',
+    it: 'it-IT,it;q=0.9,en;q=0.8',
+    ja: 'ja-JP,ja;q=0.9,en;q=0.8',
+    ko: 'ko-KR,ko;q=0.9,en;q=0.8',
+    ms: 'ms-MY,ms;q=0.9,en;q=0.8',
+    nl: 'nl-NL,nl;q=0.9,en;q=0.8',
+    pl: 'pl-PL,pl;q=0.9,en;q=0.8',
+    pt: 'pt-BR,pt;q=0.9,en;q=0.8',
+    ru: 'ru-RU,ru;q=0.9,en;q=0.8',
+    th: 'th-TH,th;q=0.9,en;q=0.8',
+    tr: 'tr-TR,tr;q=0.9,en;q=0.8',
+    vi: 'vi-VN,vi;q=0.9,en;q=0.8'
+  };
+  return map[lang] || 'en-US,en;q=0.9';
 }
 
-/* ---------- سطر التقييم والمشتريات ---------- */
-.ss-card-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10.5px;
-    color: #666;
-    line-height: 1.2;
-    overflow: hidden;
-    white-space: nowrap;
+/* ---------- استخراج المنتجات (بدون تحويل - يتم في الأعلى) ---------- */
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
+
+      let img = '';
+      if (o.image) {
+        if (typeof o.image === 'string') img = o.image;
+        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
+      }
+      if (!img && o.picUrl) {
+        if (typeof o.picUrl === 'string') img = o.picUrl;
+        else img = o.picUrl.imgUrl || o.picUrl.url || '';
+      }
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
+                    sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
+      const discount = extractText(o.discount || sale.discount || '');
+
+      const rating = extractText(
+        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
+        o.averageStarRate || o.starRating || ''
+      );
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+      out.push({
+        id: String(id), title: title || 'Produit similaire', img, price, oldPrice, discount, rating, sold,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
+    } catch (e) {}
+  }
+  return out;
 }
 
-.ss-stars {
-    color: #ffa726;
-    font-size: 12px;
-    letter-spacing: -0.5px;
-    line-height: 1;
-    flex-shrink: 0;
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '',
+      discount: '', rating: '', sold: '',
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
+  }
+  return out;
 }
 
-.ss-rating-num {
-    color: #444;
-    font-weight: 700;
-    font-size: 10.5px;
-    flex-shrink: 0;
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
 }
 
-.ss-sold {
-    color: #888;
-    font-size: 10px;
-    flex-shrink: 0;
-}
-
-.ss-no-info {
-    color: #bbb;
-    font-size: 10px;
-    font-style: italic;
-}
-
-/* ---------- Discount Box (Green) ---------- */
-.ss-discount-box {
-    flex-shrink: 0;
-    background: #e8f8f0;
-    border: 1px solid #c6ecd8;
-    border-radius: 6px;
-    padding: 6px 8px;
-    min-width: 62px;
-    max-width: 78px;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
-}
-
-.ss-price-main {
-    font-size: 13px;
-    font-weight: 800;
-    color: #00a854;
-    line-height: 1.1;
-    letter-spacing: -0.3px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.ss-discount-label {
-    font-size: 9.5px;
-    font-weight: 700;
-    color: #00a854;
-    line-height: 1.1;
-    white-space: nowrap;
-}
-
-.ss-discount-box.ss-no-discount {
-    background: #f5f5f5;
-    border-color: #e8e8e8;
-}
-.ss-discount-box.ss-no-discount .ss-price-main {
-    color: #666;
-    font-size: 11px;
-}
-
-/* ---------- Messages ---------- */
-.ss-msg {
-    text-align: center;
-    padding: 40px 20px;
-    font-size: 13px;
-    color: #888;
-    line-height: 1.6;
-    font-weight: 500;
-}
-.ss-msg-icon {
-    font-size: 40px;
-    margin-bottom: 10px;
-    display: block;
-    opacity: 0.5;
-}
-
-/* ---------- Footer ---------- */
-.ss-footer {
-    padding: 8px;
-    text-align: center;
-    border-top: 1px solid #f0f0f0;
-    background: #fafafa;
-    flex-shrink: 0;
-    border-radius: 0 0 10px 10px;
-}
-.ss-footer-link {
-    font-size: 11px;
-    color: #2f80ed;
-    text-decoration: none;
-    font-weight: 600;
-    display: inline-block;
-    padding: 5px 12px;
-    background: #f0f7ff;
-    border-radius: 16px;
-    transition: all 0.2s;
-}
-.ss-footer-link:hover {
-    background: #e0efff;
-}
-.ss-loading-more {
-    font-size: 9.5px;
-    color: #999;
-    margin-top: 5px;
-    text-align: center;
-    font-weight: 500;
-}
-
-/* ---------- Skeleton ---------- */
-.skel {
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-    background-size: 200% 100%;
-    animation: ss-skel 1.5s infinite;
-    border-radius: 4px;
-    pointer-events: none;
-}
-.skel.line { height: 9px; width: 100%; margin-bottom: 5px; }
-.skel.line.short { width: 60%; }
-.skel.ss-thumb-wrapper { width: 62px; height: 62px; }
-.skel.ss-discount-box { width: 62px; height: 40px; }
-
-@keyframes ss-skel {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
