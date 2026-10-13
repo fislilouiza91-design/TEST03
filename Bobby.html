@@ -1,295 +1,34 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   Version: Rich Data + Parallel Fetch + Streaming
-   ============================================ */
-
-const MAX_PAGES = 8;                // العدد الإجمالي للصفحات
-const PARALLEL_BATCH = 3;           // عدد الصفحات المجلوبة في نفس الوقت
-const DELAY_BETWEEN_BATCHES = 400;  // انتظار قصير بين كل مجموعة (ms)
-
-/* ---------- Listener الرئيسي ---------- */
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || msg.type !== 'SMART_SEARCH') return;
-  const tabId = sender.tab && sender.tab.id;
-
-  (async () => {
-    try {
-      const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-
-      const seenIds = new Set();
-      let firstBatchSent = false;
-      let totalFetched = 0;
-
-      // جلب الصفحات على دفعات متوازية
-      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
-        const pages = [];
-        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
-          pages.push(batch + i + 1);
-        }
-
-        // جلب كل صفحات الدفعة في نفس الوقت
-        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
-
-        // تجميع النتائج الجديدة
-        const newItems = [];
-        let emptyPages = 0;
-
-        for (const items of results) {
-          if (!items || !items.length) { emptyPages++; continue; }
-          for (const it of items) {
-            if (!it || !it.id || seenIds.has(it.id)) continue;
-            seenIds.add(it.id);
-            newItems.push(it);
-          }
-        }
-
-        totalFetched += newItems.length;
-        console.log('[Smart Shopper BG] Batch', Math.floor(batch / PARALLEL_BATCH) + 1,
-                    '- pages:', pages.join(','), '- new items:', newItems.length);
-
-        // إرسال النتائج الجديدة فوراً للـ content script (Streaming)
-        if (newItems.length > 0 && tabId) {
-          if (!firstBatchSent) {
-            // الدفعة الأولى: نرد على الرسالة الأصلية
-            sendResponse({
-              ok: true,
-              items: newItems,
-              searchUrl: baseUrl,
-              done: false,
-              count: newItems.length
-            });
-            firstBatchSent = true;
-          } else {
-            // الدفعات التالية: نرسل تحديثاً
-            try {
-              chrome.tabs.sendMessage(tabId, {
-                type: 'SMART_SEARCH_UPDATE',
-                items: newItems,
-                searchUrl: baseUrl
-              });
-            } catch (e) {
-              console.warn('[Smart Shopper BG] Failed to send update:', e);
-            }
-          }
-        }
-
-        // إذا كانت كل الصفحات فارغة، أوقف الجلب
-        if (emptyPages === pages.length) {
-          console.log('[Smart Shopper BG] All pages empty. Stopping.');
-          break;
-        }
-
-        // انتظار قصير قبل الدفعة التالية
-        if (batch + PARALLEL_BATCH < MAX_PAGES) {
-          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
-        }
-      }
-
-      console.log('[Smart Shopper BG] Total unique items fetched:', totalFetched);
-
-      // إعلام النهاية
-      if (tabId) {
-        try {
-          chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched });
-        } catch (e) {}
-      }
-
-      // إذا لم يُرسل شيء بعد (حالة نادرة جداً)
-      if (!firstBatchSent) {
-        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
-      }
-    } catch (e) {
-      console.error('[Smart Shopper BG] Error:', e);
-      sendResponse({ ok: false, error: String(e) });
+{
+  "manifest_version": 3,
+  "name": "Smart Shopper",
+  "version": "1.0.0",
+  "description": "Trouvez le meilleur prix pour le même produit sur AliExpress",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.aliexpress.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.aliexpress.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
     }
-  })();
-
-  return true; // async response
-});
-
-/* ============================================
-   جلب صفحة واحدة من AliExpress
-   ============================================ */
-async function fetchPage(baseUrl, page) {
-  try {
-    const url = baseUrl + '&page=' + page;
-    const res = await fetch(url, {
-      headers: {
-        'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
-    });
-
-    if (!res.ok) {
-      console.warn('[Smart Shopper BG] Page', page, 'HTTP', res.status);
-      return [];
-    }
-
-    const html = await res.text();
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
-    return items;
-  } catch (e) {
-    console.warn('[Smart Shopper BG] Fetch error page', page, ':', e);
-    return [];
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "Smart Shopper"
   }
-}
-
-/* ============================================
-   استخراج المنتجات مع كل البيانات الغنية
-   ============================================ */
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-
-      // العنوان
-      const title = clean(o.title || (o.item && o.item.title) || '');
-
-      // الصورة
-      let img = (o.image && (o.image.imgUrl || o.image.imageUrl)) || o.picUrl || o.imageUrl || '';
-      if (typeof img === 'object') img = img.imgUrl || img.imageUrl || '';
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      // الأسعار
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-      const price = sale.formatedActivityPrice || sale.formatedPrice ||
-                    sale.minActivityPrice || sale.minPrice ||
-                    p.formatedPrice || '';
-      const oldPrice = orig.formatedPrice || orig.minPrice || '';
-      const discount = o.discount || sale.discount || '';
-
-      // المتجر
-      const store = (o.store && o.store.storeName) || o.storeName || 'AliExpress';
-      const storeUrl = (o.store && o.store.storeUrl) || o.storeUrl || '';
-
-      // التقييمات
-      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar))
-                     || o.averageStarRate || o.starRating || '';
-      const sold = o.tradeDesc || o.sold || o.soldCount || '';
-      const reviews = (o.evaluation && o.evaluation.totalValidNum) || o.reviewCount || '';
-
-      // الشحن
-      const shipping = o.logisticsDesc || o.shipping || '';
-      const shippingFree = o.freeShipping ||
-                           (o.logisticsDesc && /free/i.test(o.logisticsDesc)) ||
-                           (o.shipping && /free/i.test(o.shipping));
-      const deliveryDays = o.deliveryDate || o.deliveryDays || '';
-
-      // الشارات (Badges)
-      const badges = [];
-      if (o.isChoice) badges.push('Choice');
-      if (o.isLocalReturn) badges.push('LocalReturn');
-      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
-      if (o.isTopRatedSeller) badges.push('TopRated');
-
-      out.push({
-        id: String(id),
-        title,
-        img,
-        price,
-        oldPrice,
-        discount,
-        store,
-        storeUrl,
-        rating,
-        sold,
-        reviews,
-        shipping,
-        shippingFree,
-        deliveryDays,
-        badges,
-        link: 'https://www.aliexpress.com/item/' + id + '.html'
-      });
-    } catch (e) {
-      // تجاهل المنتجات التي بها أخطاء
-    }
-  }
-  return out;
-}
-
-/* ============================================
-   استخراج IDs كطريقة احتياطية
-   ============================================ */
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set();
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({
-      id: m[1],
-      title: 'Produit similaire',
-      img: '',
-      price: '',
-      oldPrice: '',
-      discount: '',
-      store: 'AliExpress',
-      storeUrl: '',
-      rating: '',
-      sold: '',
-      reviews: '',
-      shipping: '',
-      shippingFree: false,
-      deliveryDays: '',
-      badges: [],
-      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
-    });
-  }
-  return out;
-}
-
-/* ============================================
-   استخراج مصفوفة JSON من HTML
-   ============================================ */
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') {
-      depth--;
-      if (depth === 0) return html.slice(j, k + 1);
-    }
-  }
-  return null;
-}
-
-/* ============================================
-   تنظيف النصوص من وسوم HTML
-   ============================================ */
-function clean(s) {
-  return String(s)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
