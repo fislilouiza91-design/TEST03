@@ -1,53 +1,63 @@
-// src/fetcher.js
-import fetch from 'node-fetch';
-
-export class OmkarFetcher {
-  constructor(apiKey, monitor) {
-    this.apiKey = apiKey;
-    this.monitor = monitor;
+// src/monitor.js
+export class PerformanceMonitor {
+  constructor(options = {}) {
+    this.slowThresholdMs = options.slowThresholdMs || 15000;
+    this.maxConsecutiveFails = options.maxConsecutiveFails || 3;
+    this.maxConsecutiveSlows = options.maxConsecutiveSlows || 5;
+    
+    this.consecutiveFails = 0;
+    this.consecutiveSlows = 0;
+    this.totalRequests = 0;
+    this.totalFails = 0;
+    this.totalSlows = 0;
+    this.circuitOpen = false;
+    this.reason = '';
   }
   
-  async fetch(keyword, countryCode = 'US') {
-    const url = `https://aliexpress-scraper-api.omkar.cloud/aliexpress/v2/search?` +
-      `query=${encodeURIComponent(keyword)}&` +
-      `sort_by=most_orders&` +
-      `country_code=${countryCode}&` +
-      `page=1`;
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
-    const startTime = Date.now();
-    
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'API-Key': this.apiKey,
-          'Accept': 'application/json',
-        },
-        signal: controller.signal,
-      });
-      
-      clearTimeout(timeoutId);
-      const duration = Date.now() - startTime;
-      
-      if (!response.ok) {
-        const errText = await response.text();
-        this.monitor.recordFailure(`HTTP ${response.status}: ${errText.substring(0, 80)}`);
-        throw new Error(`Omkar ${response.status}`);
+  recordSuccess(durationMs) {
+    this.totalRequests++;
+    if (durationMs > this.slowThresholdMs) {
+      this.totalSlows++;
+      this.consecutiveSlows++;
+      this.consecutiveFails = 0;
+      console.log(`  ⚠️ بطيء: ${(durationMs/1000).toFixed(1)}ث`);
+      if (this.consecutiveSlows >= this.maxConsecutiveSlows) {
+        this.openCircuit(`بطء متتالي (${this.consecutiveSlows})`);
       }
-      
-      const data = await response.json();
-      this.monitor.recordSuccess(duration);
-      return data.results || [];
-      
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error.name === 'AbortError') {
-        this.monitor.recordFailure('Timeout');
-        throw new Error('Timeout');
-      }
-      throw error;
+    } else {
+      this.consecutiveSlows = 0;
+      this.consecutiveFails = 0;
     }
+  }
+  
+  recordFailure(errorMessage) {
+    this.totalRequests++;
+    this.totalFails++;
+    this.consecutiveFails++;
+    this.consecutiveSlows = 0;
+    console.log(`  ❌ فشل (${this.consecutiveFails}/${this.maxConsecutiveFails})`);
+    if (this.consecutiveFails >= this.maxConsecutiveFails) {
+      this.openCircuit(`فشل متتالي (${this.consecutiveFails})`);
+    }
+  }
+  
+  openCircuit(reason) {
+    this.circuitOpen = true;
+    this.reason = reason;
+    console.log(`\n🛑 تم فتح قاطع الدائرة: ${reason}\n`);
+  }
+  
+  canProceed() {
+    return !this.circuitOpen;
+  }
+  
+  getReport() {
+    return {
+      totalRequests: this.totalRequests,
+      totalFails: this.totalFails,
+      totalSlows: this.totalSlows,
+      circuitOpen: this.circuitOpen,
+      reason: this.reason,
+    };
   }
 }
