@@ -1,1 +1,40 @@
-SELECT language, COUNT(*) FROM products_current GROUP BY language;
+import { createClient } from '@libsql/client';
+
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+async function main() {
+  console.log('📊 فحص قاعدة البيانات...\n');
+  
+  // 1. عدد الصفوف الكلي
+  const total = await db.execute('SELECT COUNT(*) AS count FROM products_current');
+  console.log('📦 إجمالي الصفوف:', total.rows[0].count);
+  
+  // 2. توزيع اللغات
+  const langs = await db.execute(
+    'SELECT language, COUNT(*) AS count FROM products_current GROUP BY language'
+  );
+  console.log('\n🌍 توزيع اللغات:');
+  langs.rows.forEach(r => console.log(`  ${r.language}: ${r.count} صف`));
+  
+  // 3. عينة من كل لغة
+  const sample = await db.execute(
+    'SELECT language, keyword, title FROM products_current ORDER BY language LIMIT 10'
+  );
+  console.log('\n📝 عينة:');
+  sample.rows.forEach(r => {
+    console.log(`  [${r.language}] ${r.keyword}: ${r.title?.substring(0, 50)}...`);
+  });
+  
+  // 4. التحقق من بنية الجدول
+  const schema = await db.execute("PRAGMA table_info(products_current)");
+  console.log('\n🏗️ أعمدة الجدول:');
+  schema.rows.forEach(r => console.log(`  ${r.name} (${r.type})`));
+}
+
+main().catch(error => {
+  console.error('❌ خطأ:', error);
+  process.exit(1);
+});
