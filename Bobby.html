@@ -6,11 +6,10 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
-// الأسواق: كل سوق = لغة مختلفة
 const MARKETS = [
-  { lang: 'en', code: 'US' },   // الإنجليزية
-  { lang: 'ar', code: 'SA' },   // العربية
-  { lang: 'zh', code: 'CN' },   // الصينية
+  { lang: 'en', code: 'US' },
+  { lang: 'ar', code: 'SA' },
+  { lang: 'zh', code: 'CN' },
 ];
 
 const KEYWORDS = [
@@ -27,7 +26,7 @@ const KEYWORDS = [
 ];
 
 const API_KEY = process.env.OMKAR_API_KEY;
-const DELAY_BETWEEN_KEYWORDS = 2000;
+const DELAY_BETWEEN_KEYWORDS = 4000; // زيادة التأخير لتقليل الضغط
 
 async function fetchFromOmkar(keyword, countryCode) {
   const url = `https://aliexpress-scraper-api.omkar.cloud/aliexpress/v2/search?` +
@@ -53,6 +52,30 @@ async function fetchFromOmkar(keyword, countryCode) {
   return data.results || [];
 }
 
+// دالة الجلب مع إعادة المحاولة التلقائية
+async function fetchWithRetry(keyword, countryCode, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetchFromOmkar(keyword, countryCode);
+    } catch (error) {
+      const isRetryable = 
+        error.message.includes('502') || 
+        error.message.includes('503') ||
+        error.message.includes('504') ||
+        error.message.includes('upstream_unavailable') ||
+        error.message.includes('timeout');
+      
+      if (!isRetryable || attempt === maxRetries) {
+        throw error;
+      }
+      
+      const waitSeconds = attempt * 15; // 15ث، 30ث، 45ث
+      console.log(`  ⏳ خطأ مؤقت (${attempt}/${maxRetries})، انتظار ${waitSeconds}ث...`);
+      await new Promise(r => setTimeout(r, waitSeconds * 1000));
+    }
+  }
+}
+
 async function saveToTurso(keyword, language, products) {
   if (products.length === 0) return 0;
   
@@ -72,7 +95,6 @@ async function saveToTurso(keyword, language, products) {
       const sellerRating = parseFloat(p.store?.rating || p.seller?.rating || 0);
       const isFreeShipping = (p.shipping?.free === true || p.shipping?.free_shipping === true) ? 1 : 0;
       
-      // UPSERT: إدخال أو تحديث بناءً على (product_id, keyword, language)
       await db.execute({
         sql: `INSERT INTO products_current 
               (product_id, keyword, language, title, current_price, original_price, 
@@ -96,7 +118,6 @@ async function saveToTurso(keyword, language, products) {
                isFreeShipping, now, now]
       });
       
-      // سجّل في price_history
       await db.execute({
         sql: `INSERT INTO price_history 
               (product_id, keyword, price, orders_count, recorded_at, source)
@@ -127,7 +148,7 @@ async function main() {
       try {
         console.log(`🔍 جلب: "${keyword}" بلغة [${market.lang}] (${market.code})`);
         
-        const products = await fetchFromOmkar(keyword, market.code);
+        const products = await fetchWithRetry(keyword, market.code);
         console.log(`  📦 استُلم ${products.length} منتج`);
         
         const saved = await saveToTurso(keyword, market.lang, products);
@@ -150,6 +171,7 @@ async function main() {
   console.log(`  ❌ فشل: ${failCount}`);
   console.log(`  📦 إجمالي المنتجات المخزنة: ${totalSaved}`);
   
+  // لا تفشل إذا فشل أقل من 50%
   if (failCount > successCount) {
     process.exit(1);
   }
