@@ -6,6 +6,13 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
+// الأسواق: كل سوق = لغة مختلفة
+const MARKETS = [
+  { lang: 'en', code: 'US' },   // الإنجليزية
+  { lang: 'ar', code: 'SA' },   // العربية
+  { lang: 'zh', code: 'CN' },   // الصينية
+];
+
 const KEYWORDS = [
   'bluetooth earphones',
   'smart watch',
@@ -22,11 +29,11 @@ const KEYWORDS = [
 const API_KEY = process.env.OMKAR_API_KEY;
 const DELAY_BETWEEN_KEYWORDS = 2000;
 
-async function fetchFromOmkar(keyword) {
+async function fetchFromOmkar(keyword, countryCode) {
   const url = `https://aliexpress-scraper-api.omkar.cloud/aliexpress/v2/search?` +
     `query=${encodeURIComponent(keyword)}&` +
     `sort_by=most_orders&` +
-    `country_code=US&` +
+    `country_code=${countryCode}&` +
     `page=1`;
   
   const response = await fetch(url, {
@@ -46,7 +53,7 @@ async function fetchFromOmkar(keyword) {
   return data.results || [];
 }
 
-async function saveToTurso(keyword, products) {
+async function saveToTurso(keyword, language, products) {
   if (products.length === 0) return 0;
   
   const now = Date.now();
@@ -65,22 +72,36 @@ async function saveToTurso(keyword, products) {
       const sellerRating = parseFloat(p.store?.rating || p.seller?.rating || 0);
       const isFreeShipping = (p.shipping?.free === true || p.shipping?.free_shipping === true) ? 1 : 0;
       
+      // UPSERT: إدخال أو تحديث بناءً على (product_id, keyword, language)
       await db.execute({
-        sql: `INSERT OR REPLACE INTO products_current 
-              (product_id, keyword, title, current_price, original_price, 
+        sql: `INSERT INTO products_current 
+              (product_id, keyword, language, title, current_price, original_price, 
                orders_count, rating, image_url, seller_name, seller_rating,
                is_free_shipping, first_seen_at, last_updated_at, update_count)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        args: [productId, keyword, title, price, originalPrice,
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
+                title = excluded.title,
+                current_price = excluded.current_price,
+                original_price = excluded.original_price,
+                orders_count = excluded.orders_count,
+                rating = excluded.rating,
+                image_url = excluded.image_url,
+                seller_name = excluded.seller_name,
+                seller_rating = excluded.seller_rating,
+                is_free_shipping = excluded.is_free_shipping,
+                last_updated_at = excluded.last_updated_at,
+                update_count = update_count + 1`,
+        args: [productId, keyword, language, title, price, originalPrice,
                orders, rating, image, sellerName, sellerRating,
                isFreeShipping, now, now]
       });
       
+      // سجّل في price_history
       await db.execute({
         sql: `INSERT INTO price_history 
               (product_id, keyword, price, orders_count, recorded_at, source)
               VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [productId, keyword, price, orders, now, 'omkar']
+        args: [productId, `${keyword} (${language})`, price, orders, now, 'omkar']
       });
       
       saved++;
@@ -93,37 +114,40 @@ async function saveToTurso(keyword, products) {
 }
 
 async function main() {
-  console.log('🚀 بدء الجلب من Omkar Cloud...');
-  console.log(`📋 عدد الكلمات المفتاحية: ${KEYWORDS.length}`);
+  console.log('🚀 بدء الجلب متعدد اللغات...');
+  console.log(`📋 ${KEYWORDS.length} كلمة × ${MARKETS.length} سوق = ${KEYWORDS.length * MARKETS.length} طلب\n`);
   
   let totalSaved = 0;
   let successCount = 0;
   let failCount = 0;
+  const totalJobs = KEYWORDS.length * MARKETS.length;
   
   for (const keyword of KEYWORDS) {
-    try {
-      console.log(`\n🔍 جلب: ${keyword}`);
-      
-      const products = await fetchFromOmkar(keyword);
-      console.log(`  📦 استُلم ${products.length} منتج`);
-      
-      const saved = await saveToTurso(keyword, products);
-      console.log(`  ✅ خُزّن ${saved} منتج`);
-      
-      totalSaved += saved;
-      successCount++;
-      
-      await new Promise(r => setTimeout(r, DELAY_BETWEEN_KEYWORDS));
-      
-    } catch (error) {
-      console.error(`  ❌ فشل "${keyword}":`, error.message);
-      failCount++;
+    for (const market of MARKETS) {
+      try {
+        console.log(`🔍 جلب: "${keyword}" بلغة [${market.lang}] (${market.code})`);
+        
+        const products = await fetchFromOmkar(keyword, market.code);
+        console.log(`  📦 استُلم ${products.length} منتج`);
+        
+        const saved = await saveToTurso(keyword, market.lang, products);
+        console.log(`  ✅ خُزّن ${saved} منتج`);
+        
+        totalSaved += saved;
+        successCount++;
+        
+        await new Promise(r => setTimeout(r, DELAY_BETWEEN_KEYWORDS));
+        
+      } catch (error) {
+        console.error(`  ❌ فشل "${keyword}" [${market.lang}]:`, error.message);
+        failCount++;
+      }
     }
   }
   
   console.log(`\n📊 ملخص:`);
-  console.log(`  ✅ كلمات ناجحة: ${successCount}/${KEYWORDS.length}`);
-  console.log(`  ❌ كلمات فاشلة: ${failCount}`);
+  console.log(`  ✅ نجح: ${successCount}/${totalJobs}`);
+  console.log(`  ❌ فشل: ${failCount}`);
   console.log(`  📦 إجمالي المنتجات المخزنة: ${totalSaved}`);
   
   if (failCount > successCount) {
