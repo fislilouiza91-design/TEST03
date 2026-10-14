@@ -1,36 +1,95 @@
-name: Manual Control
+// src/control.js
+import { SystemState } from './state.js';
+import { SmartScheduler } from './scheduler.js';
+import { createClient } from '@libsql/client';
 
-on:
-  workflow_dispatch:
-    inputs:
-      action:
-        description: 'الإجراء المطلوب'
-        required: true
-        type: choice
-        options:
-          - start
-          - pause
-          - resume
-          - maintenance
-          - status
-          - reset-failing
-          - view-logs
-          - run-once
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  control:
-    runs-on: ubuntu-latest
+async function main() {
+  const action = process.env.ACTION;
+  console.log(`🎮 الإجراء المطلوب: ${action}\n`);
+  
+  await SystemState.ensureTables();
+  
+  switch (action) {
+    case 'start': {
+      await SystemState.setMode('AUTO');
+      await SystemState.set('pause_until', 0);
+      console.log('✅ النظام يعمل الآن في الوضع التلقائي');
+      break;
+    }
     
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: npm install
+    case 'pause': {
+      await SystemState.setMode('PAUSED');
+      console.log('⏸️ تم إيقاف النظام. لن يعمل حتى يتم استئنافه');
+      break;
+    }
+    
+    case 'resume': {
+      await SystemState.setMode('AUTO');
+      await SystemState.set('pause_until', 0);
+      await SystemState.set('consecutive_failures', 0);
+      console.log('▶️ تم استئناف النظام');
+      break;
+    }
+    
+    case 'maintenance': {
+      await SystemState.setMode('MAINTENANCE');
+      console.log('🔧 وضع الصيانة. النظام معطل مؤقتاً');
+      break;
+    }
+    
+    case 'status': {
+      const mode = await SystemState.getMode();
+      const pauseUntil = await SystemState.get('pause_until');
+      const todayRequests = await SystemState.get('today_requests') || 0;
+      const stats = await SmartScheduler.getStats();
       
-      - name: Execute action
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          ACTION: ${{ github.event.inputs.action }}
-        run: node src/control.js
+      console.log('📊 حالة النظام:');
+      console.log(`  الوضع: ${mode}`);
+      console.log(`  متوقف حتى: ${pauseUntil ? new Date(pauseUntil).toLocaleString('ar') : 'غير محدد'}`);
+      console.log(`  طلبات اليوم: ${todayRequests}`);
+      console.log('');
+      console.log('📈 إحصائيات الدوران:');
+      console.log(`  إجمالي الكلمات: ${stats.total}`);
+      console.log(`  لم تُعالج: ${stats.pending}`);
+      console.log(`  عُولجت في 24س: ${stats.processed_24h}`);
+      console.log(`  كلمات فاشلة: ${stats.failing}`);
+      break;
+    }
+    
+    case 'reset-failing': {
+      const result = await db.execute(`
+        UPDATE keyword_rotation 
+        SET enabled = 1, fail_count = 0, run_count = 0
+        WHERE enabled = 0
+      `);
+      console.log(`🔄 تم إعادة تفعيل ${result.rowsAffected} كلمة`);
+      break;
+    }
+    
+    case 'view-logs': {
+      const logs = await SystemState.getRecentLogs(30);
+      console.log('📋 آخر 30 حدث:\n');
+      logs.forEach(l => {
+        const time = new Date(l.created_at).toLocaleString('ar');
+        console.log(`  [${time}] ${l.event_type}: ${l.message}`);
+      });
+      break;
+    }
+    
+    case 'run-once': {
+      console.log('▶️ تشغيل دورة واحدة...');
+      // يستدعي main.js
+      break;
+    }
+    
+    default:
+      console.log('❓ إجراء غير معروف');
+  }
+}
+
+main().catch(console.error);
