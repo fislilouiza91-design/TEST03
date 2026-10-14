@@ -1,4 +1,4 @@
-SELECT keyword, COUNT(*) AS count 
+SELECT keyword, title, current_price, orders_count, rating 
 FROM products_current 
-GROUP BY keyword 
-ORDER BY count DESC;
+ORDER BY orders_count DESC 
+LIMIT 10;
