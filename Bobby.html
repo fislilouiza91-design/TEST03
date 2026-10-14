@@ -1,39 +1,23 @@
-import { createClient } from '@libsql/client';
+name: Test Turso Connection
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  workflow_dispatch:
 
-async function main() {
-  console.log('🔌 اختبار الاتصال بـ Turso...');
-  
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO products_current 
-          (product_id, keyword, title, current_price, orders_count, first_seen_at, last_updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [
-      'test_gh_001',
-      'bluetooth earphones',
-      'Test Product from GitHub Actions',
-      19.99,
-      5000,
-      Date.now(),
-      Date.now()
-    ]
-  });
-  console.log('✅ تم إدخال البيانات');
-  
-  const result = await db.execute({
-    sql: `SELECT * FROM products_current WHERE product_id = ?`,
-    args: ['test_gh_001']
-  });
-  
-  console.log('📊 النتيجة:', result.rows[0]);
-  console.log('🎉 الاتصال يعمل بنجاح!');
-}
-
-main().catch(error => {
-  console.error('❌ خطأ:', error);
-  process.exit(1);
-});
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Test connection
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+        run: node test-connection.js
