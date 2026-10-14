@@ -1,109 +1,112 @@
-// src/state.js
+// src/scheduler.js
 import { createClient } from '@libsql/client';
+import fs from 'fs';
 
 const db = createClient({
   url: process.env.TURSO_URL,
   authToken: process.env.TURSO_TOKEN,
 });
 
-export class SystemState {
-  static async ensureTables() {
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS system_state (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        updated_at INTEGER
-      )
-    `);
-    
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS keyword_rotation (
-        keyword TEXT PRIMARY KEY,
-        category TEXT,
-        subcategory TEXT,
-        last_run_at INTEGER DEFAULT 0,
-        run_count INTEGER DEFAULT 0,
-        success_count INTEGER DEFAULT 0,
-        fail_count INTEGER DEFAULT 0,
-        priority INTEGER DEFAULT 5,
-        enabled INTEGER DEFAULT 1
-      )
-    `);
-    
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS system_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_type TEXT,
-        message TEXT,
-        details TEXT,
-        created_at INTEGER
-      )
-    `);
+export class SmartScheduler {
+  static loadCategories() {
+    const data = JSON.parse(fs.readFileSync('./config/categories.json', 'utf8'));
+    return data.categories;
   }
   
-  static async get(key) {
-    const result = await db.execute({
-      sql: 'SELECT value FROM system_state WHERE key = ?',
-      args: [key]
-    });
-    if (result.rows.length === 0) return null;
-    try {
-      return JSON.parse(result.rows[0].value);
-    } catch {
-      return result.rows[0].value;
+  // تسجيل كل الكلمات في قاعدة البيانات (مرة واحدة)
+  static async seedKeywords() {
+    const categories = this.loadCategories();
+    let inserted = 0;
+    
+    for (const cat of categories) {
+      for (const [subName, keywords] of Object.entries(cat.subs)) {
+        for (const kw of keywords) {
+          try {
+            await db.execute({
+              sql: `INSERT OR IGNORE INTO keyword_rotation 
+                    (keyword, category, subcategory, priority)
+                    VALUES (?, ?, ?, ?)`,
+              args: [kw, cat.name, subName, cat.priority || 5]
+            });
+            inserted++;
+          } catch (e) { /* تجاهل التكرار */ }
+        }
+      }
     }
-  }
-  
-  static async set(key, value) {
-    await db.execute({
-      sql: `INSERT INTO system_state (key, value, updated_at) 
-            VALUES (?, ?, ?)
-            ON CONFLICT (key) DO UPDATE SET 
-              value = excluded.value,
-              updated_at = excluded.updated_at`,
-      args: [key, JSON.stringify(value), Date.now()]
-    });
-  }
-  
-  static async getMode() {
-    const mode = await this.get('mode');
-    return mode || 'AUTO';
-  }
-  
-  static async setMode(newMode) {
-    await this.set('mode', newMode);
-    await this.log('MODE_CHANGE', `تم تغيير الوضع إلى ${newMode}`);
-  }
-  
-  static async isPaused() {
-    const mode = await this.getMode();
-    if (mode === 'PAUSED' || mode === 'MAINTENANCE') return true;
     
-    const pauseUntil = await this.get('pause_until');
-    if (pauseUntil && Date.now() < pauseUntil) return true;
+    console.log(`✅ تم تسجيل ${inserted} كلمة في جدول الدوران`);
+  }
+  
+  // اختيار الكلمات الذكية التالية
+  static async pickNextKeywords(count) {
+    // الأولوية:
+    // 1. الكلمات التي لم تُعالج بعد (last_run_at = 0)
+    // 2. الكلمات ذات الأولوية الأعلى (priority 1)
+    // 3. الكلمات الأقل استخداماً (run_count أقل)
+    // 4. الكلمات الأقدم (last_run_at أقدم)
     
-    return false;
-  }
-  
-  static async pauseFor(minutes, reason) {
-    const until = Date.now() + minutes * 60 * 1000;
-    await this.set('pause_until', until);
-    await this.log('AUTO_PAUSE', `توقف تلقائي لمدة ${minutes} دقيقة - ${reason}`);
-  }
-  
-  static async log(eventType, message, details = null) {
-    await db.execute({
-      sql: `INSERT INTO system_logs (event_type, message, details, created_at)
-            VALUES (?, ?, ?, ?)`,
-      args: [eventType, message, details ? JSON.stringify(details) : null, Date.now()]
-    });
-  }
-  
-  static async getRecentLogs(limit = 50) {
     const result = await db.execute({
-      sql: 'SELECT * FROM system_logs ORDER BY created_at DESC LIMIT ?',
-      args: [limit]
+      sql: `SELECT keyword, category, subcategory, priority
+            FROM keyword_rotation
+            WHERE enabled = 1
+            ORDER BY 
+              CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
+              priority ASC,
+              run_count ASC,
+              last_run_at ASC
+            LIMIT ?`,
+      args: [count]
     });
+    
     return result.rows;
+  }
+  
+  // تحديث حالة الكلمة بعد المعالجة
+  static async markProcessed(keyword, success) {
+    await db.execute({
+      sql: `UPDATE keyword_rotation
+            SET last_run_at = ?,
+                run_count = run_count + 1,
+                success_count = success_count + ?,
+                fail_count = fail_count + ?
+            WHERE keyword = ?`,
+      args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword]
+    });
+  }
+  
+  // إحصائيات الدوران
+  static async getStats() {
+    const total = await db.execute('SELECT COUNT(*) as c FROM keyword_rotation');
+    const pending = await db.execute(
+      'SELECT COUNT(*) as c FROM keyword_rotation WHERE last_run_at = 0'
+    );
+    const recent = await db.execute(
+      `SELECT COUNT(*) as c FROM keyword_rotation 
+       WHERE last_run_at > ?`,
+      [Date.now() - 24 * 60 * 60 * 1000]
+    );
+    const failing = await db.execute(
+      `SELECT COUNT(*) as c FROM keyword_rotation 
+       WHERE fail_count > success_count AND run_count > 2`
+    );
+    
+    return {
+      total: total.rows[0].c,
+      pending: pending.rows[0].c,
+      processed_24h: recent.rows[0].c,
+      failing: failing.rows[0].c,
+    };
+  }
+  
+  // تعطيل الكلمات الفاشلة تلقائياً
+  static async disableFailingKeywords() {
+    const result = await db.execute(`
+      UPDATE keyword_rotation
+      SET enabled = 0
+      WHERE fail_count >= 5 
+        AND success_count = 0 
+        AND run_count >= 5
+    `);
+    return result.rowsAffected;
   }
 }
