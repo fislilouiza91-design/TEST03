@@ -1,23 +1,8 @@
-name: Test Turso Connection
-
-on:
-  workflow_dispatch:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Test connection
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node test-connection.js
+{
+  "name": "aliexpress-pipeline",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@libsql/client": "^0.14.0"
+  }
+}
