@@ -1,112 +1,53 @@
-// src/scheduler.js
-import { createClient } from '@libsql/client';
-import fs from 'fs';
+// src/fetcher.js
+import fetch from 'node-fetch';
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
-
-export class SmartScheduler {
-  static loadCategories() {
-    const data = JSON.parse(fs.readFileSync('./config/categories.json', 'utf8'));
-    return data.categories;
+export class OmkarFetcher {
+  constructor(apiKey, monitor) {
+    this.apiKey = apiKey;
+    this.monitor = monitor;
   }
   
-  // تسجيل كل الكلمات في قاعدة البيانات (مرة واحدة)
-  static async seedKeywords() {
-    const categories = this.loadCategories();
-    let inserted = 0;
+  async fetch(keyword, countryCode = 'US') {
+    const url = `https://aliexpress-scraper-api.omkar.cloud/aliexpress/v2/search?` +
+      `query=${encodeURIComponent(keyword)}&` +
+      `sort_by=most_orders&` +
+      `country_code=${countryCode}&` +
+      `page=1`;
     
-    for (const cat of categories) {
-      for (const [subName, keywords] of Object.entries(cat.subs)) {
-        for (const kw of keywords) {
-          try {
-            await db.execute({
-              sql: `INSERT OR IGNORE INTO keyword_rotation 
-                    (keyword, category, subcategory, priority)
-                    VALUES (?, ?, ?, ?)`,
-              args: [kw, cat.name, subName, cat.priority || 5]
-            });
-            inserted++;
-          } catch (e) { /* تجاهل التكرار */ }
-        }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const startTime = Date.now();
+    
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'API-Key': this.apiKey,
+          'Accept': 'application/json',
+        },
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      const duration = Date.now() - startTime;
+      
+      if (!response.ok) {
+        const errText = await response.text();
+        this.monitor.recordFailure(`HTTP ${response.status}: ${errText.substring(0, 80)}`);
+        throw new Error(`Omkar ${response.status}`);
       }
+      
+      const data = await response.json();
+      this.monitor.recordSuccess(duration);
+      return data.results || [];
+      
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        this.monitor.recordFailure('Timeout');
+        throw new Error('Timeout');
+      }
+      throw error;
     }
-    
-    console.log(`✅ تم تسجيل ${inserted} كلمة في جدول الدوران`);
-  }
-  
-  // اختيار الكلمات الذكية التالية
-  static async pickNextKeywords(count) {
-    // الأولوية:
-    // 1. الكلمات التي لم تُعالج بعد (last_run_at = 0)
-    // 2. الكلمات ذات الأولوية الأعلى (priority 1)
-    // 3. الكلمات الأقل استخداماً (run_count أقل)
-    // 4. الكلمات الأقدم (last_run_at أقدم)
-    
-    const result = await db.execute({
-      sql: `SELECT keyword, category, subcategory, priority
-            FROM keyword_rotation
-            WHERE enabled = 1
-            ORDER BY 
-              CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-              priority ASC,
-              run_count ASC,
-              last_run_at ASC
-            LIMIT ?`,
-      args: [count]
-    });
-    
-    return result.rows;
-  }
-  
-  // تحديث حالة الكلمة بعد المعالجة
-  static async markProcessed(keyword, success) {
-    await db.execute({
-      sql: `UPDATE keyword_rotation
-            SET last_run_at = ?,
-                run_count = run_count + 1,
-                success_count = success_count + ?,
-                fail_count = fail_count + ?
-            WHERE keyword = ?`,
-      args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword]
-    });
-  }
-  
-  // إحصائيات الدوران
-  static async getStats() {
-    const total = await db.execute('SELECT COUNT(*) as c FROM keyword_rotation');
-    const pending = await db.execute(
-      'SELECT COUNT(*) as c FROM keyword_rotation WHERE last_run_at = 0'
-    );
-    const recent = await db.execute(
-      `SELECT COUNT(*) as c FROM keyword_rotation 
-       WHERE last_run_at > ?`,
-      [Date.now() - 24 * 60 * 60 * 1000]
-    );
-    const failing = await db.execute(
-      `SELECT COUNT(*) as c FROM keyword_rotation 
-       WHERE fail_count > success_count AND run_count > 2`
-    );
-    
-    return {
-      total: total.rows[0].c,
-      pending: pending.rows[0].c,
-      processed_24h: recent.rows[0].c,
-      failing: failing.rows[0].c,
-    };
-  }
-  
-  // تعطيل الكلمات الفاشلة تلقائياً
-  static async disableFailingKeywords() {
-    const result = await db.execute(`
-      UPDATE keyword_rotation
-      SET enabled = 0
-      WHERE fail_count >= 5 
-        AND success_count = 0 
-        AND run_count >= 5
-    `);
-    return result.rowsAffected;
   }
 }
