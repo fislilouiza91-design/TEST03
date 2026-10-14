@@ -1,183 +1,36 @@
-import { createClient } from '@libsql/client';
-import fetch from 'node-fetch';
-
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
-
-const MARKETS = [
-  { lang: 'en', code: 'US' },
-  { lang: 'ar', code: 'SA' },
-  { lang: 'zh', code: 'CN' },
-];
-
-const KEYWORDS = [
-  'bluetooth earphones',
-  'smart watch',
-  'wireless charger',
-  'phone case',
-  'laptop stand',
-  'usb c cable',
-  'power bank',
-  'gaming mouse',
-  'mechanical keyboard',
-  'webcam',
-];
-
-const API_KEY = process.env.OMKAR_API_KEY;
-const DELAY_BETWEEN_KEYWORDS = 4000; // زيادة التأخير لتقليل الضغط
-
-async function fetchFromOmkar(keyword, countryCode) {
-  const url = `https://aliexpress-scraper-api.omkar.cloud/aliexpress/v2/search?` +
-    `query=${encodeURIComponent(keyword)}&` +
-    `sort_by=most_orders&` +
-    `country_code=${countryCode}&` +
-    `page=1`;
-  
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'API-Key': API_KEY,
-      'Accept': 'application/json',
+{
+  "version": "1.0",
+  "total_keywords": 0,
+  "categories": [
+    {
+      "name": "Electronics",
+      "key": "consumer_electronics",
+      "priority": 1,
+      "subs": {
+        "Audio & Headphones": ["bluetooth earphones","wireless earbuds","noise cancelling headphones","bluetooth speaker","gaming headset","in-ear monitors","bone conduction headphones","headphone amplifier","soundbar","portable speaker","true wireless earbuds","sports earphones","kids headphones","studio headphones","earphone case"],
+        "Smart Wearables": ["smart watch","fitness tracker","smart ring","smart glasses","kids smartwatch","watch band","watch charger","smart bracelet","sports watch","health monitor watch","smart watch case","watch screen protector"],
+        "Phone Accessories": ["phone case","screen protector","phone holder","car phone mount","charging dock","usb c cable","lightning cable","wireless charger","power bank","phone ring","phone lens","selfie stick","phone tripod","sim card adapter","otg adapter","phone cooler","magnetic charger","phone wallet case","waterproof phone pouch","phone grip"],
+        "Computer & Office": ["laptop stand","mechanical keyboard","gaming mouse","webcam","usb hub","hdmi cable","laptop cooling pad","monitor stand","mouse pad","keyboard cover","laptop sleeve","usb flash drive","external hard drive","docking station","laptop charger","wireless keyboard","gaming chair","desk organizer","cable management","laptop battery"],
+        "Smart Home": ["smart plug","smart led bulb","smart doorbell","smart camera","smart thermostat","smart lock","smart switch","smart sensor","smart curtain","smart vacuum","smart air purifier","smart light strip","smart remote","smart hub","smart water leak detector"],
+        "Cameras & Drones": ["action camera","drone","gimbal stabilizer","ring light","camera lens","tripod","camera bag","sd card","camera battery","camera filter","drone battery","drone propeller","drone landing pad","camera strap","lens cleaning kit"],
+        "Television & Video": ["tv box","tv antenna","hdmi switch","projector","projector screen","tv mount","remote control","streaming stick","video capture card","tv soundbar"],
+        "Video Games": ["game controller","game console","gaming headset","gaming keyboard","gaming mouse","gamepad","joystick","gaming monitor","console stand","game card case","gaming chair","gaming desk"]
+      }
     },
-  });
-  
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Omkar API error ${response.status}: ${errText}`);
-  }
-  
-  const data = await response.json();
-  return data.results || [];
-}
-
-// دالة الجلب مع إعادة المحاولة التلقائية
-async function fetchWithRetry(keyword, countryCode, maxRetries = 3) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fetchFromOmkar(keyword, countryCode);
-    } catch (error) {
-      const isRetryable = 
-        error.message.includes('502') || 
-        error.message.includes('503') ||
-        error.message.includes('504') ||
-        error.message.includes('upstream_unavailable') ||
-        error.message.includes('timeout');
-      
-      if (!isRetryable || attempt === maxRetries) {
-        throw error;
-      }
-      
-      const waitSeconds = attempt * 15; // 15ث، 30ث، 45ث
-      console.log(`  ⏳ خطأ مؤقت (${attempt}/${maxRetries})، انتظار ${waitSeconds}ث...`);
-      await new Promise(r => setTimeout(r, waitSeconds * 1000));
-    }
-  }
-}
-
-async function saveToTurso(keyword, language, products) {
-  if (products.length === 0) return 0;
-  
-  const now = Date.now();
-  let saved = 0;
-  
-  for (const p of products) {
-    try {
-      const productId = p.id || p.product_id;
-      const title = p.title || '';
-      const price = parseFloat(p.pricing?.sale_price || p.sale_price || 0);
-      const originalPrice = parseFloat(p.pricing?.original_price || p.original_price || 0);
-      const orders = parseInt(p.orders_count || p.orders || 0);
-      const rating = parseFloat(p.rating || 0);
-      const image = p.image || '';
-      const sellerName = p.store?.name || p.seller?.name || '';
-      const sellerRating = parseFloat(p.store?.rating || p.seller?.rating || 0);
-      const isFreeShipping = (p.shipping?.free === true || p.shipping?.free_shipping === true) ? 1 : 0;
-      
-      await db.execute({
-        sql: `INSERT INTO products_current 
-              (product_id, keyword, language, title, current_price, original_price, 
-               orders_count, rating, image_url, seller_name, seller_rating,
-               is_free_shipping, first_seen_at, last_updated_at, update_count)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
-                title = excluded.title,
-                current_price = excluded.current_price,
-                original_price = excluded.original_price,
-                orders_count = excluded.orders_count,
-                rating = excluded.rating,
-                image_url = excluded.image_url,
-                seller_name = excluded.seller_name,
-                seller_rating = excluded.seller_rating,
-                is_free_shipping = excluded.is_free_shipping,
-                last_updated_at = excluded.last_updated_at,
-                update_count = update_count + 1`,
-        args: [productId, keyword, language, title, price, originalPrice,
-               orders, rating, image, sellerName, sellerRating,
-               isFreeShipping, now, now]
-      });
-      
-      await db.execute({
-        sql: `INSERT INTO price_history 
-              (product_id, keyword, price, orders_count, recorded_at, source)
-              VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [productId, `${keyword} (${language})`, price, orders, now, 'omkar']
-      });
-      
-      saved++;
-    } catch (error) {
-      console.error(`  ❌ فشل حفظ ${p.id}:`, error.message);
-    }
-  }
-  
-  return saved;
-}
-
-async function main() {
-  console.log('🚀 بدء الجلب متعدد اللغات...');
-  console.log(`📋 ${KEYWORDS.length} كلمة × ${MARKETS.length} سوق = ${KEYWORDS.length * MARKETS.length} طلب\n`);
-  
-  let totalSaved = 0;
-  let successCount = 0;
-  let failCount = 0;
-  const totalJobs = KEYWORDS.length * MARKETS.length;
-  
-  for (const keyword of KEYWORDS) {
-    for (const market of MARKETS) {
-      try {
-        console.log(`🔍 جلب: "${keyword}" بلغة [${market.lang}] (${market.code})`);
-        
-        const products = await fetchWithRetry(keyword, market.code);
-        console.log(`  📦 استُلم ${products.length} منتج`);
-        
-        const saved = await saveToTurso(keyword, market.lang, products);
-        console.log(`  ✅ خُزّن ${saved} منتج`);
-        
-        totalSaved += saved;
-        successCount++;
-        
-        await new Promise(r => setTimeout(r, DELAY_BETWEEN_KEYWORDS));
-        
-      } catch (error) {
-        console.error(`  ❌ فشل "${keyword}" [${market.lang}]:`, error.message);
-        failCount++;
+    {
+      "name": "Women Fashion",
+      "key": "women_fashion",
+      "priority": 2,
+      "subs": {
+        "Dresses": ["women dress","summer dress","evening dress","wedding dress","maxi dress","bodycon dress","cocktail dress","casual dress","party dress","beach dress","floral dress","lace dress","long sleeve dress","off shoulder dress","wrap dress"],
+        "Tops & Blouses": ["women t-shirt","women blouse","women sweater","women hoodie","women tank top","women cardigan","women crop top","women polo shirt","women tunic","women peplum top","women lace top","women silk blouse","women oversized shirt","women graphic tee","women v-neck top"],
+        "Bottoms": ["women jeans","women skirt","women leggings","women shorts","women pants","women palazzo","women joggers","women culottes","women pencil skirt","women pleated skirt","women wide leg pants","women cargo pants","women high waist jeans","women denim shorts","women linen pants"],
+        "Outerwear": ["women jacket","women coat","women blazer","women trench coat","women denim jacket","women leather jacket","women puffer jacket","women wool coat","women raincoat","women cape","women fur coat","women bomber jacket","women parka","women windbreaker","women vest"],
+        "Shoes": ["women shoes","women boots","women sandals","women sneakers","women heels","women flats","women wedges","women loafers","women oxfords","women mules","women espadrilles","women platform shoes","women ankle boots","women knee high boots","women slippers"],
+        "Bags & Accessories": ["women handbag","women wallet","women backpack","women sunglasses","women belt","women scarf","women hat","women gloves","women tote bag","women crossbody bag","women clutch","women shoulder bag","women cosmetic bag","women hair accessories","women keychain"],
+        "Jewelry & Watches": ["women watch","women necklace","women earrings","women bracelet","women ring","women jewelry set","women brooch","women anklet","women pendant","women choker","women hoop earrings","women stud earrings","women charm bracelet","women body chain","women jewelry box"],
+        "Underwear & Sleepwear": ["women bra","women underwear","women pajamas","women lingerie","women sleepwear","women robe","women shapewear","women sports bra","women panties","women camisole","women nightgown","women stockings","women garter","women bikini","women swimsuit"]
       }
     }
-  }
-  
-  console.log(`\n📊 ملخص:`);
-  console.log(`  ✅ نجح: ${successCount}/${totalJobs}`);
-  console.log(`  ❌ فشل: ${failCount}`);
-  console.log(`  📦 إجمالي المنتجات المخزنة: ${totalSaved}`);
-  
-  // لا تفشل إذا فشل أقل من 50%
-  if (failCount > successCount) {
-    process.exit(1);
-  }
+  ]
 }
-
-main().catch(error => {
-  console.error('💥 خطأ قاتل:', error);
-  process.exit(1);
-});
