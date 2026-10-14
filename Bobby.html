@@ -1,28 +1,109 @@
-{
-  "rotation": {
-    "keywords_per_run": 13,
-    "runs_per_day": 4,
-    "daily_keyword_limit": 52
-  },
-  "quota": {
-    "omkar_monthly_limit": 5000,
-    "omkar_daily_limit": 166,
-    "safety_margin_percent": 10
-  },
-  "markets": [
-    { "lang": "en", "code": "US" }
-  ],
-  "monitor": {
-    "request_timeout_ms": 20000,
-    "slow_threshold_ms": 15000,
-    "max_consecutive_fails": 3,
-    "max_consecutive_slows": 5,
-    "circuit_cooldown_minutes": 60
-  },
-  "mode": "AUTO",
-  "last_state_update": 0,
-  "pause_until": 0,
-  "consecutive_failures": 0,
-  "total_keywords_processed": 0,
-  "total_products_saved": 0
+// src/state.js
+import { createClient } from '@libsql/client';
+
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+export class SystemState {
+  static async ensureTables() {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS system_state (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at INTEGER
+      )
+    `);
+    
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS keyword_rotation (
+        keyword TEXT PRIMARY KEY,
+        category TEXT,
+        subcategory TEXT,
+        last_run_at INTEGER DEFAULT 0,
+        run_count INTEGER DEFAULT 0,
+        success_count INTEGER DEFAULT 0,
+        fail_count INTEGER DEFAULT 0,
+        priority INTEGER DEFAULT 5,
+        enabled INTEGER DEFAULT 1
+      )
+    `);
+    
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS system_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT,
+        message TEXT,
+        details TEXT,
+        created_at INTEGER
+      )
+    `);
+  }
+  
+  static async get(key) {
+    const result = await db.execute({
+      sql: 'SELECT value FROM system_state WHERE key = ?',
+      args: [key]
+    });
+    if (result.rows.length === 0) return null;
+    try {
+      return JSON.parse(result.rows[0].value);
+    } catch {
+      return result.rows[0].value;
+    }
+  }
+  
+  static async set(key, value) {
+    await db.execute({
+      sql: `INSERT INTO system_state (key, value, updated_at) 
+            VALUES (?, ?, ?)
+            ON CONFLICT (key) DO UPDATE SET 
+              value = excluded.value,
+              updated_at = excluded.updated_at`,
+      args: [key, JSON.stringify(value), Date.now()]
+    });
+  }
+  
+  static async getMode() {
+    const mode = await this.get('mode');
+    return mode || 'AUTO';
+  }
+  
+  static async setMode(newMode) {
+    await this.set('mode', newMode);
+    await this.log('MODE_CHANGE', `تم تغيير الوضع إلى ${newMode}`);
+  }
+  
+  static async isPaused() {
+    const mode = await this.getMode();
+    if (mode === 'PAUSED' || mode === 'MAINTENANCE') return true;
+    
+    const pauseUntil = await this.get('pause_until');
+    if (pauseUntil && Date.now() < pauseUntil) return true;
+    
+    return false;
+  }
+  
+  static async pauseFor(minutes, reason) {
+    const until = Date.now() + minutes * 60 * 1000;
+    await this.set('pause_until', until);
+    await this.log('AUTO_PAUSE', `توقف تلقائي لمدة ${minutes} دقيقة - ${reason}`);
+  }
+  
+  static async log(eventType, message, details = null) {
+    await db.execute({
+      sql: `INSERT INTO system_logs (event_type, message, details, created_at)
+            VALUES (?, ?, ?, ?)`,
+      args: [eventType, message, details ? JSON.stringify(details) : null, Date.now()]
+    });
+  }
+  
+  static async getRecentLogs(limit = 50) {
+    const result = await db.execute({
+      sql: 'SELECT * FROM system_logs ORDER BY created_at DESC LIMIT ?',
+      args: [limit]
+    });
+    return result.rows;
+  }
 }
