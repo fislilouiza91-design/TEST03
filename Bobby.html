@@ -1,36 +1,28 @@
 {
-  "version": "1.0",
-  "total_keywords": 0,
-  "categories": [
-    {
-      "name": "Electronics",
-      "key": "consumer_electronics",
-      "priority": 1,
-      "subs": {
-        "Audio & Headphones": ["bluetooth earphones","wireless earbuds","noise cancelling headphones","bluetooth speaker","gaming headset","in-ear monitors","bone conduction headphones","headphone amplifier","soundbar","portable speaker","true wireless earbuds","sports earphones","kids headphones","studio headphones","earphone case"],
-        "Smart Wearables": ["smart watch","fitness tracker","smart ring","smart glasses","kids smartwatch","watch band","watch charger","smart bracelet","sports watch","health monitor watch","smart watch case","watch screen protector"],
-        "Phone Accessories": ["phone case","screen protector","phone holder","car phone mount","charging dock","usb c cable","lightning cable","wireless charger","power bank","phone ring","phone lens","selfie stick","phone tripod","sim card adapter","otg adapter","phone cooler","magnetic charger","phone wallet case","waterproof phone pouch","phone grip"],
-        "Computer & Office": ["laptop stand","mechanical keyboard","gaming mouse","webcam","usb hub","hdmi cable","laptop cooling pad","monitor stand","mouse pad","keyboard cover","laptop sleeve","usb flash drive","external hard drive","docking station","laptop charger","wireless keyboard","gaming chair","desk organizer","cable management","laptop battery"],
-        "Smart Home": ["smart plug","smart led bulb","smart doorbell","smart camera","smart thermostat","smart lock","smart switch","smart sensor","smart curtain","smart vacuum","smart air purifier","smart light strip","smart remote","smart hub","smart water leak detector"],
-        "Cameras & Drones": ["action camera","drone","gimbal stabilizer","ring light","camera lens","tripod","camera bag","sd card","camera battery","camera filter","drone battery","drone propeller","drone landing pad","camera strap","lens cleaning kit"],
-        "Television & Video": ["tv box","tv antenna","hdmi switch","projector","projector screen","tv mount","remote control","streaming stick","video capture card","tv soundbar"],
-        "Video Games": ["game controller","game console","gaming headset","gaming keyboard","gaming mouse","gamepad","joystick","gaming monitor","console stand","game card case","gaming chair","gaming desk"]
-      }
-    },
-    {
-      "name": "Women Fashion",
-      "key": "women_fashion",
-      "priority": 2,
-      "subs": {
-        "Dresses": ["women dress","summer dress","evening dress","wedding dress","maxi dress","bodycon dress","cocktail dress","casual dress","party dress","beach dress","floral dress","lace dress","long sleeve dress","off shoulder dress","wrap dress"],
-        "Tops & Blouses": ["women t-shirt","women blouse","women sweater","women hoodie","women tank top","women cardigan","women crop top","women polo shirt","women tunic","women peplum top","women lace top","women silk blouse","women oversized shirt","women graphic tee","women v-neck top"],
-        "Bottoms": ["women jeans","women skirt","women leggings","women shorts","women pants","women palazzo","women joggers","women culottes","women pencil skirt","women pleated skirt","women wide leg pants","women cargo pants","women high waist jeans","women denim shorts","women linen pants"],
-        "Outerwear": ["women jacket","women coat","women blazer","women trench coat","women denim jacket","women leather jacket","women puffer jacket","women wool coat","women raincoat","women cape","women fur coat","women bomber jacket","women parka","women windbreaker","women vest"],
-        "Shoes": ["women shoes","women boots","women sandals","women sneakers","women heels","women flats","women wedges","women loafers","women oxfords","women mules","women espadrilles","women platform shoes","women ankle boots","women knee high boots","women slippers"],
-        "Bags & Accessories": ["women handbag","women wallet","women backpack","women sunglasses","women belt","women scarf","women hat","women gloves","women tote bag","women crossbody bag","women clutch","women shoulder bag","women cosmetic bag","women hair accessories","women keychain"],
-        "Jewelry & Watches": ["women watch","women necklace","women earrings","women bracelet","women ring","women jewelry set","women brooch","women anklet","women pendant","women choker","women hoop earrings","women stud earrings","women charm bracelet","women body chain","women jewelry box"],
-        "Underwear & Sleepwear": ["women bra","women underwear","women pajamas","women lingerie","women sleepwear","women robe","women shapewear","women sports bra","women panties","women camisole","women nightgown","women stockings","women garter","women bikini","women swimsuit"]
-      }
-    }
-  ]
+  "rotation": {
+    "keywords_per_run": 13,
+    "runs_per_day": 4,
+    "daily_keyword_limit": 52
+  },
+  "quota": {
+    "omkar_monthly_limit": 5000,
+    "omkar_daily_limit": 166,
+    "safety_margin_percent": 10
+  },
+  "markets": [
+    { "lang": "en", "code": "US" }
+  ],
+  "monitor": {
+    "request_timeout_ms": 20000,
+    "slow_threshold_ms": 15000,
+    "max_consecutive_fails": 3,
+    "max_consecutive_slows": 5,
+    "circuit_cooldown_minutes": 60
+  },
+  "mode": "AUTO",
+  "last_state_update": 0,
+  "pause_until": 0,
+  "consecutive_failures": 0,
+  "total_keywords_processed": 0,
+  "total_products_saved": 0
 }
