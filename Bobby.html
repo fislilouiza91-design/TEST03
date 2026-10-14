@@ -1,1 +1,4 @@
-SELECT COUNT(*) AS total FROM products_current;
+SELECT keyword, COUNT(*) AS count 
+FROM products_current 
+GROUP BY keyword 
+ORDER BY count DESC;
