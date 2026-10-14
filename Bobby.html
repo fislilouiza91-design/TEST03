@@ -1,63 +1,192 @@
-// src/monitor.js
-export class PerformanceMonitor {
-  constructor(options = {}) {
-    this.slowThresholdMs = options.slowThresholdMs || 15000;
-    this.maxConsecutiveFails = options.maxConsecutiveFails || 3;
-    this.maxConsecutiveSlows = options.maxConsecutiveSlows || 5;
-    
-    this.consecutiveFails = 0;
-    this.consecutiveSlows = 0;
-    this.totalRequests = 0;
-    this.totalFails = 0;
-    this.totalSlows = 0;
-    this.circuitOpen = false;
-    this.reason = '';
-  }
+// src/main.js
+import { SystemState } from './state.js';
+import { SmartScheduler } from './scheduler.js';
+import { OmkarFetcher } from './fetcher.js';
+import { PerformanceMonitor } from './monitor.js';
+import { createClient } from '@libsql/client';
+import fs from 'fs';
+
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+const settings = JSON.parse(fs.readFileSync('./config/settings.json', 'utf8'));
+
+async function saveToTurso(keyword, category, products) {
+  if (products.length === 0) return 0;
   
-  recordSuccess(durationMs) {
-    this.totalRequests++;
-    if (durationMs > this.slowThresholdMs) {
-      this.totalSlows++;
-      this.consecutiveSlows++;
-      this.consecutiveFails = 0;
-      console.log(`  ⚠️ بطيء: ${(durationMs/1000).toFixed(1)}ث`);
-      if (this.consecutiveSlows >= this.maxConsecutiveSlows) {
-        this.openCircuit(`بطء متتالي (${this.consecutiveSlows})`);
-      }
-    } else {
-      this.consecutiveSlows = 0;
-      this.consecutiveFails = 0;
-    }
-  }
+  const now = Date.now();
+  let saved = 0;
   
-  recordFailure(errorMessage) {
-    this.totalRequests++;
-    this.totalFails++;
-    this.consecutiveFails++;
-    this.consecutiveSlows = 0;
-    console.log(`  ❌ فشل (${this.consecutiveFails}/${this.maxConsecutiveFails})`);
-    if (this.consecutiveFails >= this.maxConsecutiveFails) {
-      this.openCircuit(`فشل متتالي (${this.consecutiveFails})`);
-    }
+  for (const p of products) {
+    try {
+      const productId = p.id || p.product_id;
+      if (!productId) continue;
+      
+      const price = parseFloat(p.pricing?.sale_price || p.sale_price || 0);
+      const orders = parseInt(p.orders_count || p.orders || 0);
+      const rating = parseFloat(p.rating || 0);
+      
+      await db.execute({
+        sql: `INSERT INTO products_current 
+              (product_id, keyword, language, title, current_price, original_price, 
+               orders_count, rating, image_url, seller_name, seller_rating,
+               is_free_shipping, first_seen_at, last_updated_at, update_count)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
+                current_price = excluded.current_price,
+                orders_count = excluded.orders_count,
+                rating = excluded.rating,
+                last_updated_at = excluded.last_updated_at,
+                update_count = update_count + 1`,
+        args: [
+          productId, keyword, 'en', p.title || '', price,
+          parseFloat(p.pricing?.original_price || 0),
+          orders, rating, p.image || '',
+          p.store?.name || '', parseFloat(p.store?.rating || 0),
+          (p.shipping?.free === true) ? 1 : 0, now, now
+        ]
+      });
+      
+      await db.execute({
+        sql: `INSERT INTO price_history 
+              (product_id, keyword, price, orders_count, recorded_at, source)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [productId, keyword, price, orders, now, 'omkar']
+      });
+      
+      saved++;
+    } catch (e) { /* تجاهل الأخطاء الفردية */ }
   }
-  
-  openCircuit(reason) {
-    this.circuitOpen = true;
-    this.reason = reason;
-    console.log(`\n🛑 تم فتح قاطع الدائرة: ${reason}\n`);
-  }
-  
-  canProceed() {
-    return !this.circuitOpen;
-  }
-  
-  getReport() {
-    return {
-      totalRequests: this.totalRequests,
-      totalFails: this.totalFails,
-      totalSlows: this.totalSlows,
-      circuitOpen: this.circuitOpen,
-      reason: this.reason,
-    };
-  }
+  return saved;
 }
+
+async function main() {
+  const startTime = Date.now();
+  console.log('🚀 بدء تشغيل نظام الجلب التلقائي...\n');
+  
+  // 1. تهيئة الجداول
+  await SystemState.ensureTables();
+  await SmartScheduler.seedKeywords();
+  
+  // 2. فحص الوضع
+  const mode = await SystemState.getMode();
+  console.log(`📋 الوضع الحالي: ${mode}`);
+  
+  if (await SystemState.isPaused()) {
+    console.log('⏸️ النظام متوقف حالياً. الخروج.');
+    return;
+  }
+  
+  // 3. فحص حصة اليوم
+  const todayRequests = await SystemState.get('today_requests') || 0;
+  const todayDate = await SystemState.get('today_date');
+  const currentDate = new Date().toISOString().split('T')[0];
+  
+  if (todayDate !== currentDate) {
+    await SystemState.set('today_date', currentDate);
+    await SystemState.set('today_requests', 0);
+  } else if (todayRequests >= settings.quota.omkar_daily_limit) {
+    console.log(`⚠️ تم استهلاك الحصة اليومية (${todayRequests}). الخروج.`);
+    await SystemState.log('QUOTA_EXCEEDED', `الحصة اليومية ${todayRequests}/${settings.quota.omkar_daily_limit}`);
+    return;
+  }
+  
+  // 4. اختيار الكلمات
+  const keywordsPerRun = Math.min(
+    settings.rotation.keywords_per_run,
+    settings.quota.omkar_daily_limit - todayRequests
+  );
+  
+  const keywords = await SmartScheduler.pickNextKeywords(keywordsPerRun);
+  console.log(`📋 سيتم معالجة ${keywords.length} كلمة\n`);
+  
+  // 5. بدء الجلب
+  const monitor = new PerformanceMonitor(settings.monitor);
+  const fetcher = new OmkarFetcher(process.env.OMKAR_API_KEY, monitor);
+  
+  let totalSaved = 0;
+  let successCount = 0;
+  let failCount = 0;
+  let requestsToday = todayRequests;
+  
+  for (const row of keywords) {
+    if (!monitor.canProceed()) {
+      console.log('\n🛑 قاطع الدائرة مفتوح. التوقف.');
+      break;
+    }
+    
+    const { keyword, category, subcategory } = row;
+    console.log(`🔍 [${category}/${subcategory}] ${keyword}`);
+    
+    try {
+      const products = await fetcher.fetch(keyword, 'US');
+      const saved = await saveToTurso(keyword, category, products);
+      totalSaved += saved;
+      successCount++;
+      requestsToday++;
+      console.log(`  ✅ ${saved} منتج`);
+      
+      await SmartScheduler.markProcessed(keyword, true);
+      await new Promise(r => setTimeout(r, 2000));
+      
+    } catch (error) {
+      failCount++;
+      console.log(`  ❌ ${error.message}`);
+      await SmartScheduler.markProcessed(keyword, false);
+    }
+  }
+  
+  // 6. حفظ الحالة
+  await SystemState.set('today_requests', requestsToday);
+  
+  const report = monitor.getReport();
+  const duration = ((Date.now() - startTime) / 60000).toFixed(1);
+  
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`📊 تقرير الدورة (${duration} دقيقة):`);
+  console.log(`${'='.repeat(50)}`);
+  console.log(`  ✅ نجح: ${successCount}/${keywords.length}`);
+  console.log(`  ❌ فشل: ${failCount}`);
+  console.log(`  📦 مخزّن: ${totalSaved}`);
+  console.log(`  📞 طلبات اليوم: ${requestsToday}/${settings.quota.omkar_daily_limit}`);
+  
+  // 7. الإجراءات التلقائية
+  if (report.circuitOpen) {
+    console.log(`\n⚠️ فتح قاطع الدائرة: ${report.reason}`);
+    await SystemState.pauseFor(
+      settings.monitor.circuit_cooldown_minutes,
+      report.reason
+    );
+    await SystemState.log('CIRCUIT_OPEN', report.reason, report);
+    process.exit(2);
+  }
+  
+  // 8. تعطيل الكلمات الفاشلة تلقائياً
+  const disabled = await SmartScheduler.disableFailingKeywords();
+  if (disabled > 0) {
+    console.log(`🗑️ تم تعطيل ${disabled} كلمة فاشلة`);
+    await SystemState.log('KEYWORDS_DISABLED', `تعطيل ${disabled} كلمة`);
+  }
+  
+  // 9. إحصائيات
+  const stats = await SmartScheduler.getStats();
+  console.log(`\n📈 إحصائيات الدوران:`);
+  console.log(`  إجمالي الكلمات: ${stats.total}`);
+  console.log(`  لم تُعالج: ${stats.pending}`);
+  console.log(`  عُولجت في 24س: ${stats.processed_24h}`);
+  console.log(`  كلمات فاشلة: ${stats.failing}`);
+  
+  await SystemState.log('RUN_COMPLETE', 'اكتملت الدورة', {
+    success: successCount,
+    fail: failCount,
+    saved: totalSaved,
+  });
+}
+
+main().catch(async (error) => {
+  console.error('💥 خطأ قاتل:', error);
+  await SystemState.log('FATAL_ERROR', error.message);
+  process.exit(1);
+});
