@@ -1,266 +1,99 @@
-{
-  "version": "1.0",
-  "total_keywords": 0,
-  "categories": [
-    {
-      "name": "Electronics",
-      "key": "consumer_electronics",
-      "priority": 1,
-      "subs": {
-        "Audio & Headphones": ["bluetooth earphones","wireless earbuds","noise cancelling headphones","bluetooth speaker","gaming headset","in-ear monitors","bone conduction headphones","headphone amplifier","soundbar","portable speaker","true wireless earbuds","sports earphones","kids headphones","studio headphones","earphone case"],
-        "Smart Wearables": ["smart watch","fitness tracker","smart ring","smart glasses","kids smartwatch","watch band","watch charger","smart bracelet","sports watch","health monitor watch","smart watch case","watch screen protector"],
-        "Phone Accessories": ["phone case","screen protector","phone holder","car phone mount","charging dock","usb c cable","lightning cable","wireless charger","power bank","phone ring","phone lens","selfie stick","phone tripod","sim card adapter","otg adapter","phone cooler","magnetic charger","phone wallet case","waterproof phone pouch","phone grip"],
-        "Computer & Office": ["laptop stand","mechanical keyboard","gaming mouse","webcam","usb hub","hdmi cable","laptop cooling pad","monitor stand","mouse pad","keyboard cover","laptop sleeve","usb flash drive","external hard drive","docking station","laptop charger","wireless keyboard","gaming chair","desk organizer","cable management","laptop battery"],
-        "Smart Home": ["smart plug","smart led bulb","smart doorbell","smart camera","smart thermostat","smart lock","smart switch","smart sensor","smart curtain","smart vacuum","smart air purifier","smart light strip","smart remote","smart hub","smart water leak detector"],
-        "Cameras & Drones": ["action camera","drone","gimbal stabilizer","ring light","camera lens","tripod","camera bag","sd card","camera battery","camera filter","drone battery","drone propeller","drone landing pad","camera strap","lens cleaning kit"],
-        "Television & Video": ["tv box","tv antenna","hdmi switch","projector","projector screen","tv mount","remote control","streaming stick","video capture card","tv soundbar"],
-        "Video Games": ["game controller","game console","gaming headset","gaming keyboard","gaming mouse","gamepad","joystick","gaming monitor","console stand","game card case","gaming chair","gaming desk"]
+// src/deduplicate.js
+import fs from 'fs';
+
+const data = JSON.parse(fs.readFileSync('./config/categories.json', 'utf8'));
+
+// أولويات الفئات (الأدق أولاً)
+// الكلمة تبقى في الفئة الأكثر تحديداً
+const categoryPriority = {
+  'watches_jewelry': 1,        // الأكثر تحديداً
+  'men_fashion': 2,
+  'women_fashion': 2,
+  'phones': 3,
+  'computer_office': 3,
+  'consumer_electronics': 4,
+  'sports_outdoors': 5,
+  'beauty_health': 5,
+  'home_kitchen': 6,
+  'kitchen_tools': 6,
+  // ... إلخ
+};
+
+const seen = new Map();  // keyword -> { category, subcategory, priority }
+const cleanedCategories = [];
+
+// المرور الأول: تحديد أفضل فئة لكل كلمة
+for (const cat of data.categories) {
+  const catPriority = categoryPriority[cat.key] || 5;
+  
+  for (const [subName, keywords] of Object.entries(cat.subs)) {
+    for (const kw of keywords) {
+      const key = kw.toLowerCase().trim();
+      const existing = seen.get(key);
+      
+      // احتفظ بالكلمة في الفئة الأكثر تحديداً (أولوية أعلى = رقم أقل)
+      if (!existing || catPriority < existing.priority) {
+        seen.set(key, {
+          keyword: kw,
+          category: cat.name,
+          categoryKey: cat.key,
+          subcategory: subName,
+          priority: catPriority,
+        });
       }
-    },
-    {
-      "name": "Women Fashion",
-      "key": "women_fashion",
-      "priority": 2,
-      "subs": {
-        "Dresses": ["women dress","summer dress","evening dress","wedding dress","maxi dress","bodycon dress","cocktail dress","casual dress","party dress","beach dress","floral dress","lace dress","long sleeve dress","off shoulder dress","wrap dress"],
-        "Tops & Blouses": ["women t-shirt","women blouse","women sweater","women hoodie","women tank top","women cardigan","women crop top","women polo shirt","women tunic","women peplum top","women lace top","women silk blouse","women oversized shirt","women graphic tee","women v-neck top"],
-        "Bottoms": ["women jeans","women skirt","women leggings","women shorts","women pants","women palazzo","women joggers","women culottes","women pencil skirt","women pleated skirt","women wide leg pants","women cargo pants","women high waist jeans","women denim shorts","women linen pants"],
-        "Outerwear": ["women jacket","women coat","women blazer","women trench coat","women denim jacket","women leather jacket","women puffer jacket","women wool coat","women raincoat","women cape","women fur coat","women bomber jacket","women parka","women windbreaker","women vest"],
-        "Shoes": ["women shoes","women boots","women sandals","women sneakers","women heels","women flats","women wedges","women loafers","women oxfords","women mules","women espadrilles","women platform shoes","women ankle boots","women knee high boots","women slippers"],
-        "Bags & Accessories": ["women handbag","women wallet","women backpack","women sunglasses","women belt","women scarf","women hat","women gloves","women tote bag","women crossbody bag","women clutch","women shoulder bag","women cosmetic bag","women hair accessories","women keychain"],
-        "Jewelry & Watches": ["women watch","women necklace","women earrings","women bracelet","women ring","women jewelry set","women brooch","women anklet","women pendant","women choker","women hoop earrings","women stud earrings","women charm bracelet","women body chain","women jewelry box"],
-        "Underwear & Sleepwear": ["women bra","women underwear","women pajamas","women lingerie","women sleepwear","women robe","women shapewear","women sports bra","women panties","women camisole","women nightgown","women stockings","women garter","women bikini","women swimsuit"]
-      }
-    },
-    {
-      "name": "أزياء رجالية",
-      "icon": "👔",
-      "key": "men_fashion",
-      "subs": {
-        "Shirts & Tops": ["men t-shirt","men shirt","men polo shirt","men hoodie","men sweater","men tank top","men dress shirt","men henley shirt","men flannel shirt","men linen shirt","men graphic tee","men long sleeve shirt","men short sleeve shirt","men compression shirt","men rugby shirt"],
-        "Bottoms": ["men jeans","men pants","men shorts","men cargo pants","men chinos","men sweatpants","men joggers","men dress pants","men linen pants","men denim shorts","men board shorts","men track pants","men work pants","men corduroy pants","men ripped jeans"],
-        "Outerwear": ["men jacket","men coat","men suit","men blazer","men leather jacket","men denim jacket","men puffer jacket","men bomber jacket","men trench coat","men windbreaker","men parka","men vest","men raincoat","men wool coat","men track jacket"],
-        "Shoes": ["men shoes","men sneakers","men boots","men sandals","men dress shoes","men loafers","men oxfords","men running shoes","men basketball shoes","men hiking boots","men slippers","men boat shoes","men combat boots","men cycling shoes","men skate shoes"],
-        "Accessories": ["men wallet","men belt","men sunglasses","men hat","men cap","men tie","men gloves","men scarf","men backpack","men briefcase","men tie clip","men cufflinks","men suspenders","men beanie","men bandana"],
-        "Jewelry & Watches": ["men watch","men ring","men bracelet","men necklace","men cufflinks","men chain","men earring","men pendant","men watch band","men jewelry box","men signet ring","men dog tag","men leather bracelet","men watch case","men tie pin"]
-      }
-    },
-    {
-      "name": "المنزل والمطبخ",
-      "icon": "🏠",
-      "key": "home_kitchen",
-      "subs": {
-        "Kitchen & Dining": ["kitchen knife","coffee mug","cutting board","spice rack","water bottle","lunch box","kitchen scale","rice cooker","blender","electric kettle","toaster","coffee maker","food processor","mixer grinder","juicer","egg beater","can opener","bottle opener","measuring cup","kitchen timer"],
-        "Home Appliances": ["vacuum cleaner","air fryer","coffee maker","toaster","microwave","air purifier","humidifier","electric fan","dehumidifier","garment steamer","sewing machine","water dispenser","ice maker","food dehydrator","vacuum sealer"],
-        "Home Decor": ["led strip lights","wall clock","photo frame","wall sticker","flower vase","candle holder","mirror","tapestry","wall art","sculpture","figurine","dream catcher","wind chime","wall shelf","room divider"],
-        "Storage & Organization": ["storage box","food container","closet organizer","shoe rack","laundry basket","drawer divider","under bed storage","over door organizer","spice organizer","jewelry organizer","cosmetic organizer","desk organizer","bathroom organizer","kitchen organizer","garage organizer"],
-        "Bedding & Bath": ["bed sheet","blanket","pillow case","curtain","rug","bathroom shelf","duvet cover","comforter","mattress protector","bed skirt","throw pillow","bath mat","shower curtain","towel set","toilet seat cover"],
-        "Garden & Outdoor": ["garden tool","plant pot","watering can","outdoor light","garden hose","bird feeder","garden gnome","trellis","compost bin","rain gauge","sprinkler","garden stake","plant stand","greenhouse","garden kneeler"]
-      }
-    },
-    {
-      "name": "الجمال والصحة",
-      "icon": "💄",
-      "key": "beauty_health",
-      "subs": {
-        "Makeup": ["makeup brush","foundation","mascara","eyeshadow","blush","concealer","lip gloss","lipstick","eyelash","makeup sponge","eyeliner","lip liner","highlighter","contour palette","setting spray","primer","brow pencil","false nails","makeup bag","makeup mirror"],
-        "Skincare": ["face mask","face cream","serum","sunscreen","toner","facial cleanser","eye cream","exfoliator","moisturizer","essence","face oil","sleeping mask","lip balm","neck cream","hand cream","foot cream","body lotion","body scrub","acne patch","blackhead remover"],
-        "Hair Care": ["hair curler","hair straightener","hair dryer","hair oil","shampoo","conditioner","hair mask","hair brush","hair comb","hair clips","hair bands","hair extensions","wig","hair color","hair spray","hair gel","hair wax","hair serum","scalp massager","hair steamer"],
-        "Nail & Beauty Tools": ["nail polish","nail clipper","jade roller","tweezers","makeup mirror","nail art kit","nail file","cuticle pusher","nail drill","nail buffer","eyelash curler","scissors","blackhead tool","face roller","gua sha"],
-        "Fragrance": ["perfume","body spray","essential oil","air freshener","car freshener","reed diffuser","incense","candle","wax melt","perfume oil","solid perfume","cologne","aftershave","body mist","room spray"],
-        "Health & Wellness": ["massage gun","teeth whitening","foot massager","blood pressure monitor","thermometer","yoga mat","neck massager","back massager","eye massager","heating pad","posture corrector","knee brace","ankle support","wrist splint","first aid kit"]
-      }
-    },
-    {
-      "name": "الرياضة والهواء الطلق",
-      "icon": "⚽",
-      "key": "sports_outdoors",
-      "subs": {
-        "Fitness Equipment": ["yoga mat","dumbbell","resistance band","jump rope","foam roller","ab roller","pull up bar","protein shaker","kettlebell","barbell","weight plate","gym gloves","lifting belt","gym bag","water bottle sport","exercise ball","balance board","skipping rope","hand gripper","push up board"],
-        "Sportswear": ["yoga pants","sports bra","compression socks","running shoes","gym bag","sports watch","running shorts","sports jacket","sports leggings","sports t-shirt","track suit","cycling jersey","swimwear","tennis skirt","boxing shorts"],
-        "Outdoor & Camping": ["camping tent","sleeping bag","hiking backpack","flashlight","fishing rod","camping stove","water bottle sport","multi-tool","camping lantern","camping chair","camping table","sleeping pad","camping cookware","fire starter","survival kit"],
-        "Cycling": ["bicycle light","cycling gloves","bike helmet","bike lock","bike pump","bike computer","bike saddle","bike pedals","bike chain","bike tires","cycling jersey","cycling shorts","bike bell","bike rack","bike mirror"],
-        "Water Sports": ["swimming goggles","swim cap","snorkel mask","water shoes","swim fins","diving suit","life jacket","paddle board","kayak","waterproof dry bag","swim buoy","nose clip","ear plugs","beach towel","waterproof phone case"],
-        "Team Sports": ["basketball","football","tennis racket","boxing gloves","badminton racket","volleyball","soccer ball","baseball glove","cricket bat","hockey stick","table tennis paddle","golf club","rugby ball","handball","pickleball paddle"]
-      }
-    },
-    {
-      "name": "الأطفال والألعاب",
-      "icon": "🧸",
-      "key": "toys_kids",
-      "subs": {
-        "Toys & Games": ["lego blocks","building blocks","puzzle game","board game","action figure","doll house","stuffed animal","playdough","water gun","balloon","remote control car","dinosaur toy","robot toy","magic cube","card game","chess set","magnetic tiles","kinetic sand","slime kit","toy car"],
-        "Kids Clothing": ["baby clothes","kids t-shirt","kids dress","kids pants","kids shoes","kids jacket","kids pajamas","kids socks","kids hoodie","kids swimwear","kids costume","kids underwear","kids raincoat","kids gloves","kids scarf"],
-        "Baby Essentials": ["baby bottle","baby stroller","baby carrier","baby monitor","diaper bag","baby blanket","baby pillow","baby bath tub","baby food maker","baby nail clipper","baby thermometer","baby bottle warmer","baby sterilizer","baby play mat","baby gate"],
-        "Kids Accessories": ["kids backpack","kids watch","kids sunglasses","kids hat","kids mask","kids helmet","kids umbrella","kids wallet","kids belt","kids hair accessories","kids jewelry","kids gloves","kids scarf","kids sunglasses","kids cap"],
-        "Kids Furniture": ["kids tent","kids chair","kids desk","kids bed rail","kids bookshelf","kids toy box","kids table","kids stool","kids bunk bed","kids mattress","kids rug","kids lamp","kids wardrobe","kids playpen","kids swing"],
-        "Ride-Ons": ["kids bicycle","remote control car","scooter","balance bike","ride on car","tricycle","electric scooter","hoverboard","skateboard","roller skates","kids motorcycle","kids tractor","kids wagon","kids rocking horse","kids push car"]
-      }
-    },
-    {
-      "name": "السيارات والدراجات النارية",
-      "icon": "🚗",
-      "key": "automotive",
-      "subs": {
-        "Car Electronics": ["car phone holder","car charger","car dash cam","car bluetooth","car stereo","car gps","car jump starter","car diagnostic tool","car amplifier","car subwoofer","car speaker","car antenna","car radar detector","car hud display","car backup camera"],
-        "Car Interior": ["car seat cover","car mat","steering wheel cover","car air freshener","car sun shade","car mirror","car key case","car organizer","car seat cushion","car floor mats","car dashboard cover","car gear shift knob","car seat belt cover","car trash can","car headrest pillow"],
-        "Car Exterior": ["car cover","car led light","car headlight","car sticker","car wax","car polish","car emblem","car spoiler","car roof rack","car mud flaps","car window film","car body kit","car grille","car bumper","car fender"],
-        "Car Tools & Maintenance": ["car vacuum","car tool kit","tire pressure gauge","car jack","car tire inflator","car battery charger","microfiber cloth","car shampoo","car snow brush","car ice scraper","car funnel","car oil filter","car air filter","car spark plug","car fuse"],
-        "Motorcycle": ["motorcycle helmet","motorcycle gloves","motorcycle cover","motorcycle lock","motorcycle jacket","motorcycle boots","motorcycle pants","motorcycle mirror","motorcycle saddlebag","motorcycle phone mount","motorcycle LED light","motorcycle exhaust","motorcycle chain","motorcycle brake pads","motorcycle handlebar"]
-      }
-    },
-    {
-      "name": "الهواتف والاتصالات",
-      "icon": "📱",
-      "key": "phones",
-      "subs": {
-        "Mobile Phones": ["smartphone","android phone","gaming phone","rugged phone","senior phone","kids phone","5g phone","budget phone","flagship phone","refurbished phone"],
-        "Phone Parts": ["phone screen","phone battery","phone camera","phone charging port","phone speaker","phone microphone","phone back cover","phone flex cable","phone logic board","phone sim tray"],
-        "Phone Accessories": ["phone case","phone screen protector","phone holder","phone charger","phone cable","phone power bank","phone lens","phone tripod","phone selfie stick","phone ring holder","phone wallet","phone grip","phone stand","phone mount","phone cleaning kit"],
-        "Walkie Talkies": ["walkie talkie","two way radio","radio antenna","radio battery","radio charger","radio earpiece","radio case","radio belt clip","radio programming cable","radio speaker mic"],
-        "Communication": ["sim card","sim card adapter","phone signal booster","phone antenna","voip phone","landline phone","fax machine","intercom","pbx system","phone headset"]
-      }
-    },
-    {
-      "name": "الكمبيوتر والمكتب",
-      "icon": "🖥️",
-      "key": "computer_office",
-      "subs": {
-        "Laptops": ["laptop","gaming laptop","ultrabook","chromebook","2 in 1 laptop","business laptop","student laptop","refurbished laptop","laptop battery","laptop charger","laptop ram","laptop ssd","laptop screen","laptop keyboard","laptop cooler"],
-        "Computer Components": ["cpu processor","graphics card","motherboard","ram memory","ssd drive","hard drive","power supply","computer case","cpu cooler","case fan","thermal paste","sound card","network card","capture card","raid controller"],
-        "Computer Peripherals": ["keyboard","mouse","monitor","webcam","printer","scanner","speaker","headset","microphone","mouse pad","usb hub","docking station","kvm switch","card reader","external drive"],
-        "Office Supplies": ["notebook","pen","pencil","marker","highlighter","stapler","paper clip","binder clip","folder","envelope","calculator","desk organizer","whiteboard","corkboard","label maker"],
-        "Networking": ["router","wifi extender","network switch","ethernet cable","modem","access point","network card","patch panel","rack mount","poe injector","firewall","nas drive","mesh wifi","network tester","cable tester"]
-      }
-    },
-    {
-      "name": "الأدوات والتحسين المنزلي",
-      "icon": "🔧",
-      "key": "tools_home_improvement",
-      "subs": {
-        "Hand Tools": ["screwdriver set","wrench set","pliers","hammer","utility knife","socket set","hex key","tape measure","level tool","wire stripper","chisel","file","hacksaw","clamp","vise"],
-        "Power Tools": ["drill bit","electric drill","angle grinder","sander","jigsaw","rotary tool","circular saw","reciprocating saw","heat gun","impact driver","router","planer","nail gun","stapler","polisher"],
-        "Electrical Tools": ["multimeter","soldering iron","hot glue gun","wire cutter","voltage tester","cable ties","wire nuts","electrical tape","conduit","junction box","outlet","switch","circuit breaker","gfci outlet","dimmer switch"],
-        "Safety Equipment": ["safety glasses","work gloves","dust mask","ear protection","knee pads","led work light","hard hat","safety vest","safety harness","fire extinguisher","first aid kit","safety shoes","face shield","respirator","fall protection"],
-        "Hardware & Fasteners": ["duct tape","super glue","sandpaper","extension cord","measuring tape","laser level","screws","nails","bolts","nuts","washers","anchors","hinges","locks","chains"],
-        "Painting & Decorating": ["paint brush","paint roller","paint sprayer","masking tape","paint tray","drop cloth","paint edger","wallpaper","wallpaper steamer","caulk gun","putty knife","sanding block","paint mixer","paint can opener","paint strainer"]
-      }
-    },
-    {
-      "name": "الحيوانات الأليفة",
-      "icon": "🐾",
-      "key": "pet_supplies",
-      "subs": {
-        "Dog Supplies": ["dog collar","dog leash","dog toy","dog bed","dog food bowl","dog clothes","dog harness","dog brush","dog training clicker","dog dental care","dog crate","dog gate","dog raincoat","dog boots","dog tag"],
-        "Cat Supplies": ["cat toy","cat litter","cat scratcher","cat bed","cat collar","cat food bowl","cat tree","cat carrier","cat harness","cat litter box","cat window perch","cat tunnel","cat brush","cat fountain","cat treats"],
-        "Pet Grooming": ["pet grooming","pet nail clipper","pet shampoo","pet hair remover","pet brush","pet dryer","pet comb","pet deodorizer","pet wipes","pet toothbrush","pet ear cleaner","pet paw balm","pet cologne","pet detangler","pet shedding tool"],
-        "Pet Feeding": ["pet water fountain","pet feeder","pet food container","pet bowl stand","pet treat pouch","pet food scoop","pet food mat","pet bottle","pet nursing kit","pet slow feeder","pet elevated bowl","pet travel bowl","pet food storage","pet treat dispenser","pet water bottle"],
-        "Other Pets": ["fish tank","bird cage","hamster wheel","pet stroller","pet camera","reptile terrarium","fish filter","aquarium light","bird feeder","hamster cage","guinea pig cage","rabbit hutch","turtle tank","fish food","aquarium decor"]
-      }
-    },
-    {
-      "name": "الرياضة والترفيه",
-      "icon": "🎮",
-      "key": "sports_entertainment",
-      "subs": {
-        "Musical Instruments": ["guitar","keyboard piano","drum set","violin","flute","saxophone","trumpet","ukulele","harmonica","microphone","guitar strings","guitar capo","guitar tuner","music stand","metronome"],
-        "Art & Craft": ["paint set","canvas","sketchbook","drawing pencil","acrylic paint","watercolor set","oil paint","paint brush set","easel","palette","craft scissors","glue stick","glitter","beads","yarn"],
-        "Party Supplies": ["balloon","party decoration","birthday banner","party hat","confetti","party favor","tableware set","cake topper","photo booth prop","pinata","streamer","centerpiece","invitation card","party game","noise maker"],
-        "Outdoor Recreation": ["picnic basket","camping chair","beach umbrella","fishing net","binoculars","compass","whistle","multi-tool","waterproof bag","hammock","picnic blanket","cooler box","camping lantern","folding table","camping cookware"]
-      }
-    },
-    {
-      "name": "المواد الغذائية والمشروبات",
-      "icon": "🍎",
-      "key": "food_beverages",
-      "subs": {
-        "Snacks": ["chocolate","candy","cookies","chips","nuts","dried fruit","popcorn","crackers","wafer","gummy candy","lollipop","marshmallow","granola bar","protein bar","rice cake"],
-        "Beverages": ["coffee beans","tea bags","green tea","herbal tea","instant coffee","hot chocolate","juice powder","soda","energy drink","coconut water","almond milk","soy milk","matcha powder","chai tea","fruit tea"],
-        "Cooking Ingredients": ["olive oil","soy sauce","vinegar","honey","maple syrup","spices","herbs","salt","pepper","sugar","flour","rice","pasta","noodles","canned food"]
-      }
-    },
-    {
-      "name": "الحقائب والأمتعة",
-      "icon": "👜",
-      "key": "luggage_bags",
-      "subs": {
-        "Backpacks": ["backpack","laptop backpack","school backpack","hiking backpack","travel backpack","mini backpack","anti theft backpack","usb backpack","diaper bag backpack","camera backpack"],
-        "Handbags": ["handbag","tote bag","shoulder bag","crossbody bag","clutch","satchel","hobo bag","bucket bag","baguette bag","evening bag"],
-        "Wallets": ["wallet","leather wallet","card holder","coin purse","money clip","travel wallet","rfid wallet","zip wallet","keychain wallet","phone wallet"],
-        "Suitcases": ["suitcase","carry on luggage","spinner luggage","hardside luggage","softside luggage","travel bag","duffel bag","garment bag","luggage set","kids luggage"],
-        "Business Bags": ["briefcase","laptop bag","messenger bag","portfolio case","document bag","conference bag","tablet bag","executive bag","leather briefcase","rolling briefcase"]
-      }
-    },
-    {
-      "name": "الساعات والمجوهرات",
-      "icon": "⌚",
-      "key": "watches_jewelry",
-      "subs": {
-        "Watches": ["men watch","women watch","smart watch","luxury watch","sports watch","dress watch","digital watch","analog watch","automatic watch","quartz watch","kids watch","pocket watch","watch band","watch case","watch tool"],
-        "Jewelry": ["necklace","bracelet","ring","earrings","pendant","brooch","anklet","jewelry set","charm","locket","cufflinks","tie clip","body jewelry","nose ring","belly ring"],
-        "Hair Accessories": ["hair clip","hair band","hair pin","headband","scrunchie","hair comb","hair stick","hair vine","tiara","hair extension clip"],
-        "Eyewear": ["sunglasses","reading glasses","blue light glasses","prescription glasses","eyeglass frames","contact lens case","eyeglass chain","eyeglass cleaner","goggles","safety glasses"]
-      }
-    },
-    {
-      "name": "الصحة والرعاية الشخصية",
-      "icon": "🩺",
-      "key": "health_personal_care",
-      "subs": {
-        "Medical Supplies": ["blood pressure monitor","thermometer","pulse oximeter","glucose meter","nebulizer","hearing aid","walking cane","wheelchair","crutches","first aid kit","bandage","syringe","test strips","medical mask","medical gloves"],
-        "Personal Care": ["toothbrush","toothpaste","dental floss","mouthwash","razor","shaving cream","deodorant","body wash","soap","shampoo","conditioner","body lotion","hand sanitizer","cotton pads","q-tips"],
-        "Massage & Relaxation": ["massage gun","massage chair","foot spa","neck massager","eye massager","back massager","heating pad","massage oil","massage ball","foam roller","acupressure mat","electric blanket","neck pillow","sleep mask","ear plugs"],
-        "Elderly Care": ["walking frame","shower chair","grab bar","bed rail","recliner chair","mobility scooter","hearing amplifier","magnifying glass","pill organizer","emergency alert","non slip mat","toilet riser","dressing aid","jar opener","reacher grabber"]
-      }
-    },
-    {
-      "name": "الأثاث",
-      "icon": "🛋️",
-      "key": "furniture",
-      "subs": {
-        "Living Room": ["sofa","coffee table","tv stand","bookshelf","recliner","ottoman","side table","console table","floor lamp","area rug","throw pillow","sofa cover","accent chair","media console","storage bench"],
-        "Bedroom": ["bed frame","mattress","nightstand","dresser","wardrobe","vanity table","bed bench","headboard","bed canopy","mattress topper","bed skirt","bed pillow","bedside lamp","jewelry armoire","blanket chest"],
-        "Office": ["office desk","office chair","filing cabinet","bookcase","standing desk","desk lamp","monitor stand","keyboard tray","footrest","desk pad","cable management","printer stand","office partition","conference table","reception desk"],
-        "Outdoor": ["patio chair","patio table","garden bench","porch swing","outdoor sofa","hammock","umbrella","fire pit","outdoor rug","garden stool","picnic table","lounger","outdoor storage","planter box","trellis"]
-      }
-    },
-    {
-      "name": "المواد الكيميائية",
-      "icon": "🧪",
-      "key": "chemicals",
-      "subs": {
-        "Cleaning Supplies": ["detergent","bleach","disinfectant","glass cleaner","floor cleaner","toilet cleaner","drain cleaner","oven cleaner","carpet cleaner","stain remover","mold remover","rust remover","degreaser","furniture polish","air freshener"],
-        "Adhesives & Sealants": ["super glue","epoxy","silicone sealant","caulk","wood glue","fabric glue","hot glue sticks","contact cement","thread lock","construction adhesive","tape","putty","grout","mortar","foam sealant"],
-        "Paints & Coatings": ["spray paint","acrylic paint","enamel paint","primer","varnish","polyurethane","wood stain","rust proof paint","chalk paint","metallic paint","fabric paint","glass paint","ceramic paint","leather paint","glow in the dark paint"]
-      }
-    },
-    {
-      "name": "الآلات الصناعية",
-      "icon": "🏭",
-      "key": "industrial_machinery",
-      "subs": {
-        "Manufacturing Equipment": ["3d printer","laser engraver","cnc machine","injection molding machine","vacuum former","heat press","sublimation printer","embroidery machine","sewing machine","knitting machine","welding machine","plasma cutter","lathe machine","milling machine","drill press"],
-        "Commercial Equipment": ["cash register","barcode scanner","receipt printer","label maker","pos system","money counter","coin sorter","time clock","paper shredder","laminator","binding machine","paper cutter","digital scale","price tag gun","shopping basket"]
-      }
-    },
-    {
-      "name": "القرطاسية والمكتب",
-      "icon": "📚",
-      "key": "stationery_office",
-      "subs": {
-        "Writing Instruments": ["pen","pencil","fountain pen","gel pen","ballpoint pen","mechanical pencil","marker","highlighter","eraser","correction tape","ink refill","pen case","pencil sharpener","drawing pen","calligraphy pen"],
-        "Paper Products": ["notebook","journal","planner","sticky notes","index cards","notepad","sketchbook","drawing paper","printer paper","photo paper","cardstock","envelopes","letterhead","invoice book","receipt paper"]
-      }
-    },
-    {
-      "name": "أدوات المطبخ",
-      "icon": "🍳",
-      "key": "kitchen_tools",
-      "subs": {
-        "Cookware": ["frying pan","saucepan","stock pot","wok","baking sheet","cake pan","muffin tin","casserole dish","dutch oven","grill pan","crepe pan","tamagoyaki pan","pressure cooker","slow cooker","steamer"],
-        "Kitchen Utensils": ["spatula","whisk","ladle","tongs","peeler","grater","masher","strainer","colander","measuring spoons","mixing bowl","rolling pin","pastry brush","kitchen shears","can opener"],
-        "Bakeware": ["cake mold","cookie cutter","piping bag","baking mat","dough scraper","pastry wheel","cooling rack","loaf pan","pie dish","tart pan","springform pan","bundt pan","cupcake liner","cake turntable","fondant tool"]
-      }
-    }  
-  ]
+    }
+  }
 }
+
+// المرور الثاني: إعادة بناء الفئات مع إزالة التكرارات
+for (const cat of data.categories) {
+  const newSubs = {};
+  let hasKeywords = false;
+  
+  for (const [subName, keywords] of Object.entries(cat.subs)) {
+    const uniqueKeywords = [];
+    
+    for (const kw of keywords) {
+      const key = kw.toLowerCase().trim();
+      const winner = seen.get(key);
+      
+      // احتفظ بالكلمة فقط إذا كانت هي الفائزة في هذه الفئة
+      if (winner.categoryKey === cat.key) {
+        uniqueKeywords.push(kw);
+      }
+    }
+    
+    if (uniqueKeywords.length > 0) {
+      newSubs[subName] = uniqueKeywords;
+      hasKeywords = true;
+    }
+  }
+  
+  if (hasKeywords) {
+    cleanedCategories.push({
+      ...cat,
+      subs: newSubs,
+    });
+  }
+}
+
+// حساب الإجمالي
+let total = 0;
+cleanedCategories.forEach(cat => {
+  Object.values(cat.subs).forEach(kws => {
+    total += kws.length;
+  });
+});
+
+const output = {
+  version: '1.0',
+  total_keywords: total,
+  categories: cleanedCategories,
+};
+
+fs.writeFileSync('./config/categories.json', JSON.stringify(output, null, 2));
+
+console.log(`✅ تم تنظيف الملف:`);
+console.log(`  الفئات: ${cleanedCategories.length}`);
+console.log(`  الكلمات المفتاحية: ${total}`);
+console.log(`  التكرارات المحذوفة: ${seen.size === total ? 0 : 'راجع الملف'}`);
