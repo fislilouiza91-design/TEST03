@@ -1,29 +1,36 @@
-name: Auto Fetch (Scheduled)
+name: Manual Control
 
 on:
-  schedule:
-    # كل 6 ساعات
-    - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      action:
+        description: 'الإجراء المطلوب'
+        required: true
+        type: choice
+        options:
+          - start
+          - pause
+          - resume
+          - maintenance
+          - status
+          - reset-failing
+          - view-logs
+          - run-once
 
 jobs:
-  fetch:
+  control:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     
     steps:
       - uses: actions/checkout@v4
-      
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: npm install
       
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Run smart fetcher
+      - name: Execute action
         env:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          OMKAR_API_KEY: ${{ secrets.OMKAR_API_KEY }}
-        run: node src/main.js
+          ACTION: ${{ github.event.inputs.action }}
+        run: node src/control.js
