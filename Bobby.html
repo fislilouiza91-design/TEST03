@@ -1,243 +1,28 @@
-// src/apify-fetcher.js
-import fetch from 'node-fetch';
-import crypto from 'crypto';
-import { createClient } from '@libsql/client';
+name: Auto Fetch (Scheduled)
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-const KEYWORDS_PER_RUN = 3;
-
-// استخراج hash من صورة
-function generateImageHash(url) {
-  if (!url) return null;
-  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
-  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
-  return null;
-}
-
-// استخراج tokens
-function extractTokens(title) {
-  if (!title) return '';
-  const stop = new Set(['for','the','and','with','from','new','hot','best','free','high','pro','sale','shipping','pcs','piece','set']);
-  return title.toLowerCase()
-    .replace(/[^\w\s-]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !stop.has(w) && !/^\d+$/.test(w))
-    .slice(0, 10)
-    .join(' ');
-}
-
-// تصنيف المنتج
-function detectCategory(title) {
-  if (!title) return 'general';
-  const t = ' ' + title.toLowerCase().replace(/[^\w\s]/g, ' ') + ' ';
-  
-  const cats = {
-    'electronics': ['earphone','headphone','speaker','charger','cable','usb','camera','drone','smart watch','phone case','screen protector','phone holder','power bank','earbuds','bluetooth','smartwatch','headset'],
-    'fashion-women': ['women dress','women skirt','women blouse','women heels','women handbag','women bag','women jacket'],
-    'fashion-men': ['men shirt','men jean','men sneaker','men wallet','men tie','men jacket'],
-    'home-kitchen': ['kitchen','mug','knife','cookware','storage box','lamp','home decor','pillow','blanket'],
-    'beauty': ['makeup','skincare','perfume','lipstick','nail polish','hair care','face cream'],
-    'sports': ['yoga','gym','fitness','running','cycling','sports','dumbbell'],
-    'toys-kids': ['kids toy',' baby ','lego','puzzle game','action figure','kids dress'],
-    'automotive': ['car part','motorcycle','auto part','tire','engine','car '],
-    'pets': ['dog collar','cat toy','pet ','fish tank','bird cage'],
-    'tools': ['drill','wrench','hammer','screwdriver','tool set'],
-    'watches': ['watch band','watch case','quartz watch','automatic watch','wristwatch'],
-    'jewelry': ['necklace','bracelet',' earring','ring ',' jewelry'],
-    'phones': ['smartphone','phone case','phone screen','phone battery'],
-    'computer': ['laptop','keyboard','mouse','monitor','pc '],
-  };
-  
-  for (const [cat, keywords] of Object.entries(cats)) {
-    for (const k of keywords) {
-      const pattern = new RegExp(`\\b${k.trim()}\\b`, 'i');
-      if (pattern.test(t)) return cat;
-    }
-  }
-  return 'general';
-}
-
-// استدعاء Apify Actor
-async function runApifyActor(keyword) {
-  console.log(`  🎭 Apify Actor...`);
-  
-  const actorId = 'pro100chok~aliexpress-scraper';
-  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-  
-  const response = await fetch(runUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      keyword: keyword,
-      maxResults: 100,
-      country: 'US',
-      currency: 'USD',
-    }),
-    timeout: 300000,
-  });
-  
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Apify ${response.status}: ${err.substring(0, 150)}`);
-  }
-  
-  return await response.json();
-}
-
-// حفظ في Turso
-async function saveToTurso(keyword, products) {
-  if (products.length === 0) return 0;
-  
-  const now = Date.now();
-  let saved = 0;
-  
-  for (const p of products) {
-    if (!p.product_id || !p.title) continue;
-    if (p.title.length < 20) continue;
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     
-    try {
-      const imageHash = generateImageHash(p.image_url);
-      const tokens = extractTokens(p.title);
-      const category = detectCategory(p.title);
+    steps:
+      - uses: actions/checkout@v4
       
-      const trustScore = 
-        (p.rating >= 4.8 ? 40 : p.rating >= 4.5 ? 30 : p.rating >= 4.0 ? 20 : 10) +
-        (p.orders_count >= 10000 ? 30 : p.orders_count >= 1000 ? 20 : p.orders_count >= 100 ? 10 : 0) +
-        (p.is_free_shipping ? 10 : 0);
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       
-      const valueScore = 
-        (p.rating / 5.0) * 35 +
-        Math.min(p.orders_count / 5000, 1.0) * 30 +
-        Math.max(0, 1 - (p.current_price / 100.0)) * 20;
+      - name: Install dependencies
+        run: npm install
       
-      await db.execute({
-        sql: `INSERT INTO products_current 
-              (product_id, keyword, language, title, current_price, original_price,
-               orders_count, rating, image_url, seller_name, image_hash,
-               title_tokens, category, is_free_shipping, trust_score, value_score,
-               total_score, first_seen_at, last_updated_at, update_count)
-              VALUES (?, ?, 'en', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
-                current_price = excluded.current_price,
-                orders_count = excluded.orders_count,
-                rating = excluded.rating,
-                trust_score = excluded.trust_score,
-                value_score = excluded.value_score,
-                total_score = excluded.total_score,
-                last_updated_at = excluded.last_updated_at,
-                update_count = update_count + 1`,
-        args: [
-          p.product_id, keyword, p.title, p.current_price, p.original_price || 0,
-          p.orders_count || 0, p.rating || 0, p.image_url || '', p.seller_name || '',
-          imageHash, tokens, category,
-          p.is_free_shipping ? 1 : 0,
-          trustScore, valueScore,
-          Math.round(trustScore * 0.5 + valueScore * 0.5),
-          now, now
-        ],
-      });
-      
-      saved++;
-    } catch (e) {
-      console.error(`    ❌ ${e.message.substring(0, 60)}`);
-    }
-  }
-  
-  return saved;
-}
-
-// اختيار الكلمات التالية
-async function pickNextKeywords(count) {
-  const res = await db.execute({
-    sql: `SELECT keyword, category FROM keyword_rotation
-          WHERE enabled = 1
-          ORDER BY 
-            CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            priority ASC,
-            run_count ASC,
-            last_run_at ASC
-          LIMIT ?`,
-    args: [count],
-  });
-  return res.rows;
-}
-
-async function markProcessed(keyword, success) {
-  await db.execute({
-    sql: `UPDATE keyword_rotation
-          SET last_run_at = ?, run_count = run_count + 1,
-              success_count = success_count + ?, fail_count = fail_count + ?
-          WHERE keyword = ?`,
-    args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword],
-  });
-}
-
-async function main() {
-  const start = Date.now();
-  console.log('🎭 بدء الجلب من Apify...\n');
-  
-  if (!APIFY_TOKEN) {
-    console.error('❌ APIFY_TOKEN غير موجود!');
-    process.exit(1);
-  }
-  
-  const keywords = await pickNextKeywords(KEYWORDS_PER_RUN);
-  console.log(`📋 سيتم معالجة ${keywords.length} كلمة\n`);
-  
-  let totalSaved = 0;
-  let successCount = 0;
-  let failCount = 0;
-  
-  for (const row of keywords) {
-    console.log(`🔍 "${row.keyword}" [${row.category}]`);
-    
-    try {
-      const items = await runApifyActor(row.keyword);
-      console.log(`  📦 استُلم ${items.length} منتج`);
-      
-      const products = items.map(item => ({
-        product_id: String(item.productId || item.itemId || item.id || ''),
-        title: item.title || item.name || '',
-        current_price: parseFloat(item.price || item.salePrice || 0),
-        original_price: parseFloat(item.originalPrice || 0),
-        image_url: item.image || item.imageUrl || '',
-        orders_count: parseInt(item.orders || item.ordersCount || 0),
-        rating: parseFloat(item.rating || item.stars || 0),
-        seller_name: item.sellerName || item.store?.name || '',
-        is_free_shipping: item.freeShipping || false,
-      })).filter(p => p.product_id && p.title);
-      
-      const saved = await saveToTurso(row.keyword, products);
-      console.log(`  ✅ ${saved} منتج مخزّن`);
-      
-      totalSaved += saved;
-      successCount++;
-      
-      await markProcessed(row.keyword, true);
-      await new Promise(r => setTimeout(r, 2000));
-      
-    } catch (error) {
-      console.log(`  ❌ فشل: ${error.message}`);
-      failCount++;
-      await markProcessed(row.keyword, false);
-    }
-  }
-  
-  const mins = ((Date.now() - start) / 60000).toFixed(1);
-  console.log(`\n📊 تقرير الدورة (${mins} دقيقة):`);
-  console.log(`  ✅ نجح: ${successCount}/${keywords.length}`);
-  console.log(`  ❌ فشل: ${failCount}`);
-  console.log(`  📦 مخزّن: ${totalSaved}`);
-  
-  if (failCount > successCount) process.exit(1);
-}
-
-main().catch(err => {
-  console.error('💥 خطأ قاتل:', err);
-  process.exit(1);
-});
+      - name: Fetch products (Apify)
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: node src/apify-fetcher.js
