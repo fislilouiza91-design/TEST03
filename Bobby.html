@@ -1,6 +1,5 @@
-// src/apify-fetcher.js - المرحلة 1: Apify + توزيع متنوع + استخراج كلمات بديلة نظيفة
-import fetch from 'node-fetch';
-import crypto from 'crypto';
+// src/export-csv.js - تصدير المنتجات إلى CSV
+import fs from 'fs';
 import { createClient } from '@libsql/client';
 
 const db = createClient({
@@ -8,321 +7,22 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-const KEYWORDS_PER_RUN = 5;
-const MAX_ITEMS_PER_KEYWORD = 20;
-
 // ═══════════════════════════════════════════
-// دوال مساعدة
+// تحويل صف إلى CSV
 // ═══════════════════════════════════════════
 
-function generateImageHash(url) {
-  if (!url) return null;
-  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
-  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
-  return null;
+function escapeCSV(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  // إذا كان يحتوي على فاصلة أو سطر جديد أو علامة اقتباس
+  if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
 }
 
-function extractTokens(title) {
-  if (!title) return '';
-  const stop = new Set(['for','the','and','with','from','new','hot','best','free','high','pro','sale','shipping','pcs','piece','set']);
-  return title.toLowerCase()
-    .replace(/[^\w\s-]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !stop.has(w) && !/^\d+$/.test(w))
-    .slice(0, 10)
-    .join(' ');
-}
-
-function detectCategory(categoryPath) {
-  if (!categoryPath || !Array.isArray(categoryPath) || categoryPath.length === 0) {
-    return 'general';
-  }
-  const rootId = String(categoryPath[0]);
-  const rootMap = {
-    '44': 'electronics', '3': 'home-kitchen', '100001540': 'fashion-women',
-    '100001541': 'fashion-men', '66': 'beauty', '18': 'sports',
-    '26': 'toys-kids', '34': 'automotive', '36': 'pets',
-    '1420': 'tools', '509': 'watches', '1511': 'jewelry',
-    '200000348': 'phones', '7': 'computer',
-  };
-  return rootMap[rootId] || 'general';
-}
-
-// ═══════════════════════════════════════════
-// استدعاء Apify Actor
-// ═══════════════════════════════════════════
-
-async function runApifyActor(keyword) {
-  console.log(`  🎭 Apify Actor...`);
-  
-  const actorId = 'apt_marble~aliexpress-search-scraper';
-  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-  
-  const inputBody = {
-    keyword: keyword,
-    country: 'us',
-    currency: 'USD',
-    sortOrder: 'best_match',
-    maxItems: MAX_ITEMS_PER_KEYWORD,
-  };
-  
-  const response = await fetch(runUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(inputBody),
-    timeout: 300000,
-  });
-  
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Apify ${response.status}: ${err.substring(0, 200)}`);
-  }
-  
-  const items = await response.json();
-  console.log(`  📥 Apify: ${Array.isArray(items) ? items.length : 0} عنصر`);
-  
-  if (Array.isArray(items) && items.length > 0) {
-    console.log(`  🔍 نموذج: ${items[0].title?.substring(0, 50)}...`);
-  }
-  
-  return items;
-}
-
-// ═══════════════════════════════════════════
-// حفظ المنتجات في Turso
-// ═══════════════════════════════════════════
-
-async function saveToTurso(keyword, products) {
-  if (products.length === 0) return 0;
-  
-  const now = Date.now();
-  let saved = 0;
-  
-  for (const p of products) {
-    if (!p.product_id || !p.title) continue;
-    if (p.title.length < 15) continue;
-    
-    try {
-      const imageHash = generateImageHash(p.image_url);
-      const tokens = extractTokens(p.title);
-      const category = detectCategory(p.category_path);
-      
-      const trustScore = 
-        (p.rating >= 4.8 ? 40 : p.rating >= 4.5 ? 30 : p.rating >= 4.0 ? 20 : 10) +
-        (p.orders_count >= 10000 ? 30 : p.orders_count >= 1000 ? 20 : p.orders_count >= 100 ? 10 : 0) +
-        (p.is_free_shipping ? 10 : 0);
-      
-      const valueScore = 
-        (p.rating / 5.0) * 35 +
-        Math.min(p.orders_count / 5000, 1.0) * 30 +
-        Math.max(0, 1 - (p.current_price / 100.0)) * 20;
-      
-      await db.execute({
-        sql: `INSERT INTO products_current 
-              (product_id, keyword, language, title, current_price, original_price,
-               orders_count, rating, image_url, seller_name, image_hash,
-               title_tokens, category, is_free_shipping, trust_score, value_score,
-               total_score, first_seen_at, last_updated_at, update_count)
-              VALUES (?, ?, 'en', ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
-                current_price = excluded.current_price,
-                orders_count = excluded.orders_count,
-                rating = excluded.rating,
-                trust_score = excluded.trust_score,
-                value_score = excluded.value_score,
-                total_score = excluded.total_score,
-                last_updated_at = excluded.last_updated_at,
-                update_count = update_count + 1`,
-        args: [
-          p.product_id, keyword, p.title, p.current_price, p.original_price,
-          p.orders_count, p.rating, p.image_url,
-          imageHash, tokens, category,
-          p.is_free_shipping ? 1 : 0,
-          trustScore, valueScore,
-          Math.round(trustScore * 0.5 + valueScore * 0.5),
-          now, now
-        ],
-      });
-      
-      saved++;
-    } catch (e) {
-      console.error(`    ❌ ${e.message.substring(0, 60)}`);
-    }
-  }
-  
-  return saved;
-}
-
-// ═══════════════════════════════════════════
-// ⭐ استخراج الكلمات المفتاحية البديلة (مُفلترة بقوة)
-// ═══════════════════════════════════════════
-
-async function extractDerivedKeywords(products) {
-  console.log('  🔍 تحليل العناوين لاستخراج كلمات بديلة...');
-  
-  const derived = new Map();
-  
-  // كلمات ممنوعة (لا معنى لها كبحث)
-  const blacklist = new Set([
-    'pcs','pc','set','pack','new','hot','sale','free','shipping','fast',
-    'high','low','mini','max','pro','plus','ultra','super','premium',
-    'quality','good','best','top','smart','digital','portable','wireless',
-    'type','model','size','color','black','white','red','blue','green',
-    'original','genuine','official','brand','dropshipping','wholesale',
-    'men','women','kids','baby','with','without','and','for','the',
-  ]);
-  
-  for (const p of products) {
-    if (!p.title_tokens) continue;
-    
-    const tokens = p.title_tokens.split(' ').filter(t => {
-      // فلترة قوية
-      if (t.length < 4) return false;                    // كلمة قصيرة جداً
-      if (/^\d+$/.test(t)) return false;                 // أرقام فقط
-      if (/^[a-z]\d+$/i.test(t)) return false;           // مثل: l40, e6s, k1
-      if (/^[a-z]{1,2}\d+[a-z]?$/i.test(t)) return false; // مثل: x3, m2
-      if (/^\d+[a-z]+$/i.test(t)) return false;          // مثل: 4k, 5g
-      if (blacklist.has(t)) return false;                // كلمة ممنوعة
-      if (/^[a-z]{2,3}$/i.test(t)) return false;         // كلمات قصيرة عشوائية
-      return true;
-    });
-    
-    if (tokens.length < 2) continue;
-    
-    // توليد bigrams
-    for (let i = 0; i < tokens.length - 1; i++) {
-      const bigram = `${tokens[i]} ${tokens[i + 1]}`;
-      
-      // تحقق من صحة الـ bigram
-      if (bigram.length < 8 || bigram.length > 40) continue;
-      if (bigram.split(' ').some(w => w.length < 4)) continue;
-      
-      if (derived.has(bigram)) {
-        derived.get(bigram).frequency++;
-      } else {
-        derived.set(bigram, {
-          keyword: bigram,
-          frequency: 1,
-          category: p.category || 'general',
-        });
-      }
-    }
-    
-    // توليد trigrams للكلمات الطويلة (3 كلمات)
-    if (tokens.length >= 3) {
-      for (let i = 0; i < tokens.length - 2; i++) {
-        const trigram = `${tokens[i]} ${tokens[i + 1]} ${tokens[i + 2]}`;
-        
-        if (trigram.length < 15 || trigram.length > 60) continue;
-        
-        if (derived.has(trigram)) {
-          derived.get(trigram).frequency++;
-        } else {
-          derived.set(trigram, {
-            keyword: trigram,
-            frequency: 1,
-            category: p.category || 'general',
-          });
-        }
-      }
-    }
-  }
-  
-  // احتفظ بالكلمات التي ظهرت 3 مرات أو أكثر
-  const validated = [...derived.values()].filter(d => d.frequency >= 3);
-  
-  // رتّب حسب التكرار
-  validated.sort((a, b) => b.frequency - a.frequency);
-  
-  console.log(`  🔑 ${validated.length} كلمة بديلة مؤكدة (من ${derived.size} مرشح)`);
-  console.log(`  📊 أعلى 5 تكرارات: ${validated.slice(0, 5).map(v => `"${v.keyword}" (${v.frequency})`).join(', ')}`);
-  
-  return validated;
-}
-
-async function saveDerivedKeywords(keywords) {
-  let inserted = 0;
-  
-  for (const kw of keywords) {
-    try {
-      const result = await db.execute({
-        sql: `INSERT INTO keyword_rotation 
-              (keyword, category, subcategory, priority, enabled)
-              VALUES (?, ?, 'derived', 5, 1)
-              ON CONFLICT (keyword) DO NOTHING`,
-        args: [kw.keyword, kw.category],
-      });
-      inserted += result.rowsAffected || 0;
-    } catch (e) {}
-  }
-  
-  return inserted;
-}
-
-// ═══════════════════════════════════════════
-// ⭐ اختيار الكلمات بأسلوب التوزيع المتنوع
-// ═══════════════════════════════════════════
-
-async function pickNextKeywords(count) {
-  console.log(`  📂 اختيار كلمات متنوعة من فئات مختلفة...`);
-  
-  // 1. اختر أهم الفئات (الأقل استخداماً)
-  const categories = await db.execute({
-    sql: `SELECT category, 
-                 COUNT(*) as total,
-                 SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending,
-                 SUM(run_count) as total_runs
-          FROM keyword_rotation
-          WHERE enabled = 1 
-            AND (subcategory IS NULL OR subcategory != 'derived')
-            AND category IS NOT NULL
-          GROUP BY category
-          ORDER BY total_runs ASC, total ASC
-          LIMIT ?`,
-    args: [count],
-  });
-  
-  if (categories.rows.length === 0) {
-    console.log(`  ⚠️ لا توجد فئات`);
-    return [];
-  }
-  
-  // 2. من كل فئة، اختر الكلمة الأقل استخداماً
-  const picked = [];
-  for (const cat of categories.rows) {
-    const kw = await db.execute({
-      sql: `SELECT keyword, category FROM keyword_rotation
-            WHERE enabled = 1 
-              AND category = ?
-              AND (subcategory IS NULL OR subcategory != 'derived')
-            ORDER BY 
-              CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-              run_count ASC,
-              last_run_at ASC
-            LIMIT 1`,
-      args: [cat.category],
-    });
-    
-    if (kw.rows.length > 0) {
-      picked.push(kw.rows[0]);
-    }
-  }
-  
-  console.log(`  ✅ تم اختيار ${picked.length} كلمة من ${picked.length} فئة:`);
-  picked.forEach(p => console.log(`     • [${p.category}] ${p.keyword}`));
-  
-  return picked;
-}
-
-async function markProcessed(keyword, success) {
-  await db.execute({
-    sql: `UPDATE keyword_rotation
-          SET last_run_at = ?, run_count = run_count + 1,
-              success_count = success_count + ?, fail_count = fail_count + ?
-          WHERE keyword = ?`,
-    args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword],
-  });
+function rowToCSV(headers, row) {
+  return headers.map(h => escapeCSV(row[h])).join(',');
 }
 
 // ═══════════════════════════════════════════
@@ -330,106 +30,115 @@ async function markProcessed(keyword, success) {
 // ═══════════════════════════════════════════
 
 async function main() {
-  const start = Date.now();
-  console.log('🎭 المرحلة 1: Apify (توزيع متنوع + استخراج كلمات نظيفة)...\n');
+  console.log('📊 تصدير المنتجات إلى CSV...\n');
   
-  if (!APIFY_TOKEN) {
-    console.error('❌ APIFY_TOKEN غير موجود!');
-    process.exit(1);
-  }
+  // 1. اجلب كل المنتجات
+  const result = await db.execute(`
+    SELECT 
+      product_id,
+      title,
+      category,
+      keyword,
+      current_price,
+      original_price,
+      orders_count,
+      rating,
+      seller_name,
+      is_free_shipping,
+      trust_score,
+      value_score,
+      total_score,
+      image_url,
+      image_hash,
+      title_tokens,
+      first_seen_at,
+      last_updated_at
+    FROM products_current
+    ORDER BY last_updated_at DESC
+  `);
   
-  const keywords = await pickNextKeywords(KEYWORDS_PER_RUN);
+  console.log(`📦 إجمالي المنتجات: ${result.rows.length}\n`);
   
-  if (keywords.length === 0) {
-    console.log('⚠️ لا توجد كلمات. تحقق من keyword_rotation.');
+  if (result.rows.length === 0) {
+    console.log('⚠️ لا توجد منتجات للتصدير.');
     return;
   }
   
-  let totalSaved = 0;
-  let successCount = 0;
-  let failCount = 0;
+  // 2. استخرج العناوين
+  const headers = [
+    'product_id',
+    'title',
+    'category',
+    'keyword',
+    'current_price',
+    'original_price',
+    'orders_count',
+    'rating',
+    'seller_name',
+    'is_free_shipping',
+    'trust_score',
+    'value_score',
+    'total_score',
+    'image_url',
+    'image_hash',
+    'title_tokens',
+    'first_seen_at',
+    'last_updated_at',
+  ];
   
-  for (const row of keywords) {
-    console.log(`\n🔍 "${row.keyword}" [${row.category}]`);
-    
-    try {
-      const items = await runApifyActor(row.keyword);
-      
-      if (!Array.isArray(items) || items.length === 0) {
-        console.log(`  ⚠️ 0 نتيجة`);
-        failCount++;
-        await markProcessed(row.keyword, false);
-        continue;
-      }
-      
-      const products = items.map(item => ({
-        product_id: item.productId ? String(item.productId) : null,
-        title: item.title || '',
-        current_price: parseFloat(item.price || 0),
-        original_price: parseFloat(item.originalPrice || 0),
-        image_url: item.imageUrl || '',
-        orders_count: parseInt(item.soldCount || 0),
-        rating: parseFloat(item.rating || 0),
-        is_free_shipping: item.hasFreeShippingOffer === true,
-        category_path: item.categoryPath || [],
-      })).filter(p => p.product_id && p.title && p.title.length > 15);
-      
-      const saved = await saveToTurso(row.keyword, products);
-      console.log(`  ✅ ${saved} منتج مخزّن`);
-      
-      totalSaved += saved;
-      if (saved > 0) successCount++;
-      else failCount++;
-      
-      await markProcessed(row.keyword, saved > 0);
-      await new Promise(r => setTimeout(r, 2000));
-      
-    } catch (error) {
-      console.log(`  ❌ فشل: ${error.message}`);
-      failCount++;
-      await markProcessed(row.keyword, false);
-    }
+  // 3. ابنِ CSV
+  const lines = [headers.join(',')];
+  
+  for (const row of result.rows) {
+    // حوّل timestamps إلى تواريخ مقروءة
+    const formattedRow = {
+      ...row,
+      first_seen_at: row.first_seen_at ? new Date(Number(row.first_seen_at)).toISOString() : '',
+      last_updated_at: row.last_updated_at ? new Date(Number(row.last_updated_at)).toISOString() : '',
+    };
+    lines.push(rowToCSV(headers, formattedRow));
   }
   
-  // ⭐ استخراج الكلمات البديلة
-  console.log('\n🔑 استخراج كلمات مفتاحية بديلة من المنتجات المخزنة...');
-  const allProducts = await db.execute(`
-    SELECT title_tokens, category 
-    FROM products_current 
-    WHERE title_tokens IS NOT NULL AND title_tokens != ''
-    ORDER BY last_updated_at DESC
-    LIMIT 500
-  `);
+  // 4. اكتب الملف (مع BOM لدعم العربية في Excel)
+  const csvContent = '\uFEFF' + lines.join('\n');
+  fs.writeFileSync('products_export.csv', csvContent, 'utf8');
   
-  const derived = await extractDerivedKeywords(allProducts.rows);
-  const insertedDerived = await saveDerivedKeywords(derived);
-  console.log(`  ✅ ${insertedDerived} كلمة بديلة أُضيفت للدوران`);
+  const stats = fs.statSync('products_export.csv');
+  console.log(`✅ تم التصدير: products_export.csv`);
+  console.log(`📄 الحجم: ${(stats.size / 1024).toFixed(1)} KB`);
+  console.log(`📋 عدد الصفوف: ${result.rows.length}`);
   
-  // إحصائيات الفئات
+  // 5. إحصائيات سريعة
   const catStats = await db.execute(`
-    SELECT category, 
-           COUNT(*) as total,
-           SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending
-    FROM keyword_rotation 
-    WHERE enabled = 1 
+    SELECT category, COUNT(*) as count
+    FROM products_current
     GROUP BY category
-    ORDER BY pending DESC
+    ORDER BY count DESC
   `);
   
-  console.log(`\n📂 حالة الفئات:`);
+  console.log(`\n📂 التوزيع حسب الفئة:`);
   catStats.rows.forEach(c => {
-    console.log(`  ${c.category || 'unknown'}: ${c.pending}/${c.total} متبقية`);
+    console.log(`  ${c.category || 'unknown'}: ${c.count}`);
   });
   
-  const mins = ((Date.now() - start) / 60000).toFixed(1);
-  console.log(`\n📊 تقرير المرحلة 1 (${mins} دقيقة):`);
-  console.log(`  ✅ نجح: ${successCount}/${keywords.length}`);
-  console.log(`  ❌ فشل: ${failCount}`);
-  console.log(`  📦 مخزّن: ${totalSaved} منتج`);
-  console.log(`  🔑 كلمات بديلة جديدة: ${insertedDerived}`);
-  console.log(`  💰 تكلفة Apify: $${(totalSaved * 0.0007).toFixed(4)}`);
+  // 6. إحصائيات روابط التشابه
+  const matchStats = await db.execute(`
+    SELECT COUNT(*) as count FROM product_matches
+  `);
+  console.log(`\n🔗 روابط التشابه: ${matchStats.rows[0].count}`);
   
-  if (failCount > successCount) process.exit(1);
+  // 7. توزيع حسب نوع المطابقة
+  const matchTypes = await db.execute(`
+    SELECT match_type, COUNT(*) as count
+    FROM product_matches
+    GROUP BY match_type
+    ORDER BY count DESC
+  `);
+  
+  console.log(`📊 توزيع أنواع المطابقة:`);
+  matchTypes.rows.forEach(m => {
+    console.log(`  ${m.match_type}: ${m.count}`);
+  });
 }
 
 main().catch(err => {
