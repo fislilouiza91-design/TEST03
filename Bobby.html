@@ -1,19 +1,57 @@
-ALTER TABLE products_current ADD COLUMN image_hash TEXT;
+CREATE TABLE IF NOT EXISTS product_sellers (
+  product_id TEXT,
+  seller_id TEXT,
+  seller_name TEXT,
+  title TEXT,
+  price REAL,
+  shipping_cost REAL DEFAULT 0,
+  total_price REAL,
+  original_price REAL,
+  discount_percent INTEGER DEFAULT 0,
+  rating REAL DEFAULT 0,
+  orders_count INTEGER DEFAULT 0,
+  image_url TEXT,
+  shipping_days INTEGER DEFAULT 0,
+  is_free_shipping INTEGER DEFAULT 0,
+  updated_at INTEGER,
+  PRIMARY KEY (product_id, seller_id)
+);
 
-ALTER TABLE products_current ADD COLUMN title_tokens TEXT;
 
-ALTER TABLE products_current ADD COLUMN category TEXT;
 
-ALTER TABLE products_current ADD COLUMN seller_id TEXT;
 
-ALTER TABLE products_current ADD COLUMN shipping_cost REAL DEFAULT 0;
 
-ALTER TABLE products_current ADD COLUMN shipping_days INTEGER DEFAULT 0;
+CREATE TABLE IF NOT EXISTS category_map (
+  category_id TEXT PRIMARY KEY,
+  name TEXT,
+  name_en TEXT,
+  parent_id TEXT,
+  level INTEGER,
+  product_count INTEGER DEFAULT 0,
+  last_scraped_at INTEGER
+);
 
-ALTER TABLE products_current ADD COLUMN trust_score REAL DEFAULT 0;
 
-ALTER TABLE products_current ADD COLUMN value_score REAL DEFAULT 0;
 
-ALTER TABLE products_current ADD COLUMN trend_score REAL DEFAULT 0;
 
-ALTER TABLE products_current ADD COLUMN total_score REAL DEFAULT 0;
+
+
+CREATE INDEX IF NOT EXISTS idx_image_hash ON products_current(image_hash);
+
+CREATE INDEX IF NOT EXISTS idx_tokens ON products_current(title_tokens);
+
+CREATE INDEX IF NOT EXISTS idx_category ON products_current(category);
+
+CREATE INDEX IF NOT EXISTS idx_total_score ON products_current(total_score DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sellers_price ON product_sellers(product_id, total_price ASC);
+
+CREATE INDEX IF NOT EXISTS idx_sellers_rating ON product_sellers(product_id, rating DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sellers_orders ON product_sellers(product_id, orders_count DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sellers_discount ON product_sellers(product_id, discount_percent DESC);
+
+
+
+SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
