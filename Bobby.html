@@ -1,71 +1,25 @@
-// src/init-pipeline.js - زرع الكلمات المفتاحية من categories.json
-import fs from 'fs';
-import { createClient } from '@libsql/client';
+name: Init Keywords Pipeline
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  workflow_dispatch:
 
-async function main() {
-  console.log('🌱 بدء زرع الكلمات المفتاحية...\n');
-  
-  // 1. اقرأ الملف
-  const data = JSON.parse(fs.readFileSync('./config/categories.json', 'utf8'));
-  
-  console.log(`📋 عدد الفئات: ${data.categories.length}\n`);
-  
-  const now = Date.now();
-  let totalInserted = 0;
-  let totalSkipped = 0;
-  
-  // 2. لكل فئة، أضف كلماتها
-  for (const cat of data.categories) {
-    let categoryCount = 0;
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     
-    for (const [subName, keywords] of Object.entries(cat.subs)) {
-      for (const kw of keywords) {
-        const result = await db.execute({
-          sql: `INSERT OR IGNORE INTO keywords_pipeline 
-                (keyword, category, subcategory, source, priority, created_at)
-                VALUES (?, ?, ?, 'initial', 5, ?)`,
-          args: [kw.toLowerCase().trim(), cat.name, subName, now],
-        });
-        
-        if (result.rowsAffected > 0) {
-          categoryCount++;
-          totalInserted++;
-        } else {
-          totalSkipped++;
-        }
-      }
-    }
-    
-    if (categoryCount > 0) {
-      console.log(`  ✅ ${cat.name}: ${categoryCount} كلمة`);
-    }
-  }
-  
-  // 3. إحصائيات نهائية
-  const stats = await db.execute(`
-    SELECT 
-      COUNT(*) as total,
-      COUNT(CASE WHEN category IS NOT NULL THEN 1 END) as categorized,
-      SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending
-    FROM keywords_pipeline
-  `);
-  
-  const s = stats.rows[0];
-  
-  console.log(`\n📊 التقرير النهائي:`);
-  console.log(`  ✅ كلمات جديدة: ${totalInserted}`);
-  console.log(`  ⏭️ مكررة: ${totalSkipped}`);
-  console.log(`  📦 إجمالي: ${s.total}`);
-  console.log(`  📂 مُصنّفة: ${s.categorized}`);
-  console.log(`  ⏳ في الانتظار: ${s.pending}`);
-}
-
-main().catch(err => {
-  console.error('💥 خطأ قاتل:', err);
-  process.exit(1);
-});
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Init keywords pipeline
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+        run: node src/init-pipeline.js
