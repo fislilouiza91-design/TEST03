@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ذكي مع Failover + Seeds متغيرة + JSON Endpoint Test
+// src/smart-pipeline.js - نظام ذكي مع Failover + JSON مدمج + Seeds متغيرة
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -18,11 +18,10 @@ const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 // ═══════════════════════════════════════════
 
 const DISCOVERY_KEYWORDS = 10;
-const ENRICHMENT_KEYWORDS = 50;       // ⭐ زيادة إلى 50
-const PAGES_PER_KEYWORD = 2;          // ⭐ تقليل إلى 2
+const ENRICHMENT_KEYWORDS = 30;       // ⭐ 30 كلمة
+const PAGES_PER_KEYWORD = 3;          // ⭐ 3 صفحات
 const MAX_FAILURES_BEFORE_SWITCH = 2;
 const APIFY_MAX_ITEMS = 50;
-const USE_JSON_ENDPOINT = true;       // ⭐ مفتاح التحكم
 
 // ⭐ Seeds احتياطية
 const FALLBACK_SEEDS = [
@@ -50,13 +49,6 @@ const COMMON_WORDS = new Set([
 const providerState = {
   scrapingant: { status: 'active', failures: 0, reason: null },
   scraperapi: { status: 'active', failures: 0, reason: null },
-};
-
-// ⭐ حالة JSON Endpoint
-let jsonEndpointState = {
-  tested: false,
-  works: false,
-  testedAt: null,
 };
 
 // ═══════════════════════════════════════════
@@ -140,156 +132,7 @@ async function checkApifyHealth() {
 }
 
 // ═══════════════════════════════════════════
-// 3. ⭐ اختبار JSON Endpoint
-// ═══════════════════════════════════════════
-
-async function testJSONEndpoint() {
-  console.log('\n🧪 اختبار JSON Endpoint...');
-  
-  const testKeyword = 'bluetooth earphones';
-  const testUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(testKeyword)}.html?_format=json`;
-  
-  try {
-    const params = new URLSearchParams({
-      'x-api-key': SCRAPINGANT_KEY,
-      'url': testUrl,
-      'browser': 'false',          // ⚡ 1 رصيد فقط
-      'proxy_country': 'US',
-    });
-    
-    console.log(`  🌐 URL: ${testUrl}`);
-    const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 60000 });
-    
-    if (!res.ok) {
-      console.log(`  ❌ HTTP ${res.status}`);
-      return { works: false, reason: `HTTP ${res.status}` };
-    }
-    
-    const text = await res.text();
-    console.log(`  📄 Response: ${text.length.toLocaleString()} حرف`);
-    
-    // حاول تحليل JSON
-    try {
-      const data = JSON.parse(text);
-      console.log(`  ✅ JSON نجح!`);
-      
-      // ابحث عن المنتجات
-      const products = data?.items || data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
-      console.log(`  📦 ${products.length} منتج في JSON`);
-      
-      if (products.length > 0) {
-        console.log(`  🔍 نموذج: ${products[0]?.title?.displayTitle?.substring(0, 50) || 'N/A'}...`);
-        return { works: true, productsCount: products.length };
-      }
-      
-      return { works: false, reason: 'JSON موجود لكن بدون منتجات' };
-    } catch (e) {
-      // ليس JSON — ابحث عن JSON مدمج في HTML
-      console.log(`  ⚠️ ليس JSON خالص — بحث عن JSON مدمج...`);
-      
-      const jsonMatch = text.match(/window\._dida_config_\s*=\s*({.+?});/s);
-      if (jsonMatch) {
-        try {
-          const data = JSON.parse(jsonMatch[1]);
-          const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
-          console.log(`  ✅ JSON مدمج: ${items.length} منتج`);
-          return { works: items.length > 0, productsCount: items.length };
-        } catch (e2) {}
-      }
-      
-      return { works: false, reason: 'لا يوجد JSON' };
-    }
-  } catch (e) {
-    console.log(`  ❌ خطأ: ${e.message.substring(0, 60)}`);
-    return { works: false, reason: e.message };
-  }
-}
-
-// ═══════════════════════════════════════════
-// 4. ⭐ Fetch JSON Endpoint (إذا نجح)
-// ═══════════════════════════════════════════
-
-async function fetchFromJSONEndpoint(keyword, page = 1) {
-  const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?_format=json&page=${page}`;
-  
-  const params = new URLSearchParams({
-    'x-api-key': SCRAPINGANT_KEY,
-    'url': url,
-    'browser': 'false',          // ⚡ 1 رصيد فقط
-    'proxy_country': 'US',
-  });
-  
-  const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 60000 });
-  
-  if (!res.ok) {
-    throw new Error(`JSON Endpoint HTTP ${res.status}`);
-  }
-  
-  const text = await res.text();
-  
-  // حاول تحليل JSON
-  try {
-    const data = JSON.parse(text);
-    const items = data?.items || data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
-    return { items, source: 'json_endpoint' };
-  } catch (e) {
-    // ابحث عن JSON مدمج
-    const jsonMatch = text.match(/window\._dida_config_\s*=\s*({.+?});/s);
-    if (jsonMatch) {
-      try {
-        const data = JSON.parse(jsonMatch[1]);
-        const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
-        return { items, source: 'json_embedded' };
-      } catch (e2) {}
-    }
-    throw new Error('لا يوجد JSON في الاستجابة');
-  }
-}
-
-// ═══════════════════════════════════════════
-// 5. تحويل JSON Items إلى Products
-// ═══════════════════════════════════════════
-
-function parseJSONItems(items) {
-  const products = [];
-  const seen = new Set();
-  
-  for (const item of items) {
-    const pid = item.productId || item.itemId || item.id;
-    if (!pid || seen.has(pid)) continue;
-    
-    const title = item.title?.displayTitle || item.title || item.name || '';
-    if (title.length < 10) continue;
-    
-    seen.add(pid);
-    
-    const price = parseFloat(
-      (item.prices?.salePrice?.formattedPrice || item.prices?.salePrice?.value || item.price || '0')
-        .toString().replace(/[^\d.]/g, '')
-    ) || 0;
-    
-    products.push({
-      product_id: String(pid),
-      title: title,
-      price: price,
-      original_price: parseFloat(
-        (item.prices?.originalPrice?.formattedPrice || item.originalPrice || '0')
-          .toString().replace(/[^\d.]/g, '')
-      ) || 0,
-      image_url: item.image?.imgUrl || item.imageUrl || item.image || '',
-      rating: parseFloat(item.evaluation?.starRating || item.rating || 0),
-      orders_count: parseInt(
-        (item.trade?.tradeDesc || item.soldCount || '0').toString().replace(/[^\d]/g, '')
-      ) || 0,
-      ships_from: item.trade?.shipsFrom || item.shipsFromCountry || null,
-    });
-  }
-  
-  return products;
-}
-
-// ═══════════════════════════════════════════
-// 6. اختيار Discovery Seeds
+// 3. اختيار Discovery Seeds
 // ═══════════════════════════════════════════
 
 async function pickDiscoverySeeds(count) {
@@ -350,7 +193,7 @@ async function pickDiscoverySeeds(count) {
 }
 
 // ═══════════════════════════════════════════
-// 7. Apify Discovery
+// 4. Apify Discovery
 // ═══════════════════════════════════════════
 
 async function runApifyDiscovery() {
@@ -391,7 +234,7 @@ async function runApifyDiscovery() {
 }
 
 // ═══════════════════════════════════════════
-// 8. Enrichment (مع JSON Endpoint)
+// 5. Enrichment
 // ═══════════════════════════════════════════
 
 async function runEnrichment(isEmergency = false) {
@@ -407,28 +250,13 @@ async function runEnrichment(isEmergency = false) {
     console.log('\n🔍 Enrichment...');
   }
   
-  // ⭐ اختبار JSON Endpoint مرة واحدة
-  if (USE_JSON_ENDPOINT && !jsonEndpointState.tested) {
-    const testResult = await testJSONEndpoint();
-    jsonEndpointState.tested = true;
-    jsonEndpointState.works = testResult.works;
-    jsonEndpointState.testedAt = Date.now();
-    
-    if (testResult.works) {
-      console.log(`  ✅ JSON Endpoint يعمل! التوفير: 90% من الرصيد`);
-    } else {
-      console.log(`  ❌ JSON Endpoint لا يعمل — استخدام HTML`);
-      console.log(`     السبب: ${testResult.reason}`);
-    }
-  }
-  
   const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS);
   console.log(`\n📋 ${keywords.length} كلمة (${PAGES_PER_KEYWORD} صفحات/كلمة)\n`);
   
   if (keywords.length === 0) return { totalSaved: 0 };
   
   let totalSaved = 0;
-  let sa = 0, spa = 0, json = 0;
+  let sa = 0, spa = 0;
   let blocked = false;
   
   for (const row of keywords) {
@@ -443,27 +271,6 @@ async function runEnrichment(isEmergency = false) {
     
     for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
       try {
-        // ⭐ استخدام JSON Endpoint إذا يعمل
-        if (jsonEndpointState.works && providerState.scrapingant.status === 'active') {
-          try {
-            const result = await fetchFromJSONEndpoint(row.keyword, page);
-            json++;
-            const products = parseJSONItems(result.items);
-            const saved = await saveProductsBatch(products, row.keyword);
-            
-            console.log(`      🟢 JSON p${page}: ${products.length} منتج، ${saved} مخزّن`);
-            keywordSaved += saved;
-            
-            if (products.length === 0) break;
-            await new Promise(r => setTimeout(r, 800));
-            continue;
-          } catch (jsonErr) {
-            console.log(`      ⚠️ JSON فشل: ${jsonErr.message.substring(0, 40)}`);
-            // استمر بـ HTML
-          }
-        }
-        
-        // HTML العادي
         const { html, source } = await fetchWithFallback(row.keyword, page);
         if (source === 'scrapingant') sa++;
         else spa++;
@@ -474,7 +281,11 @@ async function runEnrichment(isEmergency = false) {
         console.log(`      ✅ page ${page}: ${products.length} حلّل، ${saved} مخزّن (${source})`);
         keywordSaved += saved;
         
-        if (products.length === 0) break;
+        if (products.length === 0) {
+          console.log(`      ⏹️ لا مزيد — التوقف`);
+          break;
+        }
+        
         await new Promise(r => setTimeout(r, 1200));
         
       } catch (error) {
@@ -494,15 +305,14 @@ async function runEnrichment(isEmergency = false) {
   
   console.log(`\n📊 Enrichment:`);
   console.log(`  📦 مخزّن: ${totalSaved}`);
-  console.log(`  🔵 ScrapingAnt (HTML): ${sa} | 🟠 ScraperAPI: ${spa} | 🟢 JSON: ${json}`);
-  console.log(`  💰 استهلاك ScrapingAnt: ~${(sa + json) * 10} رصيد (HTML)`);
-  if (json > 0) console.log(`  ⚡ رصيد JSON Endpoint: ~${json * 1} رصيد`);
+  console.log(`  🔵 ScrapingAnt: ${sa} | 🟠 ScraperAPI: ${spa}`);
+  console.log(`  💰 استهلاك ScrapingAnt: ~${sa * 10} رصيد`);
   
   return { totalSaved, blocked };
 }
 
 // ═══════════════════════════════════════════
-// 9. Apify Actor
+// 6. Apify Actor
 // ═══════════════════════════════════════════
 
 async function runApifyActor(keyword, maxItems = 20) {
@@ -521,7 +331,7 @@ async function runApifyActor(keyword, maxItems = 20) {
 }
 
 // ═══════════════════════════════════════════
-// 10. دوال مساعدة
+// 7. دوال مساعدة
 // ═══════════════════════════════════════════
 
 function generateImageHash(url) {
@@ -544,7 +354,7 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// 11. حفظ منتجات Apify
+// 8. حفظ منتجات Apify
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword) {
@@ -614,7 +424,7 @@ async function saveApifyProducts(items, seedKeyword) {
 }
 
 // ═══════════════════════════════════════════
-// 12. اختيار Enrichment Keywords
+// 9. اختيار Enrichment Keywords
 // ═══════════════════════════════════════════
 
 async function pickKeywordsFromDB(count) {
@@ -665,14 +475,17 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// 13-14. الجلب مع Fallback
+// 10. الجلب من ScrapingAnt
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
   const params = new URLSearchParams({
-    'x-api-key': SCRAPINGANT_KEY, 'url': url, 'browser': 'true',
-    'proxy_country': 'US', 'wait_for_selector': '[data-product-id], [class*="search-item-card"], h3',
+    'x-api-key': SCRAPINGANT_KEY,
+    'url': url,
+    'browser': 'true',
+    'proxy_country': 'US',
+    'wait_for_selector': '[data-product-id], [class*="search-item-card"], h3',
   });
   
   const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 90000 });
@@ -680,8 +493,9 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     const lowerErr = errText.toLowerCase();
-    if (res.status === 402 || lowerErr.includes('credit') || lowerErr.includes('limit exceeded') ||
-        lowerErr.includes('exhausted') || lowerErr.includes('out of')) {
+    
+    if (res.status === 402 || lowerErr.includes('credit') || 
+        lowerErr.includes('limit exceeded') || lowerErr.includes('exhausted')) {
       throw new Error('CREDIT_EXHAUSTED: ScrapingAnt');
     }
     if (res.status === 403 || res.status === 429 || lowerErr.includes('blocked')) {
@@ -693,10 +507,17 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
   return await res.text();
 }
 
+// ═══════════════════════════════════════════
+// 11. الجلب من ScraperAPI
+// ═══════════════════════════════════════════
+
 async function fetchFromScraperAPI(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
   const params = new URLSearchParams({
-    'api_key': SCRAPERAPI_KEY, 'url': url, 'render': 'true', 'country_code': 'us',
+    'api_key': SCRAPERAPI_KEY,
+    'url': url,
+    'render': 'true',
+    'country_code': 'us',
   });
   
   const res = await fetch(`https://api.scraperapi.com?${params}`, { timeout: 90000 });
@@ -704,8 +525,9 @@ async function fetchFromScraperAPI(keyword, page = 1) {
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     const lowerErr = errText.toLowerCase();
-    if (res.status === 402 || lowerErr.includes('credit') || lowerErr.includes('limit exceeded') ||
-        lowerErr.includes('exhausted') || lowerErr.includes('run out')) {
+    
+    if (res.status === 402 || lowerErr.includes('credit') || 
+        lowerErr.includes('limit exceeded') || lowerErr.includes('exhausted')) {
       throw new Error('CREDIT_EXHAUSTED: ScraperAPI');
     }
     if (res.status === 403 || res.status === 429 || lowerErr.includes('blocked')) {
@@ -716,6 +538,10 @@ async function fetchFromScraperAPI(keyword, page = 1) {
   
   return await res.text();
 }
+
+// ═══════════════════════════════════════════
+// 12. التبديل الذكي
+// ═══════════════════════════════════════════
 
 async function fetchWithFallback(keyword, page = 1) {
   const saActive = providerState.scrapingant.status === 'active';
@@ -763,55 +589,126 @@ async function fetchWithFallback(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 15. Parser HTML
+// 13. ⭐ استخراج JSON المدمج من HTML
 // ═══════════════════════════════════════════
 
-function parseHTML(html) {
-  const products = [];
-  const seen = new Set();
+function extractEmbeddedJSON(html) {
+  // 1. window._dida_config_
+  let match = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
+  if (match) {
+    try {
+      const data = JSON.parse(match[1]);
+      const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
+      if (items.length > 0) {
+        console.log(`        📊 _dida_config_: ${items.length} منتج`);
+        return items;
+      }
+    } catch (e) {}
+  }
   
-  // JSON-LD
+  // 2. window.runParams
+  match = html.match(/window\.runParams\s*=\s*({.+?});/s);
+  if (match) {
+    try {
+      const data = JSON.parse(match[1]);
+      const items = data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
+      if (items.length > 0) {
+        console.log(`        📊 runParams: ${items.length} منتج`);
+        return items;
+      }
+    } catch (e) {}
+  }
+  
+  // 3. JSON-LD
   const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
   for (const m of ldMatches) {
     try {
       const data = JSON.parse(m[1]);
       if (data['@type'] === 'ItemList' && data.itemListElement) {
-        for (const el of data.itemListElement) {
-          const item = el.item || el;
-          const pid = item.productID || item.sku;
-          if (!pid || seen.has(pid) || !item.name) continue;
-          seen.add(pid);
-          products.push({
-            product_id: String(pid), title: item.name,
-            price: parseFloat(item.offers?.price || 0), image_url: item.image || '',
-          });
+        const items = data.itemListElement.map(el => el.item || el);
+        if (items.length > 0) {
+          console.log(`        📊 JSON-LD: ${items.length} منتج`);
+          return items;
         }
       }
     } catch (e) {}
   }
   
-  // _dida_config_
-  if (products.length === 0) {
-    const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
-    if (jsonMatch) {
-      try {
-        const data = JSON.parse(jsonMatch[1]);
-        const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
-        for (const item of items) {
-          const pid = item.productId || item.itemId;
-          if (!pid || seen.has(pid) || !item.title?.displayTitle) continue;
-          seen.add(pid);
-          products.push({
-            product_id: String(pid), title: item.title.displayTitle,
-            price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
-            image_url: item.image?.imgUrl || '',
-          });
-        }
-      } catch (e) {}
-    }
+  return [];
+}
+
+// ⭐ تحويل JSON إلى منتجات
+function mapJSONToProducts(items) {
+  const products = [];
+  const seen = new Set();
+  
+  for (const item of items) {
+    const pid = item.productId || item.itemId || item.id;
+    if (!pid || seen.has(pid)) continue;
+    
+    const title = item.title?.displayTitle || item.title || item.name || '';
+    if (title.length < 10) continue;
+    
+    seen.add(pid);
+    
+    const price = parseFloat(
+      (item.prices?.salePrice?.formattedPrice || item.prices?.salePrice?.value || item.price || '0')
+        .toString().replace(/[^\d.]/g, '')
+    ) || 0;
+    
+    products.push({
+      product_id: String(pid),
+      title: title,
+      price: price,
+      original_price: parseFloat(
+        (item.prices?.originalPrice?.formattedPrice || item.originalPrice || '0')
+          .toString().replace(/[^\d.]/g, '')
+      ) || 0,
+      image_url: item.image?.imgUrl || item.imageUrl || item.image || '',
+      rating: parseFloat(item.evaluation?.starRating || item.rating || 0),
+      orders_count: parseInt(
+        (item.trade?.tradeDesc || item.soldCount || '0').toString().replace(/[^\d]/g, '')
+      ) || 0,
+    });
   }
   
-  // HTML structure
+  return products;
+}
+
+// ═══════════════════════════════════════════
+// 14. Parser رئيسي (JSON أولاً، ثم HTML)
+// ═══════════════════════════════════════════
+
+function parseHTML(html) {
+  // ⭐ 1. جرّب JSON المدمج أولاً
+  const items = extractEmbeddedJSON(html);
+  if (items.length > 0) {
+    return mapJSONToProducts(items);
+  }
+  
+  // ⭐ 2. Fallback: regex على HTML
+  console.log(`        ⚠️ لا JSON — استخدام regex`);
+  const products = [];
+  const seen = new Set();
+  
+  const patterns = [
+    /data-product-id="(\d+)"[^>]*?title="([^"]{10,200})"/g,
+    /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*?title="([^"]{10,200})"/g,
+  ];
+  
+  for (const pattern of patterns) {
+    const matches = [...html.matchAll(pattern)];
+    for (const m of matches) {
+      const pid = m[1];
+      const title = (m[2] || '').trim().replace(/&amp;/g, '&');
+      if (!pid || !title || seen.has(pid)) continue;
+      seen.add(pid);
+      products.push({ product_id: pid, title, price: 0, image_url: '' });
+    }
+    if (products.length >= 30) break;
+  }
+  
+  // طبقة أخيرة: ID + h3
   if (products.length === 0) {
     const linkTitlePattern = /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*>[\s\S]{0,1500}?<h[23][^>]*>([^<]{15,200})<\/h[23]>/g;
     const matches = [...html.matchAll(linkTitlePattern)];
@@ -824,11 +721,12 @@ function parseHTML(html) {
     }
   }
   
+  if (products.length > 0) console.log(`        📊 regex: ${products.length}`);
   return products;
 }
 
 // ═══════════════════════════════════════════
-// 16. حفظ Batch
+// 15. حفظ Batch
 // ═══════════════════════════════════════════
 
 async function saveProductsBatch(products, keyword) {
@@ -840,11 +738,16 @@ async function saveProductsBatch(products, keyword) {
     .map(p => ({
       sql: `INSERT OR IGNORE INTO products 
             (product_id, title, title_tokens, current_price_usd,
-             image_url, image_hash, source_keyword, source_type,
+             original_price_usd, rating, orders_count, image_url,
+             image_hash, source_keyword, source_type,
              first_seen_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'scrapingant', ?, ?)`,
-      args: [p.product_id, p.title, extractTokens(p.title), p.price,
-        p.image_url, generateImageHash(p.image_url), keyword, now, now],
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scrapingant', ?, ?)`,
+      args: [
+        p.product_id, p.title, extractTokens(p.title), p.price || 0,
+        p.original_price || 0, p.rating || 0, p.orders_count || 0,
+        p.image_url || '', generateImageHash(p.image_url),
+        keyword, now, now
+      ],
     }));
   
   if (statements.length === 0) return 0;
@@ -859,12 +762,12 @@ async function saveProductsBatch(products, keyword) {
 }
 
 // ═══════════════════════════════════════════
-// 17. الدالة الرئيسية
+// 16. الدالة الرئيسية
 // ═══════════════════════════════════════════
 
 async function main() {
   const start = Date.now();
-  console.log('🧠 Smart Pipeline - نظام ذكي + JSON Endpoint\n');
+  console.log('🧠 Smart Pipeline - JSON مدمج + Failover\n');
   console.log('═'.repeat(55));
   
   await restoreProviderState();
@@ -878,12 +781,20 @@ async function main() {
     const discovery = await runApifyDiscovery();
     console.log('\n' + '─'.repeat(55));
     const enrichment = await runEnrichment(false);
-    result = { mode: 'normal', apifyProducts: discovery.totalProducts,
-      apifyKeywords: discovery.totalKeywords, enrichmentProducts: enrichment.totalSaved };
+    result = {
+      mode: 'normal',
+      apifyProducts: discovery.totalProducts,
+      apifyKeywords: discovery.totalKeywords,
+      enrichmentProducts: enrichment.totalSaved,
+    };
   } else {
     console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
     const emergency = await runEnrichment(true);
-    result = { mode: 'emergency', reason: health.reason, emergencyProducts: emergency.totalSaved };
+    result = {
+      mode: 'emergency',
+      reason: health.reason,
+      emergencyProducts: emergency.totalSaved,
+    };
   }
   
   await saveProviderState();
@@ -908,7 +819,6 @@ async function main() {
   console.log(`\n🔌 حالة المزودين:`);
   console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status}`);
   console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status}`);
-  console.log(`  🟢 JSON Endpoint: ${jsonEndpointState.works ? 'يعمل ✅' : 'لا يعمل ❌'}`);
 }
 
 main().catch(err => {
