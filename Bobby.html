@@ -1,35 +1,406 @@
-name: Auto Fetch (Two Stages)
+// src/scrapingant-fetcher.js - المرحلة 2: جلب المنتجات من الفئات
+import fetch from 'node-fetch';
+import crypto from 'crypto';
+import { createClient } from '@libsql/client';
 
-on:
-  schedule:
-    - cron: '0 0,12 * * *'  # دورتان يومياً
-  workflow_dispatch:
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
+const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
+const CATEGORIES_PER_RUN = 3;
+
+// ===== دوال مساعدة =====
+
+function generateImageHash(url) {
+  if (!url) return null;
+  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
+  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
+  return null;
+}
+
+function extractTokens(title) {
+  if (!title) return '';
+  const stop = new Set(['for','the','and','with','from','new','hot','best','free','high','pro','sale','shipping','pcs','piece','set']);
+  return title.toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !stop.has(w) && !/^\d+$/.test(w))
+    .slice(0, 10)
+    .join(' ');
+}
+
+// ===== جلب من ScrapingAnt مع JavaScript =====
+
+async function fetchFromScrapingAnt(categoryId) {
+  const url = `https://www.aliexpress.com/category/${categoryId}.html`;
+  
+  const params = new URLSearchParams({
+    'x-api-key': SCRAPINGANT_KEY,
+    'url': url,
+    'browser': 'true',                    // ✅ JavaScript مفعّل (10 أرصدة)
+    'proxy_country': 'US',
+    'wait_for_selector': '.search-item-card-wrapper-gallery, [class*="product-card"], [class*="item-card"]',
+  });
+  
+  console.log(`    🌐 URL: ${url}`);
+  
+  const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 90000 });
+  
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`ScrapingAnt ${res.status}: ${err.substring(0, 150)}`);
+  }
+  
+  const html = await res.text();
+  console.log(`    📄 HTML: ${html.length.toLocaleString()} حرف`);
+  
+  return html;
+}
+
+// ===== جلب من ScraperAPI (احتياطي) =====
+
+async function fetchFromScraperAPI(categoryId) {
+  const url = `https://www.aliexpress.com/category/${categoryId}.html`;
+  
+  const params = new URLSearchParams({
+    'api_key': SCRAPERAPI_KEY,
+    'url': url,
+    'render': 'true',                    // ✅ JavaScript مفعّل
+    'country_code': 'us',
+  });
+  
+  console.log(`    🌐 URL: ${url}`);
+  
+  const res = await fetch(`https://api.scraperapi.com?${params}`, { timeout: 90000 });
+  
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`ScraperAPI ${res.status}: ${err.substring(0, 150)}`);
+  }
+  
+  const html = await res.text();
+  console.log(`    📄 HTML: ${html.length.toLocaleString()} حرف`);
+  
+  return html;
+}
+
+// ===== جلب مع Fallback =====
+
+async function fetchWithFallback(categoryId) {
+  try {
+    console.log(`  🔵 ScrapingAnt...`);
+    const html = await fetchFromScrapingAnt(categoryId);
+    return { html, source: 'scrapingant' };
+  } catch (e) {
+    console.log(`  ⚠️ فشل: ${e.message}`);
+    console.log(`  🟠 ScraperAPI...`);
+    const html = await fetchFromScraperAPI(categoryId);
+    return { html, source: 'scraperapi' };
+  }
+}
+
+// ===== استخراج المنتجات من HTML (متعدد الطبقات) =====
+
+function parseProducts(html) {
+  const products = [];
+  const seen = new Set();
+  
+  // ═══ الطبقة 1: JSON-LD (الأكثر موثوقية) ═══
+  const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
+  for (const m of ldMatches) {
+    try {
+      const data = JSON.parse(m[1]);
+      if (data['@type'] === 'ItemList' && data.itemListElement) {
+        for (const el of data.itemListElement) {
+          const item = el.item || el;
+          const pid = item.productID || item.sku;
+          if (!pid || seen.has(pid)) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.name || '',
+            current_price: parseFloat(item.offers?.price || 0),
+            original_price: 0,
+            image_url: item.image || '',
+            orders_count: 0,
+            rating: parseFloat(item.aggregateRating?.ratingValue || 0),
+            is_free_shipping: false,
+          });
+        }
+      }
+    } catch (e) {}
+  }
+  console.log(`    📊 الطبقة 1 (JSON-LD): ${products.length} منتج`);
+  
+  // ═══ الطبقة 2: window._dida_config_ ═══
+  if (products.length === 0) {
+    const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
+        console.log(`    📊 _dida_config_: ${items.length} عنصر خام`);
+        
+        for (const item of items) {
+          const pid = item.productId || item.itemId;
+          if (!pid || seen.has(pid)) continue;
+          if (!item.title?.displayTitle) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.title.displayTitle,
+            current_price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            original_price: parseFloat((item.prices?.originalPrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            image_url: item.image?.imgUrl || '',
+            orders_count: parseInt((item.trade?.tradeDesc || '0').replace(/[^\d]/g, '')) || 0,
+            rating: parseFloat(item.evaluation?.starRating || 0),
+            is_free_shipping: false,
+          });
+        }
+      } catch (e) {
+        console.log(`    ⚠️ _dida_config_ فشل: ${e.message.substring(0, 50)}`);
+      }
+    }
+  }
+  
+  // ═══ الطبقة 3: window.runParams ═══
+  if (products.length === 0) {
+    const runMatch = html.match(/window\.runParams\s*=\s*({.+?});/s);
+    if (runMatch) {
+      try {
+        const data = JSON.parse(runMatch[1]);
+        const items = data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
+        console.log(`    📊 runParams: ${items.length} عنصر خام`);
+        
+        for (const item of items) {
+          const pid = item.productId || item.itemId;
+          if (!pid || seen.has(pid)) continue;
+          if (!item.title?.displayTitle) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.title.displayTitle,
+            current_price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            original_price: parseFloat((item.prices?.originalPrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            image_url: item.image?.imgUrl || '',
+            orders_count: parseInt((item.trade?.tradeDesc || '0').replace(/[^\d]/g, '')) || 0,
+            rating: parseFloat(item.evaluation?.starRating || 0),
+            is_free_shipping: false,
+          });
+        }
+      } catch (e) {}
+    }
+  }
+  
+  // ═══ الطبقة 4: regex على data-product-id ═══
+  if (products.length === 0) {
+    const itemRegex = /data-product-id="(\d+)"/g;
+    const matches = [...html.matchAll(itemRegex)];
     
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: npm install
+    for (const m of matches) {
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      products.push({
+        product_id: m[1],
+        title: '',
+        current_price: 0,
+        original_price: 0,
+        image_url: '',
+        orders_count: 0,
+        rating: 0,
+        is_free_shipping: false,
+      });
+      if (products.length >= 60) break;
+    }
+    console.log(`    📊 الطبقة 4 (regex): ${products.length} منتج`);
+  }
+  
+  // ═══ الطبقة 5: regex على روابط المنتجات ═══
+  if (products.length === 0) {
+    const linkRegex = /\/item\/(\d+)\.html/g;
+    const matches = [...html.matchAll(linkRegex)];
+    
+    for (const m of matches) {
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      products.push({
+        product_id: m[1],
+        title: '',
+        current_price: 0,
+        original_price: 0,
+        image_url: '',
+        orders_count: 0,
+        rating: 0,
+        is_free_shipping: false,
+      });
+      if (products.length >= 60) break;
+    }
+    console.log(`    📊 الطبقة 5 (links): ${products.length} منتج`);
+  }
+  
+  return products;
+}
+
+// ===== حفظ في Turso =====
+
+async function saveToTurso(categoryId, products) {
+  if (products.length === 0) return 0;
+  
+  const now = Date.now();
+  let saved = 0;
+  let skipped = 0;
+  
+  for (const p of products) {
+    if (!p.product_id) continue;
+    if (!p.title || p.title.length < 15) {
+      skipped++;
+      continue;
+    }
+    
+    try {
+      const imageHash = generateImageHash(p.image_url);
+      const tokens = extractTokens(p.title);
       
-      # المرحلة 1: Apify (بناء الفئات + منتجات أولية)
-      - name: Stage 1 - Apify (Categories + Products)
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-        run: node src/apify-fetcher.js
+      const trustScore = 
+        (p.rating >= 4.8 ? 40 : p.rating >= 4.5 ? 30 : p.rating >= 4.0 ? 20 : 10) +
+        (p.orders_count >= 10000 ? 30 : p.orders_count >= 1000 ? 20 : p.orders_count >= 100 ? 10 : 0) +
+        (p.is_free_shipping ? 10 : 0);
       
-      # المرحلة 2: ScrapingAnt (جلب المنتجات من الفئات)
-      - name: Stage 2 - ScrapingAnt (Products from Categories)
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
-          SCRAPERAPI_API_KEY: ${{ secrets.SCRAPERAPI_API_KEY }}
-        run: node src/scrapingant-fetcher.js
+      const valueScore = 
+        (p.rating / 5.0) * 35 +
+        Math.min(p.orders_count / 5000, 1.0) * 30 +
+        Math.max(0, 1 - (p.current_price / 100.0)) * 20;
+      
+      await db.execute({
+        sql: `INSERT INTO products_current 
+              (product_id, keyword, language, title, current_price, original_price,
+               orders_count, rating, image_url, seller_name, image_hash,
+               title_tokens, category, is_free_shipping, trust_score, value_score,
+               total_score, first_seen_at, last_updated_at, update_count)
+              VALUES (?, ?, 'en', ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT (product_id, keyword, language) DO UPDATE SET
+                current_price = excluded.current_price,
+                orders_count = excluded.orders_count,
+                rating = excluded.rating,
+                trust_score = excluded.trust_score,
+                value_score = excluded.value_score,
+                total_score = excluded.total_score,
+                last_updated_at = excluded.last_updated_at,
+                update_count = update_count + 1`,
+        args: [
+          p.product_id, `category_${categoryId}`, p.title, p.current_price, p.original_price,
+          p.orders_count, p.rating, p.image_url,
+          imageHash, tokens, 'general',
+          p.is_free_shipping ? 1 : 0,
+          trustScore, valueScore,
+          Math.round(trustScore * 0.5 + valueScore * 0.5),
+          now, now
+        ],
+      });
+      
+      saved++;
+    } catch (e) {}
+  }
+  
+  if (skipped > 0) {
+    console.log(`    ⏭️ تخطّي ${skipped} منتج بدون عنوان`);
+  }
+  
+  return saved;
+}
+
+// ===== اختيار الفئات =====
+
+async function pickNextCategories(count) {
+  const res = await db.execute({
+    sql: `SELECT category_id, name FROM category_map
+          ORDER BY 
+            CASE WHEN last_scraped_at IS NULL THEN 0 ELSE 1 END,
+            last_scraped_at ASC
+          LIMIT ?`,
+    args: [count],
+  });
+  return res.rows;
+}
+
+async function markScraped(categoryId) {
+  await db.execute({
+    sql: `UPDATE category_map SET last_scraped_at = ? WHERE category_id = ?`,
+    args: [Date.now(), categoryId],
+  });
+}
+
+// ===== الدالة الرئيسية =====
+
+async function main() {
+  const start = Date.now();
+  console.log('🚀 المرحلة 2: ScrapingAnt - جلب المنتجات من الفئات...\n');
+  
+  if (!SCRAPINGANT_KEY) {
+    console.error('❌ SCRAPINGANT_API_KEY غير موجود!');
+    process.exit(1);
+  }
+  
+  const categories = await pickNextCategories(CATEGORIES_PER_RUN);
+  
+  if (categories.length === 0) {
+    console.log('⚠️ category_map فارغ! شغّل apify-fetcher.js أولاً.');
+    return;
+  }
+  
+  console.log(`📋 سيتم معالجة ${categories.length} فئة\n`);
+  
+  let totalSaved = 0;
+  let successCount = 0;
+  let failCount = 0;
+  let sa = 0, spa = 0;
+  
+  for (const cat of categories) {
+    console.log(`🔍 فئة: ${cat.category_id} (${cat.name || 'بدون اسم'})`);
+    
+    try {
+      const { html, source } = await fetchWithFallback(cat.category_id);
+      if (source === 'scrapingant') sa++;
+      else spa++;
+      
+      const products = parseProducts(html);
+      console.log(`    🎯 إجمالي المنتجات المُحللة: ${products.length}`);
+      
+      const saved = await saveToTurso(cat.category_id, products);
+      console.log(`  ✅ ${saved} منتج مخزّن (${source})\n`);
+      
+      totalSaved += saved;
+      if (saved > 0) successCount++;
+      else failCount++;
+      
+      await markScraped(cat.category_id);
+      await new Promise(r => setTimeout(r, 3000));
+      
+    } catch (error) {
+      console.log(`  ❌ فشل: ${error.message}\n`);
+      failCount++;
+    }
+  }
+  
+  const mins = ((Date.now() - start) / 60000).toFixed(1);
+  console.log(`📊 تقرير المرحلة 2 (${mins} دقيقة):`);
+  console.log(`  ✅ نجح: ${successCount}/${categories.length}`);
+  console.log(`  ❌ فشل: ${failCount}`);
+  console.log(`  📦 مخزّن: ${totalSaved} منتج`);
+  console.log(`  🔵 ScrapingAnt: ${sa} طلب`);
+  console.log(`  🟠 ScraperAPI: ${spa} طلب`);
+  console.log(`  💰 استهلاك ScrapingAnt: ~${sa * 10} رصيد`);
+  
+  if (failCount > successCount) process.exit(1);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
