@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ذكي مع Failover كامل + Multi-Page + Batch
+// src/smart-pipeline.js - نظام ذكي مع Failover كامل + Multi-Page + Batch + استخراج محسّن
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -20,12 +20,28 @@ const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 const ENRICHMENT_KEYWORDS = 20;      // 20 كلمة/دورة
 const PAGES_PER_KEYWORD = 5;          // 5 صفحات/كلمة
 const MAX_FAILURES_BEFORE_SWITCH = 2; // بعد فشلين → تبديل دائم
+const APIFY_MAX_ITEMS = 50;           // ⭐ زيادة من 20 إلى 50
 
 const APIFY_SEEDS = [
   'bluetooth earphones', 'women dress', 'men t-shirt',
   'kitchen knife', 'makeup brush', 'yoga mat',
   'kids toy', 'car charger', 'dog collar', 'drill bit',
 ];
+
+// ⭐ كلمات عامة يجب تجاهلها عند استخراج الكلمات المفتاحية
+const COMMON_WORDS = new Set([
+  'for','the','and','with','from','new','hot','best','free','high','pro',
+  'sale','shipping','pcs','piece','set','plus','original','official','good',
+  'quality','smart','portable','wireless','digital','type','model','color',
+  'size','men','women','kids','baby','without','use','used','home',
+  'car','phone','case','made','material','style','fashion','design','item',
+  'top','super','ultra','mini','max','premium','fast','pack','box',
+  'support','compatible','inch','cm','mm','gb','tb','mah','watt',
+  'style','mode','option','version','series','edition','light','dark',
+  'black','white','red','blue','green','pink','gold','silver','gray',
+  'large','small','medium','big','little','long','short','wide','thick',
+  'pcs','pieces','piece','packs','pcs','items','kits','pack','box','bags',
+]);
 
 // ⭐ حالة المزودين (تُحدَّث أثناء التشغيل)
 const providerState = {
@@ -34,7 +50,7 @@ const providerState = {
 };
 
 // ═══════════════════════════════════════════
-// 1. استرجاع حالة المزودين من الدورة السابقة
+// 1. استرجاع حالة المزودين
 // ═══════════════════════════════════════════
 
 async function restoreProviderState() {
@@ -48,15 +64,12 @@ async function restoreProviderState() {
     const prev = JSON.parse(saved.rows[0].value);
     const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
     
-    // لا تسترجع إذا مضى أكثر من 24 ساعة (قد تجددت الأرصدة)
     if (ageHours > 24) {
       console.log('🔄 مضى 24+ ساعة — إعادة تعيين حالة المزودين');
       return;
     }
     
-    // ⭐ ScrapingAnt
     if (prev.scrapingant?.status === 'exhausted') {
-      // إذا تجاوز الشهر، قد تجدد الرصيد
       if (ageHours > 24 * 25) {
         console.log('🎁 قد تجدد رصيد ScrapingAnt — إعادة تعيين');
       } else {
@@ -66,7 +79,6 @@ async function restoreProviderState() {
       }
     }
     
-    // ⭐ ScraperAPI
     if (prev.scraperapi?.status === 'exhausted') {
       if (ageHours > 24 * 25) {
         console.log('🎁 قد تجدد رصيد ScraperAPI — إعادة تعيين');
@@ -83,7 +95,7 @@ async function restoreProviderState() {
 }
 
 // ═══════════════════════════════════════════
-// 2. حفظ حالة المزودين للدورة القادمة
+// 2. حفظ حالة المزودين
 // ═══════════════════════════════════════════
 
 async function saveProviderState() {
@@ -163,7 +175,7 @@ async function runApifyDiscovery() {
   
   for (const seed of APIFY_SEEDS) {
     try {
-      const items = await runApifyActor(seed, 20);
+      const items = await runApifyActor(seed, APIFY_MAX_ITEMS);
       if (!Array.isArray(items) || items.length === 0) continue;
       
       const result = await saveApifyProducts(items, seed);
@@ -187,7 +199,7 @@ async function runApifyDiscovery() {
 
 async function runEnrichment(isEmergency = false) {
   if (isEmergency) {
-    console.log('\n🚨 Emergency Mode - توليد variations من البيانات الحالية...');
+    console.log('\n🚨 Emergency Mode - توليد variations...');
     
     const crossVars = await generateCrossVariations();
     console.log(`  🔀 Cross-variations: ${crossVars.length}`);
@@ -202,7 +214,6 @@ async function runEnrichment(isEmergency = false) {
     console.log('\n🔍 Enrichment عبر ScrapingAnt/ScraperAPI...');
   }
   
-  // اختيار الكلمات
   const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS);
   console.log(`\n📋 ${keywords.length} كلمة للمعالجة (${PAGES_PER_KEYWORD} صفحات/كلمة)\n`);
   
@@ -217,10 +228,9 @@ async function runEnrichment(isEmergency = false) {
   let blocked = false;
   
   for (const row of keywords) {
-    // ⭐ فحص حالة المزودين قبل كل كلمة
     if (providerState.scrapingant.status !== 'active' && 
         providerState.scraperapi.status !== 'active') {
-      console.log(`\n⛔ كل المزودين غير متاحين — التوقف عن هذه الدورة`);
+      console.log(`\n⛔ كل المزودين غير متاحين — التوقف`);
       blocked = true;
       break;
     }
@@ -272,7 +282,7 @@ async function runEnrichment(isEmergency = false) {
   console.log(`  📦 مخزّن: ${totalSaved}`);
   console.log(`  🔵 ScrapingAnt: ${sa} | 🟠 ScraperAPI: ${spa}`);
   console.log(`  💰 استهلاك ScrapingAnt: ~${sa * 10} رصيد`);
-  if (blocked) console.log(`  ⛔ توقف مبكر بسبب فشل المزودين`);
+  if (blocked) console.log(`  ⛔ توقف مبكر`);
   
   return { totalSaved, blocked };
 }
@@ -326,22 +336,27 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// 8. حفظ منتجات Apify
+// 8. ⭐ حفظ منتجات Apify + استخراج محسّن
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword) {
   const now = Date.now();
   let saved = 0;
-  const derived = new Map();
   const statements = [];
+  
+  // فهارس الكلمات
+  const unigrams = new Map();
+  const bigrams = new Map();
+  const trigrams = new Map();
   
   for (const item of items) {
     if (!item.productId || !item.title) continue;
     if (item.title.length < 15) continue;
     
     const tokens = extractTokens(item.title);
-    const categoryPath = item.categoryPath || [];
+    const words = tokens.split(' ').filter(w => w.length >= 3 && !COMMON_WORDS.has(w));
     
+    // حفظ المنتج
     statements.push({
       sql: `INSERT OR IGNORE INTO products 
             (product_id, title, title_tokens, category_path,
@@ -350,7 +365,8 @@ async function saveApifyProducts(items, seedKeyword) {
              first_seen_at, last_updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'apify', ?, ?)`,
       args: [
-        String(item.productId), item.title, tokens, categoryPath.join(','),
+        String(item.productId), item.title, tokens,
+        (item.categoryPath || []).join(','),
         parseFloat(item.price || 0), parseFloat(item.originalPrice || 0),
         parseFloat(item.rating || 0), parseInt(item.soldCount || 0),
         item.imageUrl || '', generateImageHash(item.imageUrl),
@@ -358,16 +374,32 @@ async function saveApifyProducts(items, seedKeyword) {
       ],
     });
     
-    // استخراج Bigrams
-    const words = tokens.split(' ').filter(w => w.length >= 4);
+    // ⭐ Unigrams
+    for (const w of words) {
+      if (w.length < 4) continue;
+      unigrams.set(w, (unigrams.get(w) || 0) + 1);
+    }
+    
+    // ⭐ Bigrams
     for (let i = 0; i < words.length - 1; i++) {
       const bigram = `${words[i]} ${words[i + 1]}`;
-      if (bigram.length >= 10 && bigram.length <= 35) {
-        derived.set(bigram, (derived.get(bigram) || 0) + 1);
+      if (bigram.length >= 8 && bigram.length <= 40) {
+        bigrams.set(bigram, (bigrams.get(bigram) || 0) + 1);
+      }
+    }
+    
+    // ⭐ Trigrams
+    if (words.length >= 3) {
+      for (let i = 0; i < words.length - 2; i++) {
+        const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+        if (trigram.length >= 12 && trigram.length <= 55) {
+          trigrams.set(trigram, (trigrams.get(trigram) || 0) + 1);
+        }
       }
     }
   }
   
+  // حفظ المنتجات
   if (statements.length > 0) {
     try {
       const result = await db.batch(statements, 'write');
@@ -375,17 +407,42 @@ async function saveApifyProducts(items, seedKeyword) {
     } catch (e) {}
   }
   
-  // حفظ الكلمات
+  // ⭐ اختيار أفضل الكلمات
+  const candidates = [];
+  
+  // Trigrams
+  for (const [kw, freq] of trigrams) {
+    if (freq >= 2) candidates.push({ keyword: kw, score: freq * 3 });
+  }
+  
+  // Bigrams
+  for (const [kw, freq] of bigrams) {
+    if (freq >= 2) candidates.push({ keyword: kw, score: freq * 2 });
+  }
+  
+  // Unigrams
+  for (const [kw, freq] of unigrams) {
+    if (freq >= 3 && kw.length >= 5) {
+      candidates.push({ keyword: kw, score: freq });
+    }
+  }
+  
+  // رتّب حسب النقاط
+  candidates.sort((a, b) => b.score - a.score);
+  const top = candidates.slice(0, 15);
+  
+  // حفظ في القاعدة
   let newKeywords = 0;
-  for (const [kw, freq] of derived) {
-    if (freq < 2) continue;
-    const r = await db.execute({
-      sql: `INSERT OR IGNORE INTO keywords_pipeline 
-            (keyword, source, priority, created_at)
-            VALUES (?, 'apify_discovery', 5, ?)`,
-      args: [kw, now],
-    });
-    if (r.rowsAffected > 0) newKeywords++;
+  for (const c of top) {
+    try {
+      const r = await db.execute({
+        sql: `INSERT OR IGNORE INTO keywords_pipeline 
+              (keyword, category, source, priority, created_at)
+              VALUES (?, NULL, 'apify_discovery', 5, ?)`,
+        args: [c.keyword, now],
+      });
+      if (r.rowsAffected > 0) newKeywords++;
+    } catch (e) {}
   }
   
   return { saved, newKeywords };
@@ -419,7 +476,7 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// 10. ⭐ الجلب من ScrapingAnt (مع اكتشاف الأخطاء)
+// 10. الجلب من ScrapingAnt
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
@@ -438,7 +495,6 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
     const errText = await res.text().catch(() => '');
     const lowerErr = errText.toLowerCase();
     
-    // ⭐ نفاد الرصيد
     if (res.status === 402 || 
         lowerErr.includes('credit') || 
         lowerErr.includes('limit exceeded') ||
@@ -447,7 +503,6 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
       throw new Error('CREDIT_EXHAUSTED: ScrapingAnt');
     }
     
-    // ⭐ حظر / rate limit
     if (res.status === 403 || res.status === 429 ||
         lowerErr.includes('blocked') ||
         lowerErr.includes('forbidden')) {
@@ -461,7 +516,7 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 11. ⭐ الجلب من ScraperAPI (مع اكتشاف الأخطاء)
+// 11. الجلب من ScraperAPI
 // ═══════════════════════════════════════════
 
 async function fetchFromScraperAPI(keyword, page = 1) {
@@ -500,7 +555,7 @@ async function fetchFromScraperAPI(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 12. ⭐ التبديل الذكي بين المزودين
+// 12. التبديل الذكي بين المزودين
 // ═══════════════════════════════════════════
 
 async function fetchWithFallback(keyword, page = 1) {
@@ -511,13 +566,10 @@ async function fetchWithFallback(keyword, page = 1) {
     throw new Error('ALL_PROVIDERS_DOWN');
   }
   
-  // ⭐ ScrapingAnt أولاً
   if (saActive) {
     try {
       console.log(`      🔵 ScrapingAnt p${page}...`);
       const html = await fetchFromScrapingAnt(keyword, page);
-      
-      // نجح → صفّر العدّاد
       providerState.scrapingant.failures = 0;
       return { html, source: 'scrapingant' };
       
@@ -525,18 +577,18 @@ async function fetchWithFallback(keyword, page = 1) {
       providerState.scrapingant.failures++;
       
       if (e.message.includes('CREDIT_EXHAUSTED')) {
-        console.log(`      ⛔ ScrapingAnt: نفد الرصيد — تبديل دائم`);
+        console.log(`      ⛔ ScrapingAnt: نفد الرصيد`);
         providerState.scrapingant.status = 'exhausted';
         providerState.scrapingant.reason = 'credit_exhausted';
       } else if (e.message.includes('BLOCKED')) {
-        console.log(`      ⛔ ScrapingAnt: محظور — تبديل دائم`);
+        console.log(`      ⛔ ScrapingAnt: محظور`);
         providerState.scrapingant.status = 'blocked';
         providerState.scrapingant.reason = 'blocked';
       } else {
         console.log(`      ⚠️ ScrapingAnt: ${e.message.substring(0, 60)}`);
         
         if (providerState.scrapingant.failures >= MAX_FAILURES_BEFORE_SWITCH) {
-          console.log(`      ⛔ ScrapingAnt: ${providerState.scrapingant.failures} فشل متتالي — تبديل`);
+          console.log(`      ⛔ ScrapingAnt: ${providerState.scrapingant.failures} فشل`);
           providerState.scrapingant.status = 'failed';
           providerState.scrapingant.reason = 'max_failures';
         }
@@ -544,12 +596,10 @@ async function fetchWithFallback(keyword, page = 1) {
     }
   }
   
-  // ⭐ ScraperAPI كبديل
   if (providerState.scraperapi.status === 'active') {
     try {
       console.log(`      🟠 ScraperAPI p${page}...`);
       const html = await fetchFromScraperAPI(keyword, page);
-      
       providerState.scraperapi.failures = 0;
       return { html, source: 'scraperapi' };
       
@@ -771,10 +821,8 @@ async function main() {
   console.log('🧠 Smart Pipeline - نظام ذكي مع Failover\n');
   console.log('═'.repeat(55));
   
-  // استرجاع حالة المزودين
   await restoreProviderState();
   
-  // 1. فحص Apify
   const health = await checkApifyHealth();
   
   let result;
@@ -806,10 +854,8 @@ async function main() {
     };
   }
   
-  // حفظ حالة المزودين
   await saveProviderState();
   
-  // التقرير النهائي
   const stats = await db.execute(`
     SELECT 
       (SELECT COUNT(*) FROM products) as total_products,
@@ -833,11 +879,8 @@ async function main() {
   
   console.log(`\n🔌 حالة المزودين:`);
   console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.failures} فشل)`);
-  console.log(`     ${providerState.scrapingant.reason || 'OK'}`);
   console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.failures} فشل)`);
-  console.log(`     ${providerState.scraperapi.reason || 'OK'}`);
   
-  // حفظ حالة Apify
   await db.execute({
     sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
           VALUES ('apify_status', ?, ?)`,
