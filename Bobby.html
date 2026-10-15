@@ -1,68 +1,25 @@
-// src/apify-categories.js
-import fetch from 'node-fetch';
-import { createClient } from '@libsql/client';
+name: Fetch Category Map (Apify)
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # كل أحد 02:00 UTC
+  workflow_dispatch:
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-
-async function fetchCategoryMap() {
-  console.log('🗺️ جلب خريطة الفئات من Apify...\n');
-
-  const actorId = 'apt_marble~aliexpress-category-scraper';
-  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-  
-  const response = await fetch(runUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      country: 'US',
-      language: 'en',
-      includeSubcategories: true,
-    }),
-    timeout: 300000,
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Apify ${response.status}: ${err.substring(0, 200)}`);
-  }
-
-  const items = await response.json();
-  console.log(`📋 استُلم ${items.length} عنصر\n`);
-
-  if (items.length > 0) {
-    console.log(`🔍 نموذج بيانات:\n${JSON.stringify(items[0], null, 2).substring(0, 500)}\n`);
-  }
-
-  let inserted = 0;
-  for (const item of items) {
-    const catId = item.categoryId || item.id || item.cid;
-    if (!catId) continue;
+jobs:
+  fetch-categories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     
-    await db.execute({
-      sql: `INSERT OR REPLACE INTO category_map 
-            (category_id, name, name_en, parent_id, level, product_count)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [
-        String(catId),
-        item.name || item.nameEn || '',
-        item.nameEn || item.name || '',
-        item.parentId ? String(item.parentId) : null,
-        item.level || 1,
-        item.productCount || 0,
-      ],
-    });
-    inserted++;
-  }
-
-  console.log(`✅ تم حفظ ${inserted} فئة في category_map\n`);
-}
-
-fetchCategoryMap().catch(err => {
-  console.error('❌ خطأ:', err.message);
-  process.exit(1);
-});
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      
+      - name: Fetch category map
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: node src/apify-categories.js
