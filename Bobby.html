@@ -10,8 +10,7 @@ const db = createClient({
 
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const KEYWORDS_PER_RUN = 3;
-
-// ===== دوال مساعدة =====
+const MAX_ITEMS_PER_KEYWORD = 30; // ⚡ تقليل لعدم استهلاك الرصيد
 
 function generateImageHash(url) {
   if (!url) return null;
@@ -36,7 +35,7 @@ function detectCategory(title) {
   const t = ' ' + title.toLowerCase().replace(/[^\w\s]/g, ' ') + ' ';
   
   const cats = {
-    'electronics': ['earphone','headphone','speaker','charger','cable','usb','camera','drone','smart watch','phone case','screen protector','phone holder','power bank','earbuds','bluetooth','smartwatch','headset','selfie stick','tripod','sim card'],
+    'electronics': ['earphone','headphone','speaker','charger','cable','usb','camera','drone','smart watch','phone case','screen protector','phone holder','power bank','earbuds','bluetooth','smartwatch','headset','selfie stick','tripod','sim card','magnetic charger','wireless charger'],
     'fashion-women': ['women dress','women skirt','women blouse','women heels','women handbag','women bag','women jacket'],
     'fashion-men': ['men shirt','men jean','men sneaker','men wallet','men tie','men jacket'],
     'home-kitchen': ['kitchen','mug','knife','cookware','storage box','lamp','home decor','pillow','blanket'],
@@ -61,19 +60,19 @@ function detectCategory(title) {
   return 'general';
 }
 
-// ===== استدعاء Apify Actor =====
-
+// ===== استدعاء Apify Actor (kawsar) =====
 async function runApifyActor(keyword) {
-  console.log(`  🎭 Apify Actor: lukehunter/aliexpress-scraper`);
+  console.log(`  🎭 Apify: kawsar/aliexpress-search-scraper`);
   
-  const actorId = 'lukehunter~aliexpress-scraper';
+  const actorId = 'kawsar~aliexpress-search-scraper';
   const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
   
+  // الحقول الصحيحة بناءً على التوثيق
   const inputBody = {
-    searchQueries: [keyword],
-    maxResults: 100,
-    countryCode: 'US',
-    currency: 'USD',
+    keywords: [keyword],           // ← مصفوفة
+    maxItems: MAX_ITEMS_PER_KEYWORD,
+    maxPages: 1,
+    sort: 'orders',                // الأكثر مبيعاً
   };
   
   console.log(`  📤 Input: ${JSON.stringify(inputBody)}`);
@@ -91,92 +90,30 @@ async function runApifyActor(keyword) {
   }
   
   const items = await response.json();
-  console.log(`  📥 Apify response: ${Array.isArray(items) ? items.length : 'غير مصفوفة'} عنصر`);
+  console.log(`  📥 Apify: ${Array.isArray(items) ? items.length : 0} عنصر`);
   
-  // اطبع عينة من أول عنصر لفهم البنية
   if (Array.isArray(items) && items.length > 0) {
-    console.log(`  🔍 نموذج البيانات:`);
-    console.log(`     ${JSON.stringify(items[0]).substring(0, 300)}...`);
+    const sample = items[0];
+    console.log(`  🔍 نموذج: productId=${sample.productId}, title="${(sample.productTitle || '').substring(0, 40)}..."`);
   }
   
   return items;
 }
 
-// ===== تحويل بيانات Apify إلى صيغة موحدة =====
-
+// ===== تحويل بيانات kawsar إلى صيغة Turso =====
 function normalizeApifyItem(item) {
-  // Apify Actors المختلفة تُرجع حقولاً بأسماء مختلفة
-  // نحاول استخراج البيانات من أي بنية محتملة
-  
-  const productId = 
-    item.productId || 
-    item.itemId || 
-    item.id || 
-    item.product_id ||
-    (item.url ? item.url.match(/\/item\/(\d+)/)?.[1] : null);
-  
-  const title = 
-    item.title || 
-    item.name || 
-    item.productTitle ||
-    item.product_title || '';
-  
-  const price = 
-    parseFloat(item.price || 
-      item.salePrice || 
-      item.currentPrice ||
-      item.pricing?.sale_price || 
-      item.pricing?.current_price || 0);
-  
-  const originalPrice = 
-    parseFloat(item.originalPrice || 
-      item.listPrice || 
-      item.pricing?.original_price || 0);
-  
-  const imageUrl = 
-    item.image || 
-    item.imageUrl || 
-    item.mainImage ||
-    item.image_url ||
-    (Array.isArray(item.images) ? item.images[0] : '') || '';
-  
-  const ordersCount = 
-    parseInt(item.orders || 
-      item.ordersCount || 
-      item.sales || 
-      item.trade?.orders || 0);
-  
-  const rating = 
-    parseFloat(item.rating || 
-      item.stars || 
-      item.avgRating ||
-      item.evaluation?.rating || 0);
-  
-  const sellerName = 
-    item.sellerName || 
-    item.storeName ||
-    item.store?.name || 
-    item.seller?.name || '';
-  
-  const isFreeShipping = 
-    item.freeShipping === true || 
-    item.shipping?.free === true ||
-    item.isFreeShipping === true;
-  
   return {
-    product_id: productId ? String(productId) : null,
-    title: title,
-    current_price: price,
-    original_price: originalPrice,
-    image_url: imageUrl,
-    orders_count: ordersCount,
-    rating: rating,
-    seller_name: sellerName,
-    is_free_shipping: isFreeShipping,
+    product_id: item.productId ? String(item.productId) : null,
+    title: item.productTitle || '',
+    current_price: parseFloat(item.price || 0),
+    original_price: parseFloat(item.originalPrice || 0),
+    image_url: item.imageUrl || '',
+    orders_count: parseInt(item.orders || 0),
+    rating: parseFloat(item.rating || 0),
+    seller_name: '', // لا يوجد في هذا Actor
+    is_free_shipping: (item.shipping || '').toLowerCase().includes('free'),
   };
 }
-
-// ===== حفظ في Turso =====
 
 async function saveToTurso(keyword, products) {
   if (products.length === 0) return 0;
@@ -187,7 +124,6 @@ async function saveToTurso(keyword, products) {
   for (const p of products) {
     if (!p.product_id || !p.title) continue;
     if (p.title.length < 15) continue;
-    if (!/^\d+$/.test(p.product_id)) continue;
     
     try {
       const imageHash = generateImageHash(p.image_url);
@@ -240,8 +176,6 @@ async function saveToTurso(keyword, products) {
   return saved;
 }
 
-// ===== اختيار الكلمات التالية =====
-
 async function pickNextKeywords(count) {
   const res = await db.execute({
     sql: `SELECT keyword, category FROM keyword_rotation
@@ -267,11 +201,9 @@ async function markProcessed(keyword, success) {
   });
 }
 
-// ===== الدالة الرئيسية =====
-
 async function main() {
   const start = Date.now();
-  console.log('🎭 بدء الجلب من Apify (lukehunter Actor)...\n');
+  console.log('🎭 بدء الجلب من Apify (kawsar)...\n');
   
   if (!APIFY_TOKEN) {
     console.error('❌ APIFY_TOKEN غير موجود!');
@@ -292,13 +224,12 @@ async function main() {
       const items = await runApifyActor(row.keyword);
       
       if (!Array.isArray(items) || items.length === 0) {
-        console.log(`  ⚠️ لم يرجع Actor أي نتائج`);
+        console.log(`  ⚠️ 0 نتيجة`);
         failCount++;
         await markProcessed(row.keyword, false);
         continue;
       }
       
-      // تحويل كل عنصر
       const products = items
         .map(normalizeApifyItem)
         .filter(p => p.product_id && p.title && p.title.length > 15);
