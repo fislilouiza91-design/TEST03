@@ -1,99 +1,19 @@
-// src/deduplicate.js
-import fs from 'fs';
+ALTER TABLE products_current ADD COLUMN image_hash TEXT;
 
-const data = JSON.parse(fs.readFileSync('./config/categories.json', 'utf8'));
+ALTER TABLE products_current ADD COLUMN title_tokens TEXT;
 
-// أولويات الفئات (الأدق أولاً)
-// الكلمة تبقى في الفئة الأكثر تحديداً
-const categoryPriority = {
-  'watches_jewelry': 1,        // الأكثر تحديداً
-  'men_fashion': 2,
-  'women_fashion': 2,
-  'phones': 3,
-  'computer_office': 3,
-  'consumer_electronics': 4,
-  'sports_outdoors': 5,
-  'beauty_health': 5,
-  'home_kitchen': 6,
-  'kitchen_tools': 6,
-  // ... إلخ
-};
+ALTER TABLE products_current ADD COLUMN category TEXT;
 
-const seen = new Map();  // keyword -> { category, subcategory, priority }
-const cleanedCategories = [];
+ALTER TABLE products_current ADD COLUMN seller_id TEXT;
 
-// المرور الأول: تحديد أفضل فئة لكل كلمة
-for (const cat of data.categories) {
-  const catPriority = categoryPriority[cat.key] || 5;
-  
-  for (const [subName, keywords] of Object.entries(cat.subs)) {
-    for (const kw of keywords) {
-      const key = kw.toLowerCase().trim();
-      const existing = seen.get(key);
-      
-      // احتفظ بالكلمة في الفئة الأكثر تحديداً (أولوية أعلى = رقم أقل)
-      if (!existing || catPriority < existing.priority) {
-        seen.set(key, {
-          keyword: kw,
-          category: cat.name,
-          categoryKey: cat.key,
-          subcategory: subName,
-          priority: catPriority,
-        });
-      }
-    }
-  }
-}
+ALTER TABLE products_current ADD COLUMN shipping_cost REAL DEFAULT 0;
 
-// المرور الثاني: إعادة بناء الفئات مع إزالة التكرارات
-for (const cat of data.categories) {
-  const newSubs = {};
-  let hasKeywords = false;
-  
-  for (const [subName, keywords] of Object.entries(cat.subs)) {
-    const uniqueKeywords = [];
-    
-    for (const kw of keywords) {
-      const key = kw.toLowerCase().trim();
-      const winner = seen.get(key);
-      
-      // احتفظ بالكلمة فقط إذا كانت هي الفائزة في هذه الفئة
-      if (winner.categoryKey === cat.key) {
-        uniqueKeywords.push(kw);
-      }
-    }
-    
-    if (uniqueKeywords.length > 0) {
-      newSubs[subName] = uniqueKeywords;
-      hasKeywords = true;
-    }
-  }
-  
-  if (hasKeywords) {
-    cleanedCategories.push({
-      ...cat,
-      subs: newSubs,
-    });
-  }
-}
+ALTER TABLE products_current ADD COLUMN shipping_days INTEGER DEFAULT 0;
 
-// حساب الإجمالي
-let total = 0;
-cleanedCategories.forEach(cat => {
-  Object.values(cat.subs).forEach(kws => {
-    total += kws.length;
-  });
-});
+ALTER TABLE products_current ADD COLUMN trust_score REAL DEFAULT 0;
 
-const output = {
-  version: '1.0',
-  total_keywords: total,
-  categories: cleanedCategories,
-};
+ALTER TABLE products_current ADD COLUMN value_score REAL DEFAULT 0;
 
-fs.writeFileSync('./config/categories.json', JSON.stringify(output, null, 2));
+ALTER TABLE products_current ADD COLUMN trend_score REAL DEFAULT 0;
 
-console.log(`✅ تم تنظيف الملف:`);
-console.log(`  الفئات: ${cleanedCategories.length}`);
-console.log(`  الكلمات المفتاحية: ${total}`);
-console.log(`  التكرارات المحذوفة: ${seen.size === total ? 0 : 'راجع الملف'}`);
+ALTER TABLE products_current ADD COLUMN total_score REAL DEFAULT 0;
