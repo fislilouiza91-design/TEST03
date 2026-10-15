@@ -1,29 +1,12 @@
-name: Auto Fetch (Scheduled)
+SELECT COUNT(*) AS total FROM products_current;
 
-on:
-  schedule:
-    - cron: '0 */3 * * *'
-  workflow_dispatch:
+SELECT category, COUNT(*) AS count 
+FROM products_current 
+GROUP BY category;
 
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Fetch products (ScrapingAnt + ScraperAPI)
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
-          SCRAPERAPI_API_KEY: ${{ secrets.SCRAPERAPI_API_KEY }}
-        run: node src/category-fetcher.js
+SELECT product_id, title, current_price, category, trust_score
+FROM products_current 
+WHERE category IS NOT NULL
+ORDER BY updated_at DESC
+LIMIT 10;
+
