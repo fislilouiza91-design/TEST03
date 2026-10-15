@@ -1,38 +1,14 @@
-name: Auto Fetch (Two Stages)
+CREATE TABLE IF NOT EXISTS keyword_rotation (
+  keyword TEXT PRIMARY KEY,
+  category TEXT,
+  subcategory TEXT,
+  last_run_at INTEGER DEFAULT 0,
+  run_count INTEGER DEFAULT 0,
+  success_count INTEGER DEFAULT 0,
+  fail_count INTEGER DEFAULT 0,
+  priority INTEGER DEFAULT 5,
+  enabled INTEGER DEFAULT 1
+);
 
-on:
-  schedule:
-    - cron: '0 3 * * *'   # دورة واحدة يومياً
-  workflow_dispatch:
-
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: npm install
-      
-      # ═══════════════════════════════════════
-      # المرحلة 1: Apify (كلمات أصلية + استخراج بديلة)
-      # ═══════════════════════════════════════
-      - name: Stage 1 - Apify
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-        run: node src/apify-fetcher.js
-      
-      # ═══════════════════════════════════════
-      # المرحلة 2: ScrapingAnt (البحث بالكلمات البديلة)
-      # ═══════════════════════════════════════
-      - name: Stage 2 - ScrapingAnt (Search)
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
-        run: node src/scrapingant-search.js
+CREATE INDEX IF NOT EXISTS idx_rotation_derived 
+ON keyword_rotation(subcategory, last_run_at);
