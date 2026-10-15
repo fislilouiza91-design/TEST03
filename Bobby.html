@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ذكي مع Failover + Multi-Page Fetching
+// src/smart-pipeline.js - نظام ذكي مع Failover كامل + Multi-Page + Batch
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -13,17 +13,98 @@ const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 
-// ⭐ إعدادات الجلب المتقدم
-const EMERGENCY_KEYWORDS = 20;      // 20 كلمة/دورة
-const PAGES_PER_KEYWORD = 5;        // 5 صفحات/كلمة
+// ═══════════════════════════════════════════
+// الإعدادات
+// ═══════════════════════════════════════════
+
+const ENRICHMENT_KEYWORDS = 20;      // 20 كلمة/دورة
+const PAGES_PER_KEYWORD = 5;          // 5 صفحات/كلمة
+const MAX_FAILURES_BEFORE_SWITCH = 2; // بعد فشلين → تبديل دائم
+
 const APIFY_SEEDS = [
   'bluetooth earphones', 'women dress', 'men t-shirt',
   'kitchen knife', 'makeup brush', 'yoga mat',
   'kids toy', 'car charger', 'dog collar', 'drill bit',
 ];
 
+// ⭐ حالة المزودين (تُحدَّث أثناء التشغيل)
+const providerState = {
+  scrapingant: { status: 'active', failures: 0, reason: null },
+  scraperapi: { status: 'active', failures: 0, reason: null },
+};
+
 // ═══════════════════════════════════════════
-// 1. فحص صحة Apify
+// 1. استرجاع حالة المزودين من الدورة السابقة
+// ═══════════════════════════════════════════
+
+async function restoreProviderState() {
+  try {
+    const saved = await db.execute(
+      `SELECT value FROM system_state WHERE key = 'providers_status'`
+    );
+    
+    if (saved.rows.length === 0) return;
+    
+    const prev = JSON.parse(saved.rows[0].value);
+    const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
+    
+    // لا تسترجع إذا مضى أكثر من 24 ساعة (قد تجددت الأرصدة)
+    if (ageHours > 24) {
+      console.log('🔄 مضى 24+ ساعة — إعادة تعيين حالة المزودين');
+      return;
+    }
+    
+    // ⭐ ScrapingAnt
+    if (prev.scrapingant?.status === 'exhausted') {
+      // إذا تجاوز الشهر، قد تجدد الرصيد
+      if (ageHours > 24 * 25) {
+        console.log('🎁 قد تجدد رصيد ScrapingAnt — إعادة تعيين');
+      } else {
+        providerState.scrapingant.status = 'exhausted';
+        providerState.scrapingant.reason = prev.scrapingant.reason;
+        console.log(`⚠️ ScrapingAnt: لا يزال ${prev.scrapingant.status}`);
+      }
+    }
+    
+    // ⭐ ScraperAPI
+    if (prev.scraperapi?.status === 'exhausted') {
+      if (ageHours > 24 * 25) {
+        console.log('🎁 قد تجدد رصيد ScraperAPI — إعادة تعيين');
+      } else {
+        providerState.scraperapi.status = 'exhausted';
+        providerState.scraperapi.reason = prev.scraperapi.reason;
+        console.log(`⚠️ ScraperAPI: لا يزال ${prev.scraperapi.status}`);
+      }
+    }
+    
+  } catch (e) {
+    console.log(`⚠️ تعذّر استرجاع الحالة: ${e.message.substring(0, 50)}`);
+  }
+}
+
+// ═══════════════════════════════════════════
+// 2. حفظ حالة المزودين للدورة القادمة
+// ═══════════════════════════════════════════
+
+async function saveProviderState() {
+  try {
+    await db.execute({
+      sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
+            VALUES ('providers_status', ?, ?)`,
+      args: [
+        JSON.stringify({
+          scrapingant: providerState.scrapingant,
+          scraperapi: providerState.scraperapi,
+          savedAt: Date.now(),
+        }),
+        Date.now(),
+      ],
+    });
+  } catch (e) {}
+}
+
+// ═══════════════════════════════════════════
+// 3. فحص صحة Apify
 // ═══════════════════════════════════════════
 
 async function checkApifyHealth() {
@@ -46,7 +127,8 @@ async function checkApifyHealth() {
     
     if (!response.ok) {
       const err = await response.text();
-      if (err.includes('insufficient') || err.includes('limit') || err.includes('402') || err.includes('credit')) {
+      if (err.includes('insufficient') || err.includes('limit') || 
+          err.includes('402') || err.includes('credit') || err.includes('exhausted')) {
         console.log('  ❌ Apify: نفد الرصيد');
         return { healthy: false, reason: 'no_credit' };
       }
@@ -70,7 +152,7 @@ async function checkApifyHealth() {
 }
 
 // ═══════════════════════════════════════════
-// 2. Apify Discovery (النظام العادي)
+// 4. Apify Discovery
 // ═══════════════════════════════════════════
 
 async function runApifyDiscovery() {
@@ -100,37 +182,49 @@ async function runApifyDiscovery() {
 }
 
 // ═══════════════════════════════════════════
-// 3. Emergency Mode (Apify معطل أو Enrichment عادي)
+// 5. Enrichment / Emergency Mode
 // ═══════════════════════════════════════════
 
-async function runEmergencyMode(isEnrichment = false) {
-  if (!isEnrichment) {
-    console.log('\n🚨 Emergency Mode - استخدام الكلمات المتوفرة...');
+async function runEnrichment(isEmergency = false) {
+  if (isEmergency) {
+    console.log('\n🚨 Emergency Mode - توليد variations من البيانات الحالية...');
     
-    // توليد variations
-    console.log('\n🧬 توليد variations ذكية...');
     const crossVars = await generateCrossVariations();
-    console.log(`  🔀 Cross: ${crossVars.length}`);
+    console.log(`  🔀 Cross-variations: ${crossVars.length}`);
     
     const titleVars = await generateFromProductTitles();
-    console.log(`  📝 Titles: ${titleVars.length}`);
+    console.log(`  📝 من العناوين: ${titleVars.length}`);
     
     const allVars = [...crossVars, ...titleVars].slice(0, 50);
     const inserted = await saveVariations(allVars);
     console.log(`  ✅ ${inserted} كلمة أُضيفت`);
   } else {
-    console.log('\n🔍 Enrichment عبر ScrapingAnt (20 كلمة × 5 صفحات)...');
+    console.log('\n🔍 Enrichment عبر ScrapingAnt/ScraperAPI...');
   }
   
-  // اختيار كلمات
-  const keywords = await pickKeywordsFromDB(EMERGENCY_KEYWORDS);
-  console.log(`\n📋 ${keywords.length} كلمة للمعالجة\n`);
+  // اختيار الكلمات
+  const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS);
+  console.log(`\n📋 ${keywords.length} كلمة للمعالجة (${PAGES_PER_KEYWORD} صفحات/كلمة)\n`);
+  
+  if (keywords.length === 0) {
+    console.log('⚠️ لا توجد كلمات.');
+    return { totalSaved: 0 };
+  }
   
   let totalSaved = 0;
   let sa = 0, spa = 0;
   let totalRequests = 0;
+  let blocked = false;
   
   for (const row of keywords) {
+    // ⭐ فحص حالة المزودين قبل كل كلمة
+    if (providerState.scrapingant.status !== 'active' && 
+        providerState.scraperapi.status !== 'active') {
+      console.log(`\n⛔ كل المزودين غير متاحين — التوقف عن هذه الدورة`);
+      blocked = true;
+      break;
+    }
+    
     console.log(`\n🔍 "${row.keyword}"`);
     
     let keywordSaved = 0;
@@ -157,9 +251,16 @@ async function runEmergencyMode(isEnrichment = false) {
         await new Promise(r => setTimeout(r, 1200));
         
       } catch (error) {
+        if (error.message === 'ALL_PROVIDERS_DOWN') {
+          console.log(`      ⛔ كل المزودين فشلوا`);
+          blocked = true;
+          break;
+        }
         console.log(`      ❌ page ${page}: ${error.message.substring(0, 50)}`);
       }
     }
+    
+    if (blocked) break;
     
     console.log(`  📦 "${row.keyword}": ${keywordSaved} منتج`);
     totalSaved += keywordSaved;
@@ -167,16 +268,17 @@ async function runEmergencyMode(isEnrichment = false) {
     await markProcessed(row.keyword, keywordSaved > 0);
   }
   
-  console.log(`\n📊 Emergency/Enrichment:`);
+  console.log(`\n📊 Enrichment:`);
   console.log(`  📦 مخزّن: ${totalSaved}`);
   console.log(`  🔵 ScrapingAnt: ${sa} | 🟠 ScraperAPI: ${spa}`);
-  console.log(`  💰 رصيد ScrapingAnt: ~${sa * 10}`);
+  console.log(`  💰 استهلاك ScrapingAnt: ~${sa * 10} رصيد`);
+  if (blocked) console.log(`  ⛔ توقف مبكر بسبب فشل المزودين`);
   
-  return { totalSaved };
+  return { totalSaved, blocked };
 }
 
 // ═══════════════════════════════════════════
-// Apify Actor
+// 6. Apify Actor
 // ═══════════════════════════════════════════
 
 async function runApifyActor(keyword, maxItems = 20) {
@@ -201,7 +303,7 @@ async function runApifyActor(keyword, maxItems = 20) {
 }
 
 // ═══════════════════════════════════════════
-// دوال مساعدة
+// 7. دوال مساعدة
 // ═══════════════════════════════════════════
 
 function generateImageHash(url) {
@@ -224,15 +326,13 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// حفظ منتجات Apify
+// 8. حفظ منتجات Apify
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword) {
   const now = Date.now();
   let saved = 0;
   const derived = new Map();
-  
-  const BATCH_SIZE = 50;
   const statements = [];
   
   for (const item of items) {
@@ -292,7 +392,7 @@ async function saveApifyProducts(items, seedKeyword) {
 }
 
 // ═══════════════════════════════════════════
-// اختيار الكلمات
+// 9. اختيار الكلمات
 // ═══════════════════════════════════════════
 
 async function pickKeywordsFromDB(count) {
@@ -319,20 +419,8 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// Fetch مع Fallback + page
+// 10. ⭐ الجلب من ScrapingAnt (مع اكتشاف الأخطاء)
 // ═══════════════════════════════════════════
-
-async function fetchWithFallback(keyword, page = 1) {
-  try {
-    console.log(`      🔵 ScrapingAnt p${page}...`);
-    const html = await fetchFromScrapingAnt(keyword, page);
-    return { html, source: 'scrapingant' };
-  } catch (e) {
-    console.log(`      🟠 ScraperAPI p${page}...`);
-    const html = await fetchFromScraperAPI(keyword, page);
-    return { html, source: 'scraperapi' };
-  }
-}
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
@@ -343,10 +431,38 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
     'proxy_country': 'US',
     'wait_for_selector': '[data-product-id], [class*="search-item-card"], h3',
   });
+  
   const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 90000 });
-  if (!res.ok) throw new Error(`ScrapingAnt ${res.status}`);
+  
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    const lowerErr = errText.toLowerCase();
+    
+    // ⭐ نفاد الرصيد
+    if (res.status === 402 || 
+        lowerErr.includes('credit') || 
+        lowerErr.includes('limit exceeded') ||
+        lowerErr.includes('exhausted') ||
+        lowerErr.includes('out of')) {
+      throw new Error('CREDIT_EXHAUSTED: ScrapingAnt');
+    }
+    
+    // ⭐ حظر / rate limit
+    if (res.status === 403 || res.status === 429 ||
+        lowerErr.includes('blocked') ||
+        lowerErr.includes('forbidden')) {
+      throw new Error('BLOCKED: ScrapingAnt');
+    }
+    
+    throw new Error(`ScrapingAnt ${res.status}`);
+  }
+  
   return await res.text();
 }
+
+// ═══════════════════════════════════════════
+// 11. ⭐ الجلب من ScraperAPI (مع اكتشاف الأخطاء)
+// ═══════════════════════════════════════════
 
 async function fetchFromScraperAPI(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
@@ -356,20 +472,123 @@ async function fetchFromScraperAPI(keyword, page = 1) {
     'render': 'true',
     'country_code': 'us',
   });
+  
   const res = await fetch(`https://api.scraperapi.com?${params}`, { timeout: 90000 });
-  if (!res.ok) throw new Error(`ScraperAPI ${res.status}`);
+  
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    const lowerErr = errText.toLowerCase();
+    
+    if (res.status === 402 || 
+        lowerErr.includes('credit') || 
+        lowerErr.includes('limit exceeded') ||
+        lowerErr.includes('exhausted') ||
+        lowerErr.includes('run out')) {
+      throw new Error('CREDIT_EXHAUSTED: ScraperAPI');
+    }
+    
+    if (res.status === 403 || res.status === 429 ||
+        lowerErr.includes('blocked') ||
+        lowerErr.includes('forbidden')) {
+      throw new Error('BLOCKED: ScraperAPI');
+    }
+    
+    throw new Error(`ScraperAPI ${res.status}`);
+  }
+  
   return await res.text();
 }
 
 // ═══════════════════════════════════════════
-// Parser قوي (6 طبقات)
+// 12. ⭐ التبديل الذكي بين المزودين
+// ═══════════════════════════════════════════
+
+async function fetchWithFallback(keyword, page = 1) {
+  const saActive = providerState.scrapingant.status === 'active';
+  const spaActive = providerState.scraperapi.status === 'active';
+  
+  if (!saActive && !spaActive) {
+    throw new Error('ALL_PROVIDERS_DOWN');
+  }
+  
+  // ⭐ ScrapingAnt أولاً
+  if (saActive) {
+    try {
+      console.log(`      🔵 ScrapingAnt p${page}...`);
+      const html = await fetchFromScrapingAnt(keyword, page);
+      
+      // نجح → صفّر العدّاد
+      providerState.scrapingant.failures = 0;
+      return { html, source: 'scrapingant' };
+      
+    } catch (e) {
+      providerState.scrapingant.failures++;
+      
+      if (e.message.includes('CREDIT_EXHAUSTED')) {
+        console.log(`      ⛔ ScrapingAnt: نفد الرصيد — تبديل دائم`);
+        providerState.scrapingant.status = 'exhausted';
+        providerState.scrapingant.reason = 'credit_exhausted';
+      } else if (e.message.includes('BLOCKED')) {
+        console.log(`      ⛔ ScrapingAnt: محظور — تبديل دائم`);
+        providerState.scrapingant.status = 'blocked';
+        providerState.scrapingant.reason = 'blocked';
+      } else {
+        console.log(`      ⚠️ ScrapingAnt: ${e.message.substring(0, 60)}`);
+        
+        if (providerState.scrapingant.failures >= MAX_FAILURES_BEFORE_SWITCH) {
+          console.log(`      ⛔ ScrapingAnt: ${providerState.scrapingant.failures} فشل متتالي — تبديل`);
+          providerState.scrapingant.status = 'failed';
+          providerState.scrapingant.reason = 'max_failures';
+        }
+      }
+    }
+  }
+  
+  // ⭐ ScraperAPI كبديل
+  if (providerState.scraperapi.status === 'active') {
+    try {
+      console.log(`      🟠 ScraperAPI p${page}...`);
+      const html = await fetchFromScraperAPI(keyword, page);
+      
+      providerState.scraperapi.failures = 0;
+      return { html, source: 'scraperapi' };
+      
+    } catch (e) {
+      providerState.scraperapi.failures++;
+      
+      if (e.message.includes('CREDIT_EXHAUSTED')) {
+        console.log(`      ⛔ ScraperAPI: نفد الرصيد`);
+        providerState.scraperapi.status = 'exhausted';
+        providerState.scraperapi.reason = 'credit_exhausted';
+      } else if (e.message.includes('BLOCKED')) {
+        console.log(`      ⛔ ScraperAPI: محظور`);
+        providerState.scraperapi.status = 'blocked';
+        providerState.scraperapi.reason = 'blocked';
+      } else {
+        console.log(`      ⚠️ ScraperAPI: ${e.message.substring(0, 60)}`);
+        
+        if (providerState.scraperapi.failures >= MAX_FAILURES_BEFORE_SWITCH) {
+          providerState.scraperapi.status = 'failed';
+          providerState.scraperapi.reason = 'max_failures';
+        }
+      }
+      
+      throw e;
+    }
+  }
+  
+  throw new Error('ALL_PROVIDERS_DOWN');
+}
+
+// ═══════════════════════════════════════════
+// 13. Parser قوي (6 طبقات)
 // ═══════════════════════════════════════════
 
 function parseHTML(html) {
   const products = [];
   const seen = new Set();
   
-  // JSON-LD
+  // الطبقة 1: JSON-LD
   const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
   for (const m of ldMatches) {
     try {
@@ -392,7 +611,7 @@ function parseHTML(html) {
   }
   if (products.length > 0) console.log(`        📊 JSON-LD: ${products.length}`);
   
-  // _dida_config_
+  // الطبقة 2: _dida_config_
   if (products.length === 0) {
     const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
     if (jsonMatch) {
@@ -415,7 +634,7 @@ function parseHTML(html) {
     if (products.length > 0) console.log(`        📊 _dida_config_: ${products.length}`);
   }
   
-  // runParams
+  // الطبقة 3: runParams
   if (products.length === 0) {
     const runMatch = html.match(/window\.runParams\s*=\s*({.+?});/s);
     if (runMatch) {
@@ -438,7 +657,7 @@ function parseHTML(html) {
     if (products.length > 0) console.log(`        📊 runParams: ${products.length}`);
   }
   
-  // data-product-id + title
+  // الطبقة 4: data-product-id + title
   if (products.length === 0) {
     const patterns = [
       /data-product-id="(\d+)"[^>]*?title="([^"]{10,200})"/g,
@@ -458,7 +677,7 @@ function parseHTML(html) {
     if (products.length > 0) console.log(`        📊 title-explicit: ${products.length}`);
   }
   
-  // HTML structure (id + h3)
+  // الطبقة 5: HTML structure (id + h3)
   if (products.length === 0) {
     const linkTitlePattern = /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*>[\s\S]{0,1500}?<h[23][^>]*>([^<]{15,200})<\/h[23]>/g;
     const matches = [...html.matchAll(linkTitlePattern)];
@@ -472,7 +691,7 @@ function parseHTML(html) {
     if (products.length > 0) console.log(`        📊 html-structure: ${products.length}`);
   }
   
-  // Fallback: ID + Image
+  // الطبقة 6: Fallback
   if (products.length === 0) {
     const idRegex = /\/item\/(\d{10,})\.html/g;
     const ids = [...new Set([...html.matchAll(idRegex)].map(m => m[1]))];
@@ -508,7 +727,7 @@ function parseHTML(html) {
 }
 
 // ═══════════════════════════════════════════
-// حفظ Batch
+// 14. حفظ Batch
 // ═══════════════════════════════════════════
 
 async function saveProductsBatch(products, keyword) {
@@ -544,13 +763,16 @@ async function saveProductsBatch(products, keyword) {
 }
 
 // ═══════════════════════════════════════════
-// الدالة الرئيسية
+// 15. الدالة الرئيسية
 // ═══════════════════════════════════════════
 
 async function main() {
   const start = Date.now();
-  console.log('🧠 Smart Pipeline - نظام ذكي\n');
+  console.log('🧠 Smart Pipeline - نظام ذكي مع Failover\n');
   console.log('═'.repeat(55));
+  
+  // استرجاع حالة المزودين
+  await restoreProviderState();
   
   // 1. فحص Apify
   const health = await checkApifyHealth();
@@ -559,9 +781,13 @@ async function main() {
   
   if (health.healthy) {
     console.log('\n✅ Apify سليم → Discovery + Enrichment\n');
+    console.log('─'.repeat(55));
+    
     const discovery = await runApifyDiscovery();
+    
     console.log('\n' + '─'.repeat(55));
-    const enrichment = await runEmergencyMode(true);
+    
+    const enrichment = await runEnrichment(false);
     
     result = {
       mode: 'normal',
@@ -571,7 +797,7 @@ async function main() {
     };
   } else {
     console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
-    const emergency = await runEmergencyMode(false);
+    const emergency = await runEnrichment(true);
     
     result = {
       mode: 'emergency',
@@ -579,6 +805,9 @@ async function main() {
       emergencyProducts: emergency.totalSaved,
     };
   }
+  
+  // حفظ حالة المزودين
+  await saveProviderState();
   
   // التقرير النهائي
   const stats = await db.execute(`
@@ -596,10 +825,17 @@ async function main() {
   console.log(`${'═'.repeat(55)}`);
   console.log(`  🎯 الوضع: ${result.mode.toUpperCase()}`);
   if (result.mode === 'emergency') console.log(`  ⚠️ السبب: ${result.reason}`);
+  
   console.log(`\n📈 الحالة:`);
   console.log(`  📦 منتجات: ${s.total_products}`);
   console.log(`  📚 كلمات: ${s.total_keywords}`);
   console.log(`  ⏳ في الانتظار: ${s.pending}`);
+  
+  console.log(`\n🔌 حالة المزودين:`);
+  console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.failures} فشل)`);
+  console.log(`     ${providerState.scrapingant.reason || 'OK'}`);
+  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.failures} فشل)`);
+  console.log(`     ${providerState.scraperapi.reason || 'OK'}`);
   
   // حفظ حالة Apify
   await db.execute({
