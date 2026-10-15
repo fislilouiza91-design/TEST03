@@ -1,3 +1,167 @@
-DELETE FROM keywords_pipeline;
-DELETE FROM products;
-DELETE FROM categories;
+// src/keyword-variations.js - توليد variations ذكية
+import { createClient } from '@libsql/client';
+
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+// قائمة المعدّلات الشائعة
+const MODIFIERS = [
+  'wireless', 'portable', 'mini', 'pro', 'premium', 'smart',
+  'fast', 'rechargeable', 'foldable', 'adjustable', 'waterproof',
+  'bluetooth', 'usb', 'led', 'digital', 'automatic',
+];
+
+// قائمة الألوان الشائعة
+const COLORS = [
+  'black', 'white', 'blue', 'red', 'green', 'pink', 'gold', 'silver',
+];
+
+/**
+ * توليد variations من كلمة موجودة
+ */
+export async function generateVariations(baseKeyword) {
+  const variations = [];
+  const words = baseKeyword.split(' ').filter(w => w.length > 2);
+  
+  if (words.length === 0) return variations;
+  
+  // 1. إضافة modifier في البداية
+  for (const mod of MODIFIERS.slice(0, 3)) {
+    if (!baseKeyword.includes(mod)) {
+      variations.push(`${mod} ${baseKeyword}`);
+    }
+  }
+  
+  // 2. إضافة modifier في النهاية
+  for (const mod of ['pro', 'plus', 'set', 'kit'].slice(0, 2)) {
+    variations.push(`${baseKeyword} ${mod}`);
+  }
+  
+  // 3. إضافة لون
+  for (const color of COLORS.slice(0, 2)) {
+    variations.push(`${color} ${baseKeyword}`);
+  }
+  
+  // 4. عكس ترتيب الكلمات
+  if (words.length === 2) {
+    variations.push(`${words[1]} ${words[0]}`);
+  }
+  
+  return variations;
+}
+
+/**
+ * توليد variations بدمج كلمتين موجودتين
+ */
+export async function generateCrossVariations() {
+  // جلب كلمات من نفس الفئة
+  const categories = await db.execute(`
+    SELECT DISTINCT category FROM keywords_pipeline 
+    WHERE enabled = 1 AND category IS NOT NULL
+  `);
+  
+  const allVariations = [];
+  
+  for (const cat of categories.rows) {
+    const kws = await db.execute({
+      sql: `SELECT keyword FROM keywords_pipeline 
+            WHERE category = ? AND enabled = 1
+            ORDER BY RANDOM() LIMIT 20`,
+      args: [cat.category],
+    });
+    
+    const keywords = kws.rows.map(r => r.keyword);
+    
+    // دمج كلمات مختلفة
+    for (let i = 0; i < keywords.length; i++) {
+      const words1 = keywords[i].split(' ');
+      
+      for (let j = i + 1; j < keywords.length; j++) {
+        const words2 = keywords[j].split(' ');
+        
+        // خذ كلمة من كل واحدة
+        if (words1.length >= 1 && words2.length >= 1) {
+          const combined = `${words1[0]} ${words2[words2.length - 1]}`;
+          if (combined.length >= 8 && combined.length <= 40) {
+            allVariations.push({
+              keyword: combined,
+              category: cat.category,
+              source: 'cross_variation',
+            });
+          }
+        }
+      }
+      
+      if (allVariations.length >= 100) break;
+    }
+    
+    if (allVariations.length >= 100) break;
+  }
+  
+  return allVariations;
+}
+
+/**
+ * توليد variations من عناوين المنتجات
+ */
+export async function generateFromProductTitles(limit = 50) {
+  const products = await db.execute({
+    sql: `SELECT title_tokens, category_id 
+          FROM products 
+          WHERE title_tokens IS NOT NULL AND title_tokens != ''
+          ORDER BY last_updated_at DESC
+          LIMIT ?`,
+    args: [limit],
+  });
+  
+  const variations = [];
+  const tokenCount = new Map();
+  
+  for (const p of products.rows) {
+    const tokens = p.title_tokens.split(' ').filter(t => t.length >= 4);
+    
+    // Bigrams
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const bigram = `${tokens[i]} ${tokens[i + 1]}`;
+      if (bigram.length >= 10 && bigram.length <= 35) {
+        tokenCount.set(bigram, (tokenCount.get(bigram) || 0) + 1);
+      }
+    }
+  }
+  
+  // احتفظ بالكلمات المتكررة
+  for (const [kw, freq] of tokenCount) {
+    if (freq >= 3) {
+      variations.push({
+        keyword: kw,
+        category: null,
+        source: 'product_titles',
+      });
+    }
+  }
+  
+  return variations;
+}
+
+/**
+ * حفظ variations في keywords_pipeline
+ */
+export async function saveVariations(variations) {
+  let inserted = 0;
+  
+  for (const v of variations) {
+    try {
+      const result = await db.execute({
+        sql: `INSERT OR IGNORE INTO keywords_pipeline 
+              (keyword, category, source, priority, created_at)
+              VALUES (?, ?, ?, 7, ?)`,
+        args: [v.keyword.toLowerCase().trim(), v.category, v.source, Date.now()],
+      });
+      if (result.rowsAffected > 0) inserted++;
+    } catch (e) {}
+  }
+  
+  return inserted;
+}
