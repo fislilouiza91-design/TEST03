@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ذكي مع Failover + Seeds متغيرة + Round-Robin
+// src/smart-pipeline.js - نظام ذكي مع Failover + Seeds متغيرة + JSON Endpoint Test
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -17,20 +17,21 @@ const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 // الإعدادات
 // ═══════════════════════════════════════════
 
-const DISCOVERY_KEYWORDS = 10;        // 10 كلمات/دورة Discovery
-const ENRICHMENT_KEYWORDS = 20;       // 20 كلمة/دورة Enrichment
-const PAGES_PER_KEYWORD = 5;          // 5 صفحات/كلمة
+const DISCOVERY_KEYWORDS = 10;
+const ENRICHMENT_KEYWORDS = 50;       // ⭐ زيادة إلى 50
+const PAGES_PER_KEYWORD = 2;          // ⭐ تقليل إلى 2
 const MAX_FAILURES_BEFORE_SWITCH = 2;
 const APIFY_MAX_ITEMS = 50;
+const USE_JSON_ENDPOINT = true;       // ⭐ مفتاح التحكم
 
-// ⭐ Seeds احتياطية (لو القاعدة فارغة)
+// ⭐ Seeds احتياطية
 const FALLBACK_SEEDS = [
   'bluetooth earphones', 'women dress', 'men t-shirt',
   'kitchen knife', 'makeup brush', 'yoga mat',
   'kids toy', 'car charger', 'dog collar', 'drill bit',
 ];
 
-// ⭐ كلمات عامة يجب تجاهلها
+// ⭐ كلمات عامة
 const COMMON_WORDS = new Set([
   'for','the','and','with','from','new','hot','best','free','high','pro',
   'sale','shipping','pcs','piece','set','plus','original','official','good',
@@ -51,6 +52,13 @@ const providerState = {
   scraperapi: { status: 'active', failures: 0, reason: null },
 };
 
+// ⭐ حالة JSON Endpoint
+let jsonEndpointState = {
+  tested: false,
+  works: false,
+  testedAt: null,
+};
+
 // ═══════════════════════════════════════════
 // 1. استرجاع حالة المزودين
 // ═══════════════════════════════════════════
@@ -60,62 +68,45 @@ async function restoreProviderState() {
     const saved = await db.execute(
       `SELECT value FROM system_state WHERE key = 'providers_status'`
     );
-    
     if (saved.rows.length === 0) return;
     
     const prev = JSON.parse(saved.rows[0].value);
     const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
-    
-    if (ageHours > 24) {
-      console.log('🔄 مضى 24+ ساعة — إعادة تعيين حالة المزودين');
-      return;
-    }
+    if (ageHours > 24) return;
     
     if (prev.scrapingant?.status === 'exhausted' && ageHours < 24 * 25) {
       providerState.scrapingant.status = 'exhausted';
       providerState.scrapingant.reason = prev.scrapingant.reason;
       console.log(`⚠️ ScrapingAnt: لا يزال ${prev.scrapingant.status}`);
     }
-    
     if (prev.scraperapi?.status === 'exhausted' && ageHours < 24 * 25) {
       providerState.scraperapi.status = 'exhausted';
       providerState.scraperapi.reason = prev.scraperapi.reason;
       console.log(`⚠️ ScraperAPI: لا يزال ${prev.scraperapi.status}`);
     }
-    
-  } catch (e) {
-    console.log(`⚠️ تعذّر استرجاع الحالة`);
-  }
+  } catch (e) {}
 }
-
-// ═══════════════════════════════════════════
-// 2. حفظ حالة المزودين
-// ═══════════════════════════════════════════
 
 async function saveProviderState() {
   try {
     await db.execute({
       sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
             VALUES ('providers_status', ?, ?)`,
-      args: [
-        JSON.stringify({
-          scrapingant: providerState.scrapingant,
-          scraperapi: providerState.scraperapi,
-          savedAt: Date.now(),
-        }),
-        Date.now(),
-      ],
+      args: [JSON.stringify({
+        scrapingant: providerState.scrapingant,
+        scraperapi: providerState.scraperapi,
+        savedAt: Date.now(),
+      }), Date.now()],
     });
   } catch (e) {}
 }
 
 // ═══════════════════════════════════════════
-// 3. فحص صحة Apify
+// 2. فحص صحة Apify
 // ═══════════════════════════════════════════
 
 async function checkApifyHealth() {
   console.log('🏥 فحص صحة Apify...');
-  
   try {
     const actorId = 'apt_marble~aliexpress-search-scraper';
     const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
@@ -123,22 +114,16 @@ async function checkApifyHealth() {
     const response = await fetch(runUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        keyword: 'bluetooth earphones',
-        country: 'us',
-        maxItems: 1,
-      }),
+      body: JSON.stringify({ keyword: 'bluetooth earphones', country: 'us', maxItems: 1 }),
       timeout: 60000,
     });
     
     if (!response.ok) {
       const err = await response.text();
-      if (err.includes('insufficient') || err.includes('limit') || 
-          err.includes('402') || err.includes('credit') || err.includes('exhausted')) {
+      if (err.includes('insufficient') || err.includes('limit') || err.includes('402') || err.includes('credit')) {
         console.log('  ❌ Apify: نفد الرصيد');
         return { healthy: false, reason: 'no_credit' };
       }
-      console.log(`  ❌ Apify: ${response.status}`);
       return { healthy: false, reason: 'error' };
     }
     
@@ -147,10 +132,7 @@ async function checkApifyHealth() {
       console.log('  ✅ Apify: يعمل');
       return { healthy: true };
     }
-    
-    console.log('  ⚠️ Apify: يعمل لكن بدون نتائج');
     return { healthy: false, reason: 'empty' };
-    
   } catch (error) {
     console.log(`  ❌ Apify: ${error.message.substring(0, 60)}`);
     return { healthy: false, reason: 'network' };
@@ -158,7 +140,156 @@ async function checkApifyHealth() {
 }
 
 // ═══════════════════════════════════════════
-// 4. ⭐ اختيار Discovery Seeds (Round-Robin)
+// 3. ⭐ اختبار JSON Endpoint
+// ═══════════════════════════════════════════
+
+async function testJSONEndpoint() {
+  console.log('\n🧪 اختبار JSON Endpoint...');
+  
+  const testKeyword = 'bluetooth earphones';
+  const testUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(testKeyword)}.html?_format=json`;
+  
+  try {
+    const params = new URLSearchParams({
+      'x-api-key': SCRAPINGANT_KEY,
+      'url': testUrl,
+      'browser': 'false',          // ⚡ 1 رصيد فقط
+      'proxy_country': 'US',
+    });
+    
+    console.log(`  🌐 URL: ${testUrl}`);
+    const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 60000 });
+    
+    if (!res.ok) {
+      console.log(`  ❌ HTTP ${res.status}`);
+      return { works: false, reason: `HTTP ${res.status}` };
+    }
+    
+    const text = await res.text();
+    console.log(`  📄 Response: ${text.length.toLocaleString()} حرف`);
+    
+    // حاول تحليل JSON
+    try {
+      const data = JSON.parse(text);
+      console.log(`  ✅ JSON نجح!`);
+      
+      // ابحث عن المنتجات
+      const products = data?.items || data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
+      console.log(`  📦 ${products.length} منتج في JSON`);
+      
+      if (products.length > 0) {
+        console.log(`  🔍 نموذج: ${products[0]?.title?.displayTitle?.substring(0, 50) || 'N/A'}...`);
+        return { works: true, productsCount: products.length };
+      }
+      
+      return { works: false, reason: 'JSON موجود لكن بدون منتجات' };
+    } catch (e) {
+      // ليس JSON — ابحث عن JSON مدمج في HTML
+      console.log(`  ⚠️ ليس JSON خالص — بحث عن JSON مدمج...`);
+      
+      const jsonMatch = text.match(/window\._dida_config_\s*=\s*({.+?});/s);
+      if (jsonMatch) {
+        try {
+          const data = JSON.parse(jsonMatch[1]);
+          const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
+          console.log(`  ✅ JSON مدمج: ${items.length} منتج`);
+          return { works: items.length > 0, productsCount: items.length };
+        } catch (e2) {}
+      }
+      
+      return { works: false, reason: 'لا يوجد JSON' };
+    }
+  } catch (e) {
+    console.log(`  ❌ خطأ: ${e.message.substring(0, 60)}`);
+    return { works: false, reason: e.message };
+  }
+}
+
+// ═══════════════════════════════════════════
+// 4. ⭐ Fetch JSON Endpoint (إذا نجح)
+// ═══════════════════════════════════════════
+
+async function fetchFromJSONEndpoint(keyword, page = 1) {
+  const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?_format=json&page=${page}`;
+  
+  const params = new URLSearchParams({
+    'x-api-key': SCRAPINGANT_KEY,
+    'url': url,
+    'browser': 'false',          // ⚡ 1 رصيد فقط
+    'proxy_country': 'US',
+  });
+  
+  const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 60000 });
+  
+  if (!res.ok) {
+    throw new Error(`JSON Endpoint HTTP ${res.status}`);
+  }
+  
+  const text = await res.text();
+  
+  // حاول تحليل JSON
+  try {
+    const data = JSON.parse(text);
+    const items = data?.items || data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
+    return { items, source: 'json_endpoint' };
+  } catch (e) {
+    // ابحث عن JSON مدمج
+    const jsonMatch = text.match(/window\._dida_config_\s*=\s*({.+?});/s);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
+        return { items, source: 'json_embedded' };
+      } catch (e2) {}
+    }
+    throw new Error('لا يوجد JSON في الاستجابة');
+  }
+}
+
+// ═══════════════════════════════════════════
+// 5. تحويل JSON Items إلى Products
+// ═══════════════════════════════════════════
+
+function parseJSONItems(items) {
+  const products = [];
+  const seen = new Set();
+  
+  for (const item of items) {
+    const pid = item.productId || item.itemId || item.id;
+    if (!pid || seen.has(pid)) continue;
+    
+    const title = item.title?.displayTitle || item.title || item.name || '';
+    if (title.length < 10) continue;
+    
+    seen.add(pid);
+    
+    const price = parseFloat(
+      (item.prices?.salePrice?.formattedPrice || item.prices?.salePrice?.value || item.price || '0')
+        .toString().replace(/[^\d.]/g, '')
+    ) || 0;
+    
+    products.push({
+      product_id: String(pid),
+      title: title,
+      price: price,
+      original_price: parseFloat(
+        (item.prices?.originalPrice?.formattedPrice || item.originalPrice || '0')
+          .toString().replace(/[^\d.]/g, '')
+      ) || 0,
+      image_url: item.image?.imgUrl || item.imageUrl || item.image || '',
+      rating: parseFloat(item.evaluation?.starRating || item.rating || 0),
+      orders_count: parseInt(
+        (item.trade?.tradeDesc || item.soldCount || '0').toString().replace(/[^\d]/g, '')
+      ) || 0,
+      ships_from: item.trade?.shipsFrom || item.shipsFromCountry || null,
+    });
+  }
+  
+  return products;
+}
+
+// ═══════════════════════════════════════════
+// 6. اختيار Discovery Seeds
 // ═══════════════════════════════════════════
 
 async function pickDiscoverySeeds(count) {
@@ -170,36 +301,29 @@ async function pickDiscoverySeeds(count) {
           WHERE enabled = 1
           ORDER BY 
             CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            run_count ASC,
-            last_run_at ASC
+            run_count ASC, last_run_at ASC
           LIMIT ?`,
     args: [count * 3],
   });
   
-  // لو القاعدة فارغة → استخدم fallback
   if (existing.rows.length === 0) {
     console.log('  ⚠️ القاعدة فارغة — إضافة Fallback Seeds');
-    
     for (const seed of FALLBACK_SEEDS) {
       await db.execute({
-        sql: `INSERT OR IGNORE INTO keywords_pipeline 
-              (keyword, source, priority, created_at)
+        sql: `INSERT OR IGNORE INTO keywords_pipeline (keyword, source, priority, created_at)
               VALUES (?, 'fallback_seed', 1, ?)`,
         args: [seed, Date.now()],
       });
     }
-    
     const retry = await db.execute({
       sql: `SELECT keyword, category, source FROM keywords_pipeline
-            WHERE enabled = 1
-            ORDER BY run_count ASC, last_run_at ASC
-            LIMIT ?`,
+            WHERE enabled = 1 ORDER BY run_count ASC LIMIT ?`,
       args: [count],
     });
     return retry.rows;
   }
   
-  // ⭐ Round-Robin من الفئات
+  // Round-Robin
   const byCategory = new Map();
   for (const row of existing.rows) {
     const cat = row.category || 'unknown';
@@ -209,7 +333,6 @@ async function pickDiscoverySeeds(count) {
   
   const picked = [];
   const cats = [...byCategory.keys()];
-  
   while (picked.length < count && cats.length > 0) {
     let added = false;
     for (const cat of cats) {
@@ -227,7 +350,7 @@ async function pickDiscoverySeeds(count) {
 }
 
 // ═══════════════════════════════════════════
-// 5. Apify Discovery
+// 7. Apify Discovery
 // ═══════════════════════════════════════════
 
 async function runApifyDiscovery() {
@@ -242,7 +365,6 @@ async function runApifyDiscovery() {
   for (const seed of seeds) {
     try {
       console.log(`  🔍 "${seed.keyword}" ${seed.category ? `[${seed.category}]` : ''}`);
-      
       const items = await runApifyActor(seed.keyword, APIFY_MAX_ITEMS);
       
       if (!Array.isArray(items) || items.length === 0) {
@@ -255,11 +377,10 @@ async function runApifyDiscovery() {
       totalProducts += result.saved;
       totalKeywords += result.newKeywords;
       
-      console.log(`     ✅ ${result.saved} منتج جديد | ${result.newKeywords} كلمة`);
+      console.log(`     ✅ ${result.saved} منتج | ${result.newKeywords} كلمة`);
       
       await markProcessed(seed.keyword, result.saved > 0);
       await new Promise(r => setTimeout(r, 1000));
-      
     } catch (e) {
       console.log(`     ❌ ${e.message.substring(0, 50)}`);
       await markProcessed(seed.keyword, false);
@@ -270,55 +391,80 @@ async function runApifyDiscovery() {
 }
 
 // ═══════════════════════════════════════════
-// 6. Enrichment / Emergency Mode
+// 8. Enrichment (مع JSON Endpoint)
 // ═══════════════════════════════════════════
 
 async function runEnrichment(isEmergency = false) {
   if (isEmergency) {
     console.log('\n🚨 Emergency Mode - توليد variations...');
-    
     const crossVars = await generateCrossVariations();
-    console.log(`  🔀 Cross-variations: ${crossVars.length}`);
-    
+    console.log(`  🔀 Cross: ${crossVars.length}`);
     const titleVars = await generateFromProductTitles();
-    console.log(`  📝 من العناوين: ${titleVars.length}`);
-    
-    const allVars = [...crossVars, ...titleVars].slice(0, 50);
-    const inserted = await saveVariations(allVars);
+    console.log(`  📝 Titles: ${titleVars.length}`);
+    const inserted = await saveVariations([...crossVars, ...titleVars].slice(0, 50));
     console.log(`  ✅ ${inserted} كلمة أُضيفت`);
   } else {
-    console.log('\n🔍 Enrichment عبر ScrapingAnt/ScraperAPI...');
+    console.log('\n🔍 Enrichment...');
+  }
+  
+  // ⭐ اختبار JSON Endpoint مرة واحدة
+  if (USE_JSON_ENDPOINT && !jsonEndpointState.tested) {
+    const testResult = await testJSONEndpoint();
+    jsonEndpointState.tested = true;
+    jsonEndpointState.works = testResult.works;
+    jsonEndpointState.testedAt = Date.now();
+    
+    if (testResult.works) {
+      console.log(`  ✅ JSON Endpoint يعمل! التوفير: 90% من الرصيد`);
+    } else {
+      console.log(`  ❌ JSON Endpoint لا يعمل — استخدام HTML`);
+      console.log(`     السبب: ${testResult.reason}`);
+    }
   }
   
   const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS);
-  console.log(`\n📋 ${keywords.length} كلمة للمعالجة (${PAGES_PER_KEYWORD} صفحات/كلمة)\n`);
+  console.log(`\n📋 ${keywords.length} كلمة (${PAGES_PER_KEYWORD} صفحات/كلمة)\n`);
   
-  if (keywords.length === 0) {
-    console.log('⚠️ لا توجد كلمات.');
-    return { totalSaved: 0 };
-  }
+  if (keywords.length === 0) return { totalSaved: 0 };
   
   let totalSaved = 0;
-  let sa = 0, spa = 0;
-  let totalRequests = 0;
+  let sa = 0, spa = 0, json = 0;
   let blocked = false;
   
   for (const row of keywords) {
     if (providerState.scrapingant.status !== 'active' && 
         providerState.scraperapi.status !== 'active') {
-      console.log(`\n⛔ كل المزودين غير متاحين — التوقف`);
       blocked = true;
       break;
     }
     
     console.log(`\n🔍 "${row.keyword}"${row.category ? ` [${row.category}]` : ''}`);
-    
     let keywordSaved = 0;
     
     for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
       try {
+        // ⭐ استخدام JSON Endpoint إذا يعمل
+        if (jsonEndpointState.works && providerState.scrapingant.status === 'active') {
+          try {
+            const result = await fetchFromJSONEndpoint(row.keyword, page);
+            json++;
+            const products = parseJSONItems(result.items);
+            const saved = await saveProductsBatch(products, row.keyword);
+            
+            console.log(`      🟢 JSON p${page}: ${products.length} منتج، ${saved} مخزّن`);
+            keywordSaved += saved;
+            
+            if (products.length === 0) break;
+            await new Promise(r => setTimeout(r, 800));
+            continue;
+          } catch (jsonErr) {
+            console.log(`      ⚠️ JSON فشل: ${jsonErr.message.substring(0, 40)}`);
+            // استمر بـ HTML
+          }
+        }
+        
+        // HTML العادي
         const { html, source } = await fetchWithFallback(row.keyword, page);
-        totalRequests++;
         if (source === 'scrapingant') sa++;
         else spa++;
         
@@ -326,19 +472,13 @@ async function runEnrichment(isEmergency = false) {
         const saved = await saveProductsBatch(products, row.keyword);
         
         console.log(`      ✅ page ${page}: ${products.length} حلّل، ${saved} مخزّن (${source})`);
-        
         keywordSaved += saved;
         
-        if (products.length === 0) {
-          console.log(`      ⏹️ لا مزيد — التوقف`);
-          break;
-        }
-        
+        if (products.length === 0) break;
         await new Promise(r => setTimeout(r, 1200));
         
       } catch (error) {
         if (error.message === 'ALL_PROVIDERS_DOWN') {
-          console.log(`      ⛔ كل المزودين فشلوا`);
           blocked = true;
           break;
         }
@@ -347,24 +487,22 @@ async function runEnrichment(isEmergency = false) {
     }
     
     if (blocked) break;
-    
     console.log(`  📦 "${row.keyword}": ${keywordSaved} منتج`);
     totalSaved += keywordSaved;
-    
     await markProcessed(row.keyword, keywordSaved > 0);
   }
   
   console.log(`\n📊 Enrichment:`);
   console.log(`  📦 مخزّن: ${totalSaved}`);
-  console.log(`  🔵 ScrapingAnt: ${sa} | 🟠 ScraperAPI: ${spa}`);
-  console.log(`  💰 استهلاك ScrapingAnt: ~${sa * 10} رصيد`);
-  if (blocked) console.log(`  ⛔ توقف مبكر`);
+  console.log(`  🔵 ScrapingAnt (HTML): ${sa} | 🟠 ScraperAPI: ${spa} | 🟢 JSON: ${json}`);
+  console.log(`  💰 استهلاك ScrapingAnt: ~${(sa + json) * 10} رصيد (HTML)`);
+  if (json > 0) console.log(`  ⚡ رصيد JSON Endpoint: ~${json * 1} رصيد`);
   
   return { totalSaved, blocked };
 }
 
 // ═══════════════════════════════════════════
-// 7. Apify Actor
+// 9. Apify Actor
 // ═══════════════════════════════════════════
 
 async function runApifyActor(keyword, maxItems = 20) {
@@ -374,13 +512,7 @@ async function runApifyActor(keyword, maxItems = 20) {
   const response = await fetch(runUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      keyword,
-      country: 'us',
-      currency: 'USD',
-      sortOrder: 'best_match',
-      maxItems,
-    }),
+    body: JSON.stringify({ keyword, country: 'us', currency: 'USD', sortOrder: 'best_match', maxItems }),
     timeout: 300000,
   });
   
@@ -389,7 +521,7 @@ async function runApifyActor(keyword, maxItems = 20) {
 }
 
 // ═══════════════════════════════════════════
-// 8. دوال مساعدة
+// 10. دوال مساعدة
 // ═══════════════════════════════════════════
 
 function generateImageHash(url) {
@@ -412,7 +544,7 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// 9. حفظ منتجات Apify
+// 11. حفظ منتجات Apify
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword) {
@@ -445,7 +577,6 @@ async function saveApifyProducts(items, seedKeyword) {
       ],
     });
     
-    // استخراج Bigrams
     for (let i = 0; i < words.length - 1; i++) {
       const bigram = `${words[i]} ${words[i + 1]}`;
       if (bigram.length >= 10 && bigram.length <= 35) {
@@ -454,7 +585,6 @@ async function saveApifyProducts(items, seedKeyword) {
     }
   }
   
-  // حفظ المنتجات
   if (statements.length > 0) {
     try {
       const result = await db.batch(statements, 'write');
@@ -462,7 +592,6 @@ async function saveApifyProducts(items, seedKeyword) {
     } catch (e) {}
   }
   
-  // ⭐ أضف الكلمات المتكررة فقط (freq >= 2) — أولوية أقل (7)
   const sorted = [...derived.entries()]
     .filter(([_, freq]) => freq >= 2)
     .sort((a, b) => b[1] - a[1])
@@ -485,7 +614,7 @@ async function saveApifyProducts(items, seedKeyword) {
 }
 
 // ═══════════════════════════════════════════
-// 10. ⭐ اختيار Enrichment Keywords (Round-Robin)
+// 12. اختيار Enrichment Keywords
 // ═══════════════════════════════════════════
 
 async function pickKeywordsFromDB(count) {
@@ -494,16 +623,13 @@ async function pickKeywordsFromDB(count) {
           WHERE enabled = 1
           ORDER BY 
             CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            priority ASC,
-            run_count ASC,
-            last_run_at ASC
+            priority ASC, run_count ASC, last_run_at ASC
           LIMIT ?`,
     args: [count * 3],
   });
   
   if (all.rows.length === 0) return [];
   
-  // Round-Robin من الفئات
   const byCat = new Map();
   for (const row of all.rows) {
     const cat = row.category || 'unknown';
@@ -513,7 +639,6 @@ async function pickKeywordsFromDB(count) {
   
   const picked = [];
   const cats = [...byCat.keys()];
-  
   while (picked.length < count && cats.length > 0) {
     let added = false;
     for (const cat of cats) {
@@ -540,17 +665,14 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// 11. الجلب من ScrapingAnt
+// 13-14. الجلب مع Fallback
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
   const params = new URLSearchParams({
-    'x-api-key': SCRAPINGANT_KEY,
-    'url': url,
-    'browser': 'true',
-    'proxy_country': 'US',
-    'wait_for_selector': '[data-product-id], [class*="search-item-card"], h3',
+    'x-api-key': SCRAPINGANT_KEY, 'url': url, 'browser': 'true',
+    'proxy_country': 'US', 'wait_for_selector': '[data-product-id], [class*="search-item-card"], h3',
   });
   
   const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 90000 });
@@ -558,38 +680,23 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     const lowerErr = errText.toLowerCase();
-    
-    if (res.status === 402 || 
-        lowerErr.includes('credit') || 
-        lowerErr.includes('limit exceeded') ||
-        lowerErr.includes('exhausted') ||
-        lowerErr.includes('out of')) {
+    if (res.status === 402 || lowerErr.includes('credit') || lowerErr.includes('limit exceeded') ||
+        lowerErr.includes('exhausted') || lowerErr.includes('out of')) {
       throw new Error('CREDIT_EXHAUSTED: ScrapingAnt');
     }
-    
-    if (res.status === 403 || res.status === 429 ||
-        lowerErr.includes('blocked') ||
-        lowerErr.includes('forbidden')) {
+    if (res.status === 403 || res.status === 429 || lowerErr.includes('blocked')) {
       throw new Error('BLOCKED: ScrapingAnt');
     }
-    
     throw new Error(`ScrapingAnt ${res.status}`);
   }
   
   return await res.text();
 }
 
-// ═══════════════════════════════════════════
-// 12. الجلب من ScraperAPI
-// ═══════════════════════════════════════════
-
 async function fetchFromScraperAPI(keyword, page = 1) {
   const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
   const params = new URLSearchParams({
-    'api_key': SCRAPERAPI_KEY,
-    'url': url,
-    'render': 'true',
-    'country_code': 'us',
+    'api_key': SCRAPERAPI_KEY, 'url': url, 'render': 'true', 'country_code': 'us',
   });
   
   const res = await fetch(`https://api.scraperapi.com?${params}`, { timeout: 90000 });
@@ -597,38 +704,24 @@ async function fetchFromScraperAPI(keyword, page = 1) {
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     const lowerErr = errText.toLowerCase();
-    
-    if (res.status === 402 || 
-        lowerErr.includes('credit') || 
-        lowerErr.includes('limit exceeded') ||
-        lowerErr.includes('exhausted') ||
-        lowerErr.includes('run out')) {
+    if (res.status === 402 || lowerErr.includes('credit') || lowerErr.includes('limit exceeded') ||
+        lowerErr.includes('exhausted') || lowerErr.includes('run out')) {
       throw new Error('CREDIT_EXHAUSTED: ScraperAPI');
     }
-    
-    if (res.status === 403 || res.status === 429 ||
-        lowerErr.includes('blocked') ||
-        lowerErr.includes('forbidden')) {
+    if (res.status === 403 || res.status === 429 || lowerErr.includes('blocked')) {
       throw new Error('BLOCKED: ScraperAPI');
     }
-    
     throw new Error(`ScraperAPI ${res.status}`);
   }
   
   return await res.text();
 }
 
-// ═══════════════════════════════════════════
-// 13. التبديل الذكي بين المزودين
-// ═══════════════════════════════════════════
-
 async function fetchWithFallback(keyword, page = 1) {
   const saActive = providerState.scrapingant.status === 'active';
   const spaActive = providerState.scraperapi.status === 'active';
   
-  if (!saActive && !spaActive) {
-    throw new Error('ALL_PROVIDERS_DOWN');
-  }
+  if (!saActive && !spaActive) throw new Error('ALL_PROVIDERS_DOWN');
   
   if (saActive) {
     try {
@@ -636,26 +729,15 @@ async function fetchWithFallback(keyword, page = 1) {
       const html = await fetchFromScrapingAnt(keyword, page);
       providerState.scrapingant.failures = 0;
       return { html, source: 'scrapingant' };
-      
     } catch (e) {
       providerState.scrapingant.failures++;
-      
       if (e.message.includes('CREDIT_EXHAUSTED')) {
         console.log(`      ⛔ ScrapingAnt: نفد الرصيد`);
         providerState.scrapingant.status = 'exhausted';
-        providerState.scrapingant.reason = 'credit_exhausted';
       } else if (e.message.includes('BLOCKED')) {
-        console.log(`      ⛔ ScrapingAnt: محظور`);
         providerState.scrapingant.status = 'blocked';
-        providerState.scrapingant.reason = 'blocked';
-      } else {
-        console.log(`      ⚠️ ScrapingAnt: ${e.message.substring(0, 60)}`);
-        
-        if (providerState.scrapingant.failures >= MAX_FAILURES_BEFORE_SWITCH) {
-          console.log(`      ⛔ ScrapingAnt: ${providerState.scrapingant.failures} فشل`);
-          providerState.scrapingant.status = 'failed';
-          providerState.scrapingant.reason = 'max_failures';
-        }
+      } else if (providerState.scrapingant.failures >= MAX_FAILURES_BEFORE_SWITCH) {
+        providerState.scrapingant.status = 'failed';
       }
     }
   }
@@ -666,27 +748,13 @@ async function fetchWithFallback(keyword, page = 1) {
       const html = await fetchFromScraperAPI(keyword, page);
       providerState.scraperapi.failures = 0;
       return { html, source: 'scraperapi' };
-      
     } catch (e) {
       providerState.scraperapi.failures++;
-      
-      if (e.message.includes('CREDIT_EXHAUSTED')) {
-        console.log(`      ⛔ ScraperAPI: نفد الرصيد`);
-        providerState.scraperapi.status = 'exhausted';
-        providerState.scraperapi.reason = 'credit_exhausted';
-      } else if (e.message.includes('BLOCKED')) {
-        console.log(`      ⛔ ScraperAPI: محظور`);
-        providerState.scraperapi.status = 'blocked';
-        providerState.scraperapi.reason = 'blocked';
-      } else {
-        console.log(`      ⚠️ ScraperAPI: ${e.message.substring(0, 60)}`);
-        
-        if (providerState.scraperapi.failures >= MAX_FAILURES_BEFORE_SWITCH) {
-          providerState.scraperapi.status = 'failed';
-          providerState.scraperapi.reason = 'max_failures';
-        }
+      if (e.message.includes('CREDIT_EXHAUSTED')) providerState.scraperapi.status = 'exhausted';
+      else if (e.message.includes('BLOCKED')) providerState.scraperapi.status = 'blocked';
+      else if (providerState.scraperapi.failures >= MAX_FAILURES_BEFORE_SWITCH) {
+        providerState.scraperapi.status = 'failed';
       }
-      
       throw e;
     }
   }
@@ -695,14 +763,14 @@ async function fetchWithFallback(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 14. Parser قوي (6 طبقات)
+// 15. Parser HTML
 // ═══════════════════════════════════════════
 
 function parseHTML(html) {
   const products = [];
   const seen = new Set();
   
-  // الطبقة 1: JSON-LD
+  // JSON-LD
   const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
   for (const m of ldMatches) {
     try {
@@ -714,18 +782,15 @@ function parseHTML(html) {
           if (!pid || seen.has(pid) || !item.name) continue;
           seen.add(pid);
           products.push({
-            product_id: String(pid),
-            title: item.name,
-            price: parseFloat(item.offers?.price || 0),
-            image_url: item.image || '',
+            product_id: String(pid), title: item.name,
+            price: parseFloat(item.offers?.price || 0), image_url: item.image || '',
           });
         }
       }
     } catch (e) {}
   }
-  if (products.length > 0) console.log(`        📊 JSON-LD: ${products.length}`);
   
-  // الطبقة 2: _dida_config_
+  // _dida_config_
   if (products.length === 0) {
     const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
     if (jsonMatch) {
@@ -737,61 +802,16 @@ function parseHTML(html) {
           if (!pid || seen.has(pid) || !item.title?.displayTitle) continue;
           seen.add(pid);
           products.push({
-            product_id: String(pid),
-            title: item.title.displayTitle,
+            product_id: String(pid), title: item.title.displayTitle,
             price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
             image_url: item.image?.imgUrl || '',
           });
         }
       } catch (e) {}
     }
-    if (products.length > 0) console.log(`        📊 _dida_config_: ${products.length}`);
   }
   
-  // الطبقة 3: runParams
-  if (products.length === 0) {
-    const runMatch = html.match(/window\.runParams\s*=\s*({.+?});/s);
-    if (runMatch) {
-      try {
-        const data = JSON.parse(runMatch[1]);
-        const items = data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
-        for (const item of items) {
-          const pid = item.productId || item.itemId;
-          if (!pid || seen.has(pid) || !item.title?.displayTitle) continue;
-          seen.add(pid);
-          products.push({
-            product_id: String(pid),
-            title: item.title.displayTitle,
-            price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
-            image_url: item.image?.imgUrl || '',
-          });
-        }
-      } catch (e) {}
-    }
-    if (products.length > 0) console.log(`        📊 runParams: ${products.length}`);
-  }
-  
-  // الطبقة 4: data-product-id + title
-  if (products.length === 0) {
-    const patterns = [
-      /data-product-id="(\d+)"[^>]*?title="([^"]{10,200})"/g,
-      /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*?title="([^"]{10,200})"/g,
-    ];
-    for (const pattern of patterns) {
-      const matches = [...html.matchAll(pattern)];
-      for (const m of matches) {
-        const pid = m[1];
-        const title = (m[2] || '').trim().replace(/&amp;/g, '&');
-        if (!pid || !title || seen.has(pid)) continue;
-        seen.add(pid);
-        products.push({ product_id: pid, title, price: 0, image_url: '' });
-      }
-      if (products.length >= 30) break;
-    }
-    if (products.length > 0) console.log(`        📊 title-explicit: ${products.length}`);
-  }
-  
-  // الطبقة 5: HTML structure
+  // HTML structure
   if (products.length === 0) {
     const linkTitlePattern = /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*>[\s\S]{0,1500}?<h[23][^>]*>([^<]{15,200})<\/h[23]>/g;
     const matches = [...html.matchAll(linkTitlePattern)];
@@ -802,46 +822,13 @@ function parseHTML(html) {
       seen.add(pid);
       products.push({ product_id: pid, title, price: 0, image_url: '' });
     }
-    if (products.length > 0) console.log(`        📊 html-structure: ${products.length}`);
-  }
-  
-  // الطبقة 6: Fallback
-  if (products.length === 0) {
-    const idRegex = /\/item\/(\d{10,})\.html/g;
-    const ids = [...new Set([...html.matchAll(idRegex)].map(m => m[1]))];
-    
-    const imgRegex = /"(https:\/\/ae[^"]+\.(jpg|jpeg|png|webp))"/g;
-    const images = [...html.matchAll(imgRegex)].map(m => m[1]);
-    
-    const titleRegexes = [
-      /<h3[^>]*>([^<]{10,200})<\/h3>/g,
-      /data-title="([^"]{10,200})"/g,
-    ];
-    let titles = [];
-    for (const rx of titleRegexes) {
-      const m = [...html.matchAll(rx)].map(x => x[1].trim());
-      if (m.length > 3) { titles = m; break; }
-    }
-    
-    console.log(`        📊 Fallback: IDs=${ids.length}, Titles=${titles.length}`);
-    
-    for (let i = 0; i < ids.length && products.length < 60; i++) {
-      if (seen.has(ids[i])) continue;
-      seen.add(ids[i]);
-      products.push({
-        product_id: ids[i],
-        title: titles[i] ? titles[i].replace(/&amp;/g, '&') : `Product ${ids[i]}`,
-        price: 0,
-        image_url: images[i] || '',
-      });
-    }
   }
   
   return products;
 }
 
 // ═══════════════════════════════════════════
-// 15. حفظ Batch
+// 16. حفظ Batch
 // ═══════════════════════════════════════════
 
 async function saveProductsBatch(products, keyword) {
@@ -856,11 +843,8 @@ async function saveProductsBatch(products, keyword) {
              image_url, image_hash, source_keyword, source_type,
              first_seen_at, last_updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'scrapingant', ?, ?)`,
-      args: [
-        p.product_id, p.title, extractTokens(p.title), p.price,
-        p.image_url, generateImageHash(p.image_url),
-        keyword, now, now
-      ],
+      args: [p.product_id, p.title, extractTokens(p.title), p.price,
+        p.image_url, generateImageHash(p.image_url), keyword, now, now],
     }));
   
   if (statements.length === 0) return 0;
@@ -869,24 +853,21 @@ async function saveProductsBatch(products, keyword) {
   try {
     const result = await db.batch(statements, 'write');
     for (const r of result) if (r.rowsAffected > 0) inserted++;
-  } catch (e) {
-    console.error(`        ❌ ${e.message.substring(0, 60)}`);
-  }
+  } catch (e) {}
   
   return inserted;
 }
 
 // ═══════════════════════════════════════════
-// 16. الدالة الرئيسية
+// 17. الدالة الرئيسية
 // ═══════════════════════════════════════════
 
 async function main() {
   const start = Date.now();
-  console.log('🧠 Smart Pipeline - نظام ذكي مع Failover + Seeds متغيرة\n');
+  console.log('🧠 Smart Pipeline - نظام ذكي + JSON Endpoint\n');
   console.log('═'.repeat(55));
   
   await restoreProviderState();
-  
   const health = await checkApifyHealth();
   
   let result;
@@ -894,28 +875,15 @@ async function main() {
   if (health.healthy) {
     console.log('\n✅ Apify سليم → Discovery + Enrichment\n');
     console.log('─'.repeat(55));
-    
     const discovery = await runApifyDiscovery();
-    
     console.log('\n' + '─'.repeat(55));
-    
     const enrichment = await runEnrichment(false);
-    
-    result = {
-      mode: 'normal',
-      apifyProducts: discovery.totalProducts,
-      apifyKeywords: discovery.totalKeywords,
-      enrichmentProducts: enrichment.totalSaved,
-    };
+    result = { mode: 'normal', apifyProducts: discovery.totalProducts,
+      apifyKeywords: discovery.totalKeywords, enrichmentProducts: enrichment.totalSaved };
   } else {
     console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
     const emergency = await runEnrichment(true);
-    
-    result = {
-      mode: 'emergency',
-      reason: health.reason,
-      emergencyProducts: emergency.totalSaved,
-    };
+    result = { mode: 'emergency', reason: health.reason, emergencyProducts: emergency.totalSaved };
   }
   
   await saveProviderState();
@@ -934,22 +902,13 @@ async function main() {
   console.log(`📊 تقرير Smart Pipeline (${mins} دقيقة)`);
   console.log(`${'═'.repeat(55)}`);
   console.log(`  🎯 الوضع: ${result.mode.toUpperCase()}`);
-  if (result.mode === 'emergency') console.log(`  ⚠️ السبب: ${result.reason}`);
-  
-  console.log(`\n📈 الحالة:`);
   console.log(`  📦 منتجات: ${s.total_products}`);
   console.log(`  📚 كلمات: ${s.total_keywords}`);
   console.log(`  ⏳ في الانتظار: ${s.pending}`);
-  
   console.log(`\n🔌 حالة المزودين:`);
-  console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.failures} فشل)`);
-  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.failures} فشل)`);
-  
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
-          VALUES ('apify_status', ?, ?)`,
-    args: [JSON.stringify({ healthy: health.healthy, reason: health.reason, at: Date.now() }), Date.now()],
-  });
+  console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status}`);
+  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status}`);
+  console.log(`  🟢 JSON Endpoint: ${jsonEndpointState.works ? 'يعمل ✅' : 'لا يعمل ❌'}`);
 }
 
 main().catch(err => {
