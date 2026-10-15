@@ -1,3 +1,368 @@
-UPDATE keywords_pipeline SET category = 'Men Fashion' WHERE category = 'أزياء رجالية';UPDATE keywords_pipeline SET category = 'Home & Kitchen' WHERE category = 'المنزل والمطبخ';UPDATE keywords_pipeline SET category = 'Beauty & Health' WHERE category = 'الجمال والصحة';UPDATE keywords_pipeline SET category = 'Sports & Outdoors' WHERE category = 'الرياضة والهواء الطلق';UPDATE keywords_pipeline SET category = 'Toys & Kids' WHERE category = 'الأطفال والألعاب';UPDATE keywords_pipeline SET category = 'Automotive' WHERE category = 'السيارات والدراجات النارية';UPDATE keywords_pipeline SET category = 'Phones & Telecom' WHERE category = 'الهواتف والاتصالات';UPDATE keywords_pipeline SET category = 'Computer & Office' WHERE category = 'الكمبيوتر والمكتب';UPDATE keywords_pipeline SET category = 'Tools & Home Improvement' WHERE category = 'الأدوات والتحسين المنزلي';UPDATE keywords_pipeline SET category = 'Pet Supplies' WHERE category = 'الحيوانات الأليفة';UPDATE keywords_pipeline SET category = 'Sports & Entertainment' WHERE category = 'الرياضة والترفيه';UPDATE keywords_pipeline SET category = 'Food & Beverages' WHERE category = 'المواد الغذائية والمشروبات';UPDATE keywords_pipeline SET category = 'Luggage & Bags' WHERE category = 'الحقائب والأمتعة';UPDATE keywords_pipeline SET category = 'Watches & Jewelry' WHERE category = 'الساعات والمجوهرات';UPDATE keywords_pipeline SET category = 'Health & Personal Care' WHERE category = 'الصحة والرعاية الشخصية';UPDATE keywords_pipeline SET category = 'Furniture' WHERE category = 'الأثاث';UPDATE keywords_pipeline SET category = 'Chemicals' WHERE category = 'المواد الكيميائية';UPDATE keywords_pipeline SET category = 'Industrial Machinery' WHERE category = 'الآلات الصناعية';UPDATE keywords_pipeline SET category = 'Stationery & Office' WHERE category = 'القرطاسية والمكتب';UPDATE keywords_pipeline SET category = 'Kitchen Tools' WHERE category = 'أدوات المطبخ';
+// src/apify-fetcher.js - جلب + استخراج كلمات جديدة تلقائياً
+import fetch from 'node-fetch';
+import crypto from 'crypto';
+import { createClient } from '@libsql/client';
 
-SELECT DISTINCT category FROM keywords_pipeline ORDER BY category;
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
+const KEYWORDS_PER_RUN = 5;
+const MAX_ITEMS_PER_KEYWORD = 20;
+const NEW_KEYWORDS_PER_RUN = 15; // ⭐ كم كلمة جديدة نضيف كل دورة
+
+// ═══════════════════════════════════════════
+// دوال مساعدة
+// ═══════════════════════════════════════════
+
+function generateImageHash(url) {
+  if (!url) return null;
+  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
+  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
+  return null;
+}
+
+function extractTokens(title) {
+  if (!title) return '';
+  const stop = new Set(['for','the','and','with','from','new','hot','best','free','high','pro','sale','shipping','pcs','piece','set']);
+  return title.toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !stop.has(w) && !/^\d+$/.test(w))
+    .slice(0, 10)
+    .join(' ');
+}
+
+function detectCategoryFromPath(categoryPath) {
+  if (!categoryPath || !Array.isArray(categoryPath) || categoryPath.length === 0) {
+    return 'general';
+  }
+  const rootId = String(categoryPath[0]);
+  const rootMap = {
+    '44': 'Electronics', '3': 'Home & Kitchen', '100001540': 'Women Fashion',
+    '100001541': 'Men Fashion', '66': 'Beauty & Health', '18': 'Sports & Outdoors',
+    '26': 'Toys & Kids', '34': 'Automotive', '36': 'Pet Supplies',
+    '1420': 'Tools & Home Improvement', '509': 'Watches & Jewelry',
+    '1511': 'Jewelry', '200000348': 'Phones & Telecom', '7': 'Computer & Office',
+  };
+  return rootMap[rootId] || 'general';
+}
+
+function extractBrandFromTitle(title) {
+  if (!title) return null;
+  // البراند عادة أول كلمة أو ثاني كلمة
+  const first = title.trim().split(/\s+/)[0];
+  if (!first || first.length < 3 || first.length > 20) return null;
+  if (/^\d+$/.test(first)) return null;
+  if (first.match(/^[a-z]{2,3}$/i) && !/^[A-Z]/.test(first)) return null;
+  return first;
+}
+
+// ═══════════════════════════════════════════
+// Apify Actor
+// ═══════════════════════════════════════════
+
+async function runApifyActor(keyword) {
+  console.log(`  🎭 Apify...`);
+  
+  const actorId = 'apt_marble~aliexpress-search-scraper';
+  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
+  
+  const response = await fetch(runUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      keyword: keyword,
+      country: 'us',
+      currency: 'USD',
+      sortOrder: 'best_match',
+      maxItems: MAX_ITEMS_PER_KEYWORD,
+    }),
+    timeout: 300000,
+  });
+  
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Apify ${response.status}: ${err.substring(0, 150)}`);
+  }
+  
+  const items = await response.json();
+  console.log(`  📥 ${Array.isArray(items) ? items.length : 0} منتج`);
+  return items;
+}
+
+// ═══════════════════════════════════════════
+// حفظ المنتجات + استخراج الكلمات الجديدة
+// ═══════════════════════════════════════════
+
+async function saveProductsAndExtractKeywords(keyword, items) {
+  const now = Date.now();
+  let saved = 0;
+  const derivedKeywords = new Map();
+  
+  for (const item of items) {
+    if (!item.productId || !item.title) continue;
+    if (item.title.length < 15) continue;
+    
+    try {
+      const productId = String(item.productId);
+      const imageHash = generateImageHash(item.imageUrl);
+      const tokens = extractTokens(item.title);
+      const category = detectCategoryFromPath(item.categoryPath);
+      const brand = extractBrandFromTitle(item.title);
+      
+      // حساب الدرجات
+      const rating = parseFloat(item.rating || 0);
+      const ordersCount = parseInt(item.soldCount || 0);
+      const isFreeShipping = item.hasFreeShippingOffer === true;
+      
+      const trustScore = 
+        (rating >= 4.8 ? 40 : rating >= 4.5 ? 30 : rating >= 4.0 ? 20 : 10) +
+        (ordersCount >= 10000 ? 30 : ordersCount >= 1000 ? 20 : ordersCount >= 100 ? 10 : 0) +
+        (isFreeShipping ? 10 : 0);
+      
+      const valueScore = 
+        (rating / 5.0) * 35 +
+        Math.min(ordersCount / 5000, 1.0) * 30 +
+        Math.max(0, 1 - (parseFloat(item.price || 0) / 100.0)) * 20;
+      
+      await db.execute({
+        sql: `INSERT INTO products 
+              (product_id, global_product_id, sku_id, title, title_tokens,
+               category_id, category_path,
+               current_price_usd, original_price_usd, discount_percent,
+               rating, reviews_count, orders_count, orders_display,
+               is_free_shipping, ships_from_country,
+               shipping_days_min, shipping_days_max,
+               is_choice, is_promoted, is_top_rated,
+               image_url, image_hash,
+               product_url, source_keyword, source_type,
+               trust_score, value_score, total_score,
+               first_seen_at, last_updated_at, update_count)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT (product_id) DO UPDATE SET
+                current_price_usd = excluded.current_price_usd,
+                discount_percent = excluded.discount_percent,
+                rating = excluded.rating,
+                orders_count = excluded.orders_count,
+                trust_score = excluded.trust_score,
+                value_score = excluded.value_score,
+                total_score = excluded.total_score,
+                last_updated_at = excluded.last_updated_at,
+                update_count = update_count + 1`,
+        args: [
+          productId, item.globalProductId || null, item.skuId || null,
+          item.title, tokens,
+          null, item.categoryPath ? item.categoryPath.join(',') : null,
+          parseFloat(item.price || 0), parseFloat(item.originalPrice || 0),
+          parseFloat(item.discountPercent || 0),
+          rating, parseInt(item.reviews || 0), ordersCount,
+          item.soldCountDisplay || null,
+          isFreeShipping ? 1 : 0, item.shipsFromCountry || null,
+          parseInt(item.deliveryMinDays || 0), parseInt(item.deliveryMaxDays || 0),
+          item.isChoice ? 1 : 0, item.isPromoted ? 1 : 0, item.isTopRated ? 1 : 0,
+          item.imageUrl || '', imageHash,
+          item.productUrl || `https://www.aliexpress.com/item/${productId}.html`,
+          keyword, 'apify',
+          trustScore, valueScore,
+          Math.round(trustScore * 0.5 + valueScore * 0.5),
+          now, now
+        ],
+      });
+      
+      saved++;
+      
+      // ⭐ استخراج كلمات جديدة من العنوان
+      const words = tokens.split(' ').filter(w => w.length >= 4);
+      
+      // Bigrams
+      for (let i = 0; i < words.length - 1; i++) {
+        const bigram = `${words[i]} ${words[i + 1]}`;
+        if (bigram.length >= 8 && bigram.length <= 40) {
+          derivedKeywords.set(bigram, (derivedKeywords.get(bigram) || 0) + 1);
+        }
+      }
+      
+      // Trigrams (للكلمات الطويلة)
+      if (words.length >= 3) {
+        for (let i = 0; i < words.length - 2; i++) {
+          const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+          if (trigram.length >= 15 && trigram.length <= 60) {
+            derivedKeywords.set(trigram, (derivedKeywords.get(trigram) || 0) + 1);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`    ❌ ${e.message.substring(0, 60)}`);
+    }
+  }
+  
+  return { saved, derivedKeywords };
+}
+
+// ═══════════════════════════════════════════
+// إضافة الكلمات الجديدة
+// ═══════════════════════════════════════════
+
+async function addNewKeywords(derivedKeywords, parentCategory) {
+  // احتفظ بالكلمات التي ظهرت مرتين أو أكثر
+  const sorted = [...derivedKeywords.entries()]
+    .filter(([kw, freq]) => freq >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, NEW_KEYWORDS_PER_RUN);
+  
+  let inserted = 0;
+  
+  for (const [kw] of sorted) {
+    const result = await db.execute({
+      sql: `INSERT OR IGNORE INTO keywords_pipeline 
+            (keyword, category, subcategory, source, source_product_id, priority, created_at)
+            VALUES (?, ?, NULL, 'derived', NULL, 5, ?)`,
+      args: [kw, parentCategory, Date.now()],
+    });
+    
+    if (result.rowsAffected > 0) {
+      inserted++;
+    }
+  }
+  
+  return inserted;
+}
+
+// ═══════════════════════════════════════════
+// اختيار الكلمات (الأقل استخداماً + فئات متنوعة)
+// ═══════════════════════════════════════════
+
+async function pickNextKeywords(count) {
+  const categories = await db.execute({
+    sql: `SELECT category, 
+                 COUNT(*) as total,
+                 SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending,
+                 SUM(run_count) as total_runs
+          FROM keywords_pipeline
+          WHERE enabled = 1 AND category IS NOT NULL
+          GROUP BY category
+          ORDER BY total_runs ASC, pending DESC
+          LIMIT ?`,
+    args: [count],
+  });
+  
+  if (categories.rows.length === 0) return [];
+  
+  const picked = [];
+  for (const cat of categories.rows) {
+    const kw = await db.execute({
+      sql: `SELECT keyword, category FROM keywords_pipeline
+            WHERE enabled = 1 AND category = ?
+            ORDER BY 
+              CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
+              run_count ASC, last_run_at ASC
+            LIMIT 1`,
+      args: [cat.category],
+    });
+    
+    if (kw.rows.length > 0) picked.push(kw.rows[0]);
+  }
+  
+  return picked;
+}
+
+async function markProcessed(keyword, success) {
+  await db.execute({
+    sql: `UPDATE keywords_pipeline
+          SET last_run_at = ?, run_count = run_count + 1,
+              success_count = success_count + ?, fail_count = fail_count + ?
+          WHERE keyword = ?`,
+    args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword],
+  });
+}
+
+// ═══════════════════════════════════════════
+// الدالة الرئيسية
+// ═══════════════════════════════════════════
+
+async function main() {
+  const start = Date.now();
+  console.log('🎭 Apify (نظام ذاتي التغذية)...\n');
+  
+  if (!APIFY_TOKEN) {
+    console.error('❌ APIFY_TOKEN غير موجود!');
+    process.exit(1);
+  }
+  
+  const keywords = await pickNextKeywords(KEYWORDS_PER_RUN);
+  
+  if (keywords.length === 0) {
+    console.log('⚠️ لا توجد كلمات. شغّل init-pipeline.js أولاً.');
+    return;
+  }
+  
+  console.log(`📋 معالجة ${keywords.length} كلمة من فئات متنوعة:`);
+  keywords.forEach(k => console.log(`   • [${k.category}] ${k.keyword}`));
+  console.log('');
+  
+  let totalSaved = 0;
+  let totalNewKeywords = 0;
+  let successCount = 0;
+  
+  for (const row of keywords) {
+    console.log(`\n🔍 "${row.keyword}" [${row.category}]`);
+    
+    try {
+      const items = await runApifyActor(row.keyword);
+      
+      if (!Array.isArray(items) || items.length === 0) {
+        console.log(`  ⚠️ 0 نتيجة`);
+        await markProcessed(row.keyword, false);
+        continue;
+      }
+      
+      const { saved, derivedKeywords } = await saveProductsAndExtractKeywords(row.keyword, items);
+      totalSaved += saved;
+      console.log(`  ✅ ${saved} منتج مخزّن`);
+      
+      // ⭐ إضافة الكلمات الجديدة
+      const inserted = await addNewKeywords(derivedKeywords, row.category);
+      totalNewKeywords += inserted;
+      console.log(`  🆕 ${inserted} كلمة جديدة أُضيفت`);
+      
+      await markProcessed(row.keyword, saved > 0);
+      if (saved > 0) successCount++;
+      
+      await new Promise(r => setTimeout(r, 2000));
+      
+    } catch (error) {
+      console.log(`  ❌ فشل: ${error.message}`);
+      await markProcessed(row.keyword, false);
+    }
+  }
+  
+  // إحصائيات
+  const stats = await db.execute(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending,
+      SUM(CASE WHEN source = 'derived' THEN 1 ELSE 0 END) as derived
+    FROM keywords_pipeline
+  `);
+  
+  const s = stats.rows[0];
+  const mins = ((Date.now() - start) / 60000).toFixed(1);
+  
+  console.log(`\n📊 تقرير الدورة (${mins} دقيقة):`);
+  console.log(`  ✅ نجح: ${successCount}/${keywords.length}`);
+  console.log(`  📦 مخزّن: ${totalSaved} منتج`);
+  console.log(`  🆕 كلمات جديدة: ${totalNewKeywords}`);
+  console.log(`\n📈 حالة الكلمات:`);
+  console.log(`  📦 إجمالي: ${s.total}`);
+  console.log(`  ⏳ في الانتظار: ${s.pending}`);
+  console.log(`  🆕 مستخرجة: ${s.derived}`);
+  console.log(`  💰 تكلفة Apify: $${(totalSaved * 0.0007).toFixed(4)}`);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
