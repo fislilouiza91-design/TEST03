@@ -1,34 +1,119 @@
-name: Export Products to CSV
+// src/export-csv.js - تصدير المنتجات إلى CSV (محصّن)
+import fs from 'fs';
+import { createClient } from '@libsql/client';
 
-on:
-  workflow_dispatch:
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  export:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+function escapeCSV(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function rowToCSV(headers, row) {
+  return headers.map(h => escapeCSV(row[h])).join(',');
+}
+
+async function main() {
+  console.log('📊 تصدير المنتجات إلى CSV...\n');
+  
+  // 1. اجلب كل المنتجات
+  const result = await db.execute(`
+    SELECT 
+      product_id, title, category, keyword,
+      current_price, original_price, orders_count, rating,
+      seller_name, is_free_shipping, trust_score, value_score, total_score,
+      image_url, image_hash, title_tokens,
+      first_seen_at, last_updated_at
+    FROM products_current
+    ORDER BY last_updated_at DESC
+  `);
+  
+  console.log(`📦 إجمالي المنتجات: ${result.rows.length}\n`);
+  
+  if (result.rows.length === 0) {
+    console.log('⚠️ لا توجد منتجات للتصدير.');
+    return;
+  }
+  
+  // 2. ابنِ CSV
+  const headers = [
+    'product_id', 'title', 'category', 'keyword',
+    'current_price', 'original_price', 'orders_count', 'rating',
+    'seller_name', 'is_free_shipping', 'trust_score', 'value_score', 'total_score',
+    'image_url', 'image_hash', 'title_tokens',
+    'first_seen_at', 'last_updated_at',
+  ];
+  
+  const lines = [headers.join(',')];
+  
+  for (const row of result.rows) {
+    const formattedRow = {
+      ...row,
+      first_seen_at: row.first_seen_at ? new Date(Number(row.first_seen_at)).toISOString() : '',
+      last_updated_at: row.last_updated_at ? new Date(Number(row.last_updated_at)).toISOString() : '',
+    };
+    lines.push(rowToCSV(headers, formattedRow));
+  }
+  
+  const csvContent = '\uFEFF' + lines.join('\n');
+  fs.writeFileSync('products_export.csv', csvContent, 'utf8');
+  
+  const stats = fs.statSync('products_export.csv');
+  console.log(`✅ تم التصدير: products_export.csv`);
+  console.log(`📄 الحجم: ${(stats.size / 1024).toFixed(1)} KB`);
+  console.log(`📋 عدد الصفوف: ${result.rows.length}`);
+  
+  // 3. إحصائيات الفئات (محمية)
+  try {
+    const catStats = await db.execute(`
+      SELECT category, COUNT(*) as count
+      FROM products_current
+      GROUP BY category
+      ORDER BY count DESC
+    `);
     
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Export to CSV
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node src/export-csv.js
-        continue-on-error: true   # ✅ لا تفشل إذا حصل خطأ بسيط
-      
-      - name: Upload CSV as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: products-export
-          path: products_export.csv
-          retention-days: 30
-        if: always()   # ✅ ارفع حتى لو فشل السكريبت
+    console.log(`\n📂 التوزيع حسب الفئة:`);
+    catStats.rows.forEach(c => {
+      console.log(`  ${c.category || 'unknown'}: ${c.count}`);
+    });
+  } catch (e) {
+    console.log(`⚠️ تعذّر جلب إحصائيات الفئات: ${e.message.substring(0, 60)}`);
+  }
+  
+  // 4. إحصائيات روابط التشابه (محمية)
+  try {
+    const matchStats = await db.execute(`
+      SELECT COUNT(*) as count FROM product_matches
+    `);
+    console.log(`\n🔗 روابط التشابه: ${matchStats.rows[0].count}`);
+    
+    const matchTypes = await db.execute(`
+      SELECT match_type, COUNT(*) as count
+      FROM product_matches
+      GROUP BY match_type
+      ORDER BY count DESC
+    `);
+    
+    console.log(`📊 توزيع أنواع المطابقة:`);
+    matchTypes.rows.forEach(m => {
+      console.log(`  ${m.match_type}: ${m.count}`);
+    });
+  } catch (e) {
+    console.log(`\n⚠️ جدول product_matches غير موجود. لم يتم بناء الروابط بعد.`);
+    console.log(`   💡 الحل: شغّل scrapingant-search.js أولاً لبناء الروابط.`);
+  }
+  
+  console.log(`\n🎉 اكتمل التصدير بنجاح!`);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
