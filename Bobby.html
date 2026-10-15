@@ -1,35 +1,3 @@
-name: Auto Pipeline (Discovery + Enrichment)
-
-on:
-  schedule:
-    - cron: '0 3 * * *'   # كل يوم 03:00 UTC
-  workflow_dispatch:
-
-jobs:
-  pipeline:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: npm install
-      
-      # ═══ المرحلة 1: Apify Discovery ═══
-      - name: Stage 1 - Apify Discovery
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-        run: node src/apify-discovery.js
-      
-      # ═══ المرحلة 2: ScrapingAnt/ScraperAPI Enrichment ═══
-      - name: Stage 2 - ScrapingAnt/ScraperAPI Enrichment
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
-          SCRAPERAPI_API_KEY: ${{ secrets.SCRAPERAPI_API_KEY }}
-        run: node src/scrapingant-fetcher.js
+DELETE FROM keywords_pipeline;
+DELETE FROM products;
+DELETE FROM categories;
