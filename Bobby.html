@@ -1,4 +1,4 @@
-// src/apify-fetcher.js - المرحلة 1: Apify + استخراج الكلمات البديلة
+// src/scrapingant-search.js - المرحلة 2: البحث بالكلمات البديلة
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -8,9 +8,8 @@ const db = createClient({
   authToken: process.env.TURSO_TOKEN,
 });
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-const KEYWORDS_PER_RUN = 4;
-const MAX_ITEMS_PER_KEYWORD = 20;
+const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
+const KEYWORDS_PER_RUN = 5;
 
 // ═══════════════════════════════════════════
 // دوال مساعدة
@@ -34,79 +33,195 @@ function extractTokens(title) {
     .join(' ');
 }
 
-function detectCategory(categoryPath) {
-  if (!categoryPath || !Array.isArray(categoryPath) || categoryPath.length === 0) {
-    return 'general';
-  }
-  const rootId = String(categoryPath[0]);
-  const rootMap = {
-    '44': 'electronics', '3': 'home-kitchen', '100001540': 'fashion-women',
-    '100001541': 'fashion-men', '66': 'beauty', '18': 'sports',
-    '26': 'toys-kids', '34': 'automotive', '36': 'pets',
-    '1420': 'tools', '509': 'watches', '1511': 'jewelry',
-    '200000348': 'phones', '7': 'computer',
-  };
-  return rootMap[rootId] || 'general';
-}
-
 // ═══════════════════════════════════════════
-// استدعاء Apify Actor
+// الجلب من ScrapingAnt (Search Endpoint)
 // ═══════════════════════════════════════════
 
-async function runApifyActor(keyword) {
-  console.log(`  🎭 Apify Actor...`);
+async function fetchSearchFromScrapingAnt(keyword) {
+  const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html`;
   
-  const actorId = 'apt_marble~aliexpress-search-scraper';
-  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-  
-  const inputBody = {
-    keyword: keyword,
-    country: 'us',
-    currency: 'USD',
-    sortOrder: 'best_match',
-    maxItems: MAX_ITEMS_PER_KEYWORD,
-  };
-  
-  const response = await fetch(runUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(inputBody),
-    timeout: 300000,
+  const params = new URLSearchParams({
+    'x-api-key': SCRAPINGANT_KEY,
+    'url': url,
+    'browser': 'true',
+    'proxy_country': 'US',
+    'wait_for_selector': '[class*="search-item-card"], [class*="product-card"], [data-product-id]',
   });
   
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Apify ${response.status}: ${err.substring(0, 200)}`);
+  console.log(`    🌐 URL: ${url}`);
+  
+  const res = await fetch(`https://api.scrapingant.com/v2/general?${params}`, { timeout: 90000 });
+  
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`ScrapingAnt ${res.status}: ${err.substring(0, 150)}`);
   }
   
-  const items = await response.json();
-  console.log(`  📥 Apify: ${Array.isArray(items) ? items.length : 0} عنصر`);
+  const html = await res.text();
+  console.log(`    📄 HTML: ${html.length.toLocaleString()} حرف`);
   
-  if (Array.isArray(items) && items.length > 0) {
-    console.log(`  🔍 نموذج: ${items[0].title?.substring(0, 50)}...`);
-  }
-  
-  return items;
+  return html;
 }
 
 // ═══════════════════════════════════════════
-// حفظ المنتجات في Turso
+// استخراج المنتجات (5 طبقات)
+// ═══════════════════════════════════════════
+
+function parseSearchResults(html) {
+  const products = [];
+  const seen = new Set();
+  
+  // الطبقة 1: JSON-LD
+  const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
+  for (const m of ldMatches) {
+    try {
+      const data = JSON.parse(m[1]);
+      if (data['@type'] === 'ItemList' && data.itemListElement) {
+        for (const el of data.itemListElement) {
+          const item = el.item || el;
+          const pid = item.productID || item.sku;
+          if (!pid || seen.has(pid)) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.name || '',
+            current_price: parseFloat(item.offers?.price || 0),
+            original_price: 0,
+            image_url: item.image || '',
+            orders_count: 0,
+            rating: parseFloat(item.aggregateRating?.ratingValue || 0),
+            is_free_shipping: false,
+          });
+        }
+      }
+    } catch (e) {}
+  }
+  console.log(`    📊 JSON-LD: ${products.length}`);
+  
+  // الطبقة 2: _dida_config_
+  if (products.length === 0) {
+    const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
+    if (jsonMatch) {
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        const items = data?.data?.root?.fields?.mods?.itemList?.content || [];
+        console.log(`    📊 _dida_config_: ${items.length} عنصر خام`);
+        
+        for (const item of items) {
+          const pid = item.productId || item.itemId;
+          if (!pid || seen.has(pid)) continue;
+          if (!item.title?.displayTitle) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.title.displayTitle,
+            current_price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            original_price: parseFloat((item.prices?.originalPrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            image_url: item.image?.imgUrl || '',
+            orders_count: parseInt((item.trade?.tradeDesc || '0').replace(/[^\d]/g, '')) || 0,
+            rating: parseFloat(item.evaluation?.starRating || 0),
+            is_free_shipping: false,
+          });
+        }
+      } catch (e) {}
+    }
+  }
+  
+  // الطبقة 3: runParams
+  if (products.length === 0) {
+    const runMatch = html.match(/window\.runParams\s*=\s*({.+?});/s);
+    if (runMatch) {
+      try {
+        const data = JSON.parse(runMatch[1]);
+        const items = data?.data?.itemList?.content || data?.mods?.itemList?.content || [];
+        console.log(`    📊 runParams: ${items.length} عنصر خام`);
+        
+        for (const item of items) {
+          const pid = item.productId || item.itemId;
+          if (!pid || seen.has(pid)) continue;
+          if (!item.title?.displayTitle) continue;
+          seen.add(pid);
+          
+          products.push({
+            product_id: String(pid),
+            title: item.title.displayTitle,
+            current_price: parseFloat((item.prices?.salePrice?.formattedPrice || '0').replace(/[^\d.]/g, '')) || 0,
+            original_price: 0,
+            image_url: item.image?.imgUrl || '',
+            orders_count: parseInt((item.trade?.tradeDesc || '0').replace(/[^\d]/g, '')) || 0,
+            rating: parseFloat(item.evaluation?.starRating || 0),
+            is_free_shipping: false,
+          });
+        }
+      } catch (e) {}
+    }
+  }
+  
+  // الطبقة 4: data-product-id
+  if (products.length === 0) {
+    const itemRegex = /data-product-id="(\d+)"/g;
+    const matches = [...html.matchAll(itemRegex)];
+    console.log(`    📊 regex data-product-id: ${matches.length} مطابقة`);
+    
+    for (const m of matches) {
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      products.push({
+        product_id: m[1],
+        title: '',
+        current_price: 0,
+        original_price: 0,
+        image_url: '',
+        orders_count: 0,
+        rating: 0,
+        is_free_shipping: false,
+      });
+      if (products.length >= 60) break;
+    }
+  }
+  
+  // الطبقة 5: روابط المنتجات
+  if (products.length === 0) {
+    const linkRegex = /\/item\/(\d+)\.html/g;
+    const matches = [...html.matchAll(linkRegex)];
+    console.log(`    📊 regex روابط: ${matches.length} مطابقة`);
+    
+    for (const m of matches) {
+      if (seen.has(m[1])) continue;
+      seen.add(m[1]);
+      products.push({
+        product_id: m[1],
+        title: '',
+        current_price: 0,
+        original_price: 0,
+        image_url: '',
+        orders_count: 0,
+        rating: 0,
+        is_free_shipping: false,
+      });
+      if (products.length >= 60) break;
+    }
+  }
+  
+  return products;
+}
+
+// ═══════════════════════════════════════════
+// حفظ في Turso
 // ═══════════════════════════════════════════
 
 async function saveToTurso(keyword, products) {
-  if (products.length === 0) return 0;
-  
   const now = Date.now();
   let saved = 0;
   
   for (const p of products) {
-    if (!p.product_id || !p.title) continue;
-    if (p.title.length < 15) continue;
+    if (!p.product_id || !p.title || p.title.length < 15) continue;
     
     try {
       const imageHash = generateImageHash(p.image_url);
       const tokens = extractTokens(p.title);
-      const category = detectCategory(p.category_path);
       
       const trustScore = 
         (p.rating >= 4.8 ? 40 : p.rating >= 4.5 ? 30 : p.rating >= 4.0 ? 20 : 10) +
@@ -124,101 +239,38 @@ async function saveToTurso(keyword, products) {
                orders_count, rating, image_url, seller_name, image_hash,
                title_tokens, category, is_free_shipping, trust_score, value_score,
                total_score, first_seen_at, last_updated_at, update_count)
-              VALUES (?, ?, 'en', ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              VALUES (?, ?, 'en', ?, ?, ?, ?, ?, ?, '', ?, ?, 'general', ?, ?, ?, ?, ?, ?, 1)
               ON CONFLICT (product_id, keyword, language) DO UPDATE SET
                 current_price = excluded.current_price,
                 orders_count = excluded.orders_count,
-                rating = excluded.rating,
-                trust_score = excluded.trust_score,
-                value_score = excluded.value_score,
-                total_score = excluded.total_score,
                 last_updated_at = excluded.last_updated_at,
                 update_count = update_count + 1`,
         args: [
           p.product_id, keyword, p.title, p.current_price, p.original_price,
           p.orders_count, p.rating, p.image_url,
-          imageHash, tokens, category,
+          imageHash, tokens,
           p.is_free_shipping ? 1 : 0,
           trustScore, valueScore,
           Math.round(trustScore * 0.5 + valueScore * 0.5),
           now, now
         ],
       });
-      
       saved++;
-    } catch (e) {
-      console.error(`    ❌ ${e.message.substring(0, 60)}`);
-    }
+    } catch (e) {}
   }
   
   return saved;
 }
 
 // ═══════════════════════════════════════════
-// ⭐ استخراج الكلمات المفتاحية البديلة
+// اختيار الكلمات البديلة
 // ═══════════════════════════════════════════
 
-async function extractDerivedKeywords(products) {
-  const derived = new Map();
-  
-  for (const p of products) {
-    if (!p.title_tokens) continue;
-    
-    const tokens = p.title_tokens.split(' ').filter(t => t.length > 3);
-    if (tokens.length < 2) continue;
-    
-    // توليد ثنائيات (Bigrams) من الكلمات
-    for (let i = 0; i < tokens.length - 1; i++) {
-      const bigram = `${tokens[i]} ${tokens[i + 1]}`;
-      
-      if (derived.has(bigram)) {
-        derived.get(bigram).frequency++;
-      } else {
-        derived.set(bigram, {
-          keyword: bigram,
-          frequency: 1,
-          category: p.category || 'general',
-        });
-      }
-    }
-  }
-  
-  // احتفظ بالكلمات التي ظهرت مرتين أو أكثر
-  const validated = [...derived.values()].filter(d => d.frequency >= 2);
-  
-  return validated;
-}
-
-async function saveDerivedKeywords(keywords) {
-  let inserted = 0;
-  
-  for (const kw of keywords) {
-    try {
-      const result = await db.execute({
-        sql: `INSERT INTO keyword_rotation 
-              (keyword, category, subcategory, priority, enabled)
-              VALUES (?, ?, 'derived', 5, 1)
-              ON CONFLICT (keyword) DO NOTHING`,
-        args: [kw.keyword, kw.category],
-      });
-      inserted += result.rowsAffected || 0;
-    } catch (e) {}
-  }
-  
-  return inserted;
-}
-
-// ═══════════════════════════════════════════
-// اختيار الكلمات الأصلية
-// ═══════════════════════════════════════════
-
-async function pickNextKeywords(count) {
+async function pickDerivedKeywords(count) {
   const res = await db.execute({
-    sql: `SELECT keyword, category FROM keyword_rotation
-          WHERE enabled = 1 AND (subcategory IS NULL OR subcategory != 'derived')
-          ORDER BY 
-            CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            priority ASC, run_count ASC, last_run_at ASC
+    sql: `SELECT keyword FROM keyword_rotation
+          WHERE subcategory = 'derived' AND enabled = 1
+          ORDER BY run_count ASC, priority ASC, last_run_at ASC
           LIMIT ?`,
     args: [count],
   });
@@ -241,85 +293,57 @@ async function markProcessed(keyword, success) {
 
 async function main() {
   const start = Date.now();
-  console.log('🎭 المرحلة 1: Apify (كلمات أصلية + استخراج كلمات بديلة)...\n');
+  console.log('🔍 المرحلة 2: ScrapingAnt - البحث بالكلمات البديلة...\n');
   
-  if (!APIFY_TOKEN) {
-    console.error('❌ APIFY_TOKEN غير موجود!');
+  if (!SCRAPINGANT_KEY) {
+    console.error('❌ SCRAPINGANT_API_KEY غير موجود!');
     process.exit(1);
   }
   
-  const keywords = await pickNextKeywords(KEYWORDS_PER_RUN);
-  console.log(`📋 سيتم معالجة ${keywords.length} كلمة أصلية\n`);
+  const keywords = await pickDerivedKeywords(KEYWORDS_PER_RUN);
+  
+  if (keywords.length === 0) {
+    console.log('⚠️ لا توجد كلمات بديلة. شغّل apify-fetcher.js أولاً.');
+    return;
+  }
+  
+  console.log(`📋 سيتم البحث بـ ${keywords.length} كلمة بديلة\n`);
   
   let totalSaved = 0;
   let successCount = 0;
   let failCount = 0;
   
   for (const row of keywords) {
-    console.log(`\n🔍 "${row.keyword}" [${row.category}]`);
+    console.log(`🔍 "${row.keyword}"`);
     
     try {
-      const items = await runApifyActor(row.keyword);
-      
-      if (!Array.isArray(items) || items.length === 0) {
-        console.log(`  ⚠️ 0 نتيجة`);
-        failCount++;
-        await markProcessed(row.keyword, false);
-        continue;
-      }
-      
-      const products = items.map(item => ({
-        product_id: item.productId ? String(item.productId) : null,
-        title: item.title || '',
-        current_price: parseFloat(item.price || 0),
-        original_price: parseFloat(item.originalPrice || 0),
-        image_url: item.imageUrl || '',
-        orders_count: parseInt(item.soldCount || 0),
-        rating: parseFloat(item.rating || 0),
-        is_free_shipping: item.hasFreeShippingOffer === true,
-        category_path: item.categoryPath || [],
-      })).filter(p => p.product_id && p.title && p.title.length > 15);
+      const html = await fetchSearchFromScrapingAnt(row.keyword);
+      const products = parseSearchResults(html);
+      console.log(`    🎯 منتجات مُحللة: ${products.length}`);
       
       const saved = await saveToTurso(row.keyword, products);
-      console.log(`  ✅ ${saved} منتج مخزّن`);
+      console.log(`  ✅ ${saved} منتج مخزّن\n`);
       
       totalSaved += saved;
       if (saved > 0) successCount++;
       else failCount++;
       
       await markProcessed(row.keyword, saved > 0);
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
       
     } catch (error) {
-      console.log(`  ❌ فشل: ${error.message}`);
+      console.log(`  ❌ فشل: ${error.message}\n`);
       failCount++;
       await markProcessed(row.keyword, false);
     }
   }
   
-  // ⭐ استخراج الكلمات البديلة من جميع المنتجات
-  console.log('\n🔑 استخراج كلمات مفتاحية بديلة من المنتجات...');
-  const allProducts = await db.execute(`
-    SELECT title_tokens, category 
-    FROM products_current 
-    WHERE title_tokens IS NOT NULL AND title_tokens != ''
-    ORDER BY last_updated_at DESC
-    LIMIT 300
-  `);
-  
-  const derived = await extractDerivedKeywords(allProducts.rows);
-  const insertedDerived = await saveDerivedKeywords(derived);
-  console.log(`  ✅ ${insertedDerived} كلمة مفتاحية بديلة أُضيفت للدوران`);
-  
   const mins = ((Date.now() - start) / 60000).toFixed(1);
-  console.log(`\n📊 تقرير المرحلة 1 (${mins} دقيقة):`);
+  console.log(`📊 تقرير المرحلة 2 (${mins} دقيقة):`);
   console.log(`  ✅ نجح: ${successCount}/${keywords.length}`);
   console.log(`  ❌ فشل: ${failCount}`);
-  console.log(`  📦 مخزّن: ${totalSaved} منتج`);
-  console.log(`  🔑 كلمات بديلة جديدة: ${insertedDerived}`);
-  console.log(`  💰 تكلفة Apify: $${(totalSaved * 0.0007).toFixed(4)}`);
-  
-  if (failCount > successCount) process.exit(1);
+  console.log(`  📦 مخزّن: ${totalSaved}`);
+  console.log(`  💰 استهلاك ScrapingAnt: ~${(successCount + failCount) * 10} رصيد`);
 }
 
 main().catch(err => {
