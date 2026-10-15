@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ذكي مع Failover كامل + Multi-Page + Batch + استخراج محسّن
+// src/smart-pipeline.js - نظام ذكي مع Failover + Seeds متغيرة + استخراج محسّن
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -17,18 +17,23 @@ const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 // الإعدادات
 // ═══════════════════════════════════════════
 
-const ENRICHMENT_KEYWORDS = 20;      // 20 كلمة/دورة
+const DISCOVERY_KEYWORDS = 10;        // 10 كلمات/دورة Discovery
+const ENRICHMENT_KEYWORDS = 20;       // 20 كلمة/دورة Enrichment
 const PAGES_PER_KEYWORD = 5;          // 5 صفحات/كلمة
-const MAX_FAILURES_BEFORE_SWITCH = 2; // بعد فشلين → تبديل دائم
-const APIFY_MAX_ITEMS = 50;           // ⭐ زيادة من 20 إلى 50
+const MAX_FAILURES_BEFORE_SWITCH = 2;
+const APIFY_MAX_ITEMS = 50;
 
-const APIFY_SEEDS = [
+// ⭐ Seeds أولية (تُستخدم مرة واحدة فقط عند بداية القاعدة الفارغة)
+const INITIAL_SEEDS = [
   'bluetooth earphones', 'women dress', 'men t-shirt',
   'kitchen knife', 'makeup brush', 'yoga mat',
   'kids toy', 'car charger', 'dog collar', 'drill bit',
+  'wireless earbuds', 'smart watch', 'phone case',
+  'women handbag', 'men wallet', 'led light',
+  'coffee mug', 'running shoes', 'baby clothes', 'screwdriver set',
 ];
 
-// ⭐ كلمات عامة يجب تجاهلها عند استخراج الكلمات المفتاحية
+// ⭐ كلمات عامة يجب تجاهلها
 const COMMON_WORDS = new Set([
   'for','the','and','with','from','new','hot','best','free','high','pro',
   'sale','shipping','pcs','piece','set','plus','original','official','good',
@@ -37,13 +42,13 @@ const COMMON_WORDS = new Set([
   'car','phone','case','made','material','style','fashion','design','item',
   'top','super','ultra','mini','max','premium','fast','pack','box',
   'support','compatible','inch','cm','mm','gb','tb','mah','watt',
-  'style','mode','option','version','series','edition','light','dark',
+  'mode','option','version','series','edition','light','dark',
   'black','white','red','blue','green','pink','gold','silver','gray',
   'large','small','medium','big','little','long','short','wide','thick',
-  'pcs','pieces','piece','packs','pcs','items','kits','pack','box','bags',
+  'items','kits','bags','warranty','gift','sale','discount',
 ]);
 
-// ⭐ حالة المزودين (تُحدَّث أثناء التشغيل)
+// ⭐ حالة المزودين
 const providerState = {
   scrapingant: { status: 'active', failures: 0, reason: null },
   scraperapi: { status: 'active', failures: 0, reason: null },
@@ -69,28 +74,20 @@ async function restoreProviderState() {
       return;
     }
     
-    if (prev.scrapingant?.status === 'exhausted') {
-      if (ageHours > 24 * 25) {
-        console.log('🎁 قد تجدد رصيد ScrapingAnt — إعادة تعيين');
-      } else {
-        providerState.scrapingant.status = 'exhausted';
-        providerState.scrapingant.reason = prev.scrapingant.reason;
-        console.log(`⚠️ ScrapingAnt: لا يزال ${prev.scrapingant.status}`);
-      }
+    if (prev.scrapingant?.status === 'exhausted' && ageHours < 24 * 25) {
+      providerState.scrapingant.status = 'exhausted';
+      providerState.scrapingant.reason = prev.scrapingant.reason;
+      console.log(`⚠️ ScrapingAnt: لا يزال ${prev.scrapingant.status}`);
     }
     
-    if (prev.scraperapi?.status === 'exhausted') {
-      if (ageHours > 24 * 25) {
-        console.log('🎁 قد تجدد رصيد ScraperAPI — إعادة تعيين');
-      } else {
-        providerState.scraperapi.status = 'exhausted';
-        providerState.scraperapi.reason = prev.scraperapi.reason;
-        console.log(`⚠️ ScraperAPI: لا يزال ${prev.scraperapi.status}`);
-      }
+    if (prev.scraperapi?.status === 'exhausted' && ageHours < 24 * 25) {
+      providerState.scraperapi.status = 'exhausted';
+      providerState.scraperapi.reason = prev.scraperapi.reason;
+      console.log(`⚠️ ScraperAPI: لا يزال ${prev.scraperapi.status}`);
     }
     
   } catch (e) {
-    console.log(`⚠️ تعذّر استرجاع الحالة: ${e.message.substring(0, 50)}`);
+    console.log(`⚠️ تعذّر استرجاع الحالة`);
   }
 }
 
@@ -164,29 +161,100 @@ async function checkApifyHealth() {
 }
 
 // ═══════════════════════════════════════════
-// 4. Apify Discovery
+// ⭐ 4. اختيار Seeds متنوعة للـ Discovery
+// ═══════════════════════════════════════════
+
+async function pickDiscoverySeeds(count) {
+  console.log('  🎯 اختيار Seeds متنوعة...');
+  
+  // 1. جرّب keywords_pipeline أولاً (الأقل استخداماً)
+  const existing = await db.execute({
+    sql: `SELECT keyword, source FROM keywords_pipeline
+          WHERE enabled = 1
+          ORDER BY 
+            CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
+            run_count ASC,
+            last_run_at ASC
+          LIMIT ?`,
+    args: [count],
+  });
+  
+  // إذا كان لدينا كلمات كافية في القاعدة
+  if (existing.rows.length >= count) {
+    console.log(`  ✅ استخدام ${count} كلمة موجودة في القاعدة`);
+    return existing.rows.slice(0, count);
+  }
+  
+  // 2. القاعدة فارغة أو ناقصة → أضف Seeds أولية
+  console.log(`  📚 القاعدة فيها ${existing.rows.length} كلمة — إضافة Seeds أولية`);
+  
+  const existingSet = new Set(existing.rows.map(r => r.keyword));
+  const newSeeds = [];
+  
+  for (const seed of INITIAL_SEEDS) {
+    if (newSeeds.length + existing.rows.length >= count) break;
+    if (existingSet.has(seed)) continue;
+    
+    // تحقق أن الكلمة غير موجودة
+    const check = await db.execute({
+      sql: `SELECT keyword FROM keywords_pipeline WHERE keyword = ? LIMIT 1`,
+      args: [seed],
+    });
+    
+    if (check.rows.length === 0) {
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO keywords_pipeline 
+              (keyword, source, priority, created_at)
+              VALUES (?, 'initial_seed', 1, ?)`,
+        args: [seed, Date.now()],
+      });
+      newSeeds.push({ keyword: seed, source: 'initial_seed' });
+    }
+  }
+  
+  const allSeeds = [...existing.rows, ...newSeeds].slice(0, count);
+  console.log(`  ✅ ${allSeeds.length} Seed جاهز (${newSeeds.length} جديد)`);
+  
+  return allSeeds;
+}
+
+// ═══════════════════════════════════════════
+// 5. Apify Discovery (بديل محسّن)
 // ═══════════════════════════════════════════
 
 async function runApifyDiscovery() {
   console.log('\n🎭 Apify Discovery...');
   
+  const seeds = await pickDiscoverySeeds(DISCOVERY_KEYWORDS);
+  console.log(`\n  📋 ${seeds.length} كلمة للاكتشاف\n`);
+  
   let totalProducts = 0;
   let totalKeywords = 0;
   
-  for (const seed of APIFY_SEEDS) {
+  for (const seed of seeds) {
     try {
-      const items = await runApifyActor(seed, APIFY_MAX_ITEMS);
-      if (!Array.isArray(items) || items.length === 0) continue;
+      console.log(`  🔍 "${seed.keyword}" ${seed.source ? `[${seed.source}]` : ''}`);
       
-      const result = await saveApifyProducts(items, seed);
+      const items = await runApifyActor(seed.keyword, APIFY_MAX_ITEMS);
+      
+      if (!Array.isArray(items) || items.length === 0) {
+        console.log(`     ⚠️ 0 نتيجة`);
+        await markProcessed(seed.keyword, false);
+        continue;
+      }
+      
+      const result = await saveApifyProducts(items, seed.keyword);
       totalProducts += result.saved;
       totalKeywords += result.newKeywords;
       
-      console.log(`  ✅ "${seed}": ${result.saved} منتج | ${result.newKeywords} كلمة`);
+      console.log(`     ✅ ${result.saved} منتج جديد | ${result.newKeywords} كلمة`);
       
+      await markProcessed(seed.keyword, result.saved > 0);
       await new Promise(r => setTimeout(r, 1000));
+      
     } catch (e) {
-      console.log(`  ❌ "${seed}": ${e.message.substring(0, 50)}`);
+      console.log(`     ❌ ${e.message.substring(0, 50)}`);
+      await markProcessed(seed.keyword, false);
     }
   }
   
@@ -194,7 +262,7 @@ async function runApifyDiscovery() {
 }
 
 // ═══════════════════════════════════════════
-// 5. Enrichment / Emergency Mode
+// 6. Enrichment / Emergency Mode
 // ═══════════════════════════════════════════
 
 async function runEnrichment(isEmergency = false) {
@@ -288,7 +356,7 @@ async function runEnrichment(isEmergency = false) {
 }
 
 // ═══════════════════════════════════════════
-// 6. Apify Actor
+// 7. Apify Actor
 // ═══════════════════════════════════════════
 
 async function runApifyActor(keyword, maxItems = 20) {
@@ -313,7 +381,7 @@ async function runApifyActor(keyword, maxItems = 20) {
 }
 
 // ═══════════════════════════════════════════
-// 7. دوال مساعدة
+// 8. دوال مساعدة
 // ═══════════════════════════════════════════
 
 function generateImageHash(url) {
@@ -336,7 +404,7 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// 8. ⭐ حفظ منتجات Apify + استخراج محسّن
+// 9. حفظ منتجات Apify + استخراج محسّن
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword) {
@@ -344,7 +412,6 @@ async function saveApifyProducts(items, seedKeyword) {
   let saved = 0;
   const statements = [];
   
-  // فهارس الكلمات
   const unigrams = new Map();
   const bigrams = new Map();
   const trigrams = new Map();
@@ -356,7 +423,6 @@ async function saveApifyProducts(items, seedKeyword) {
     const tokens = extractTokens(item.title);
     const words = tokens.split(' ').filter(w => w.length >= 3 && !COMMON_WORDS.has(w));
     
-    // حفظ المنتج
     statements.push({
       sql: `INSERT OR IGNORE INTO products 
             (product_id, title, title_tokens, category_path,
@@ -374,13 +440,11 @@ async function saveApifyProducts(items, seedKeyword) {
       ],
     });
     
-    // ⭐ Unigrams
     for (const w of words) {
       if (w.length < 4) continue;
       unigrams.set(w, (unigrams.get(w) || 0) + 1);
     }
     
-    // ⭐ Bigrams
     for (let i = 0; i < words.length - 1; i++) {
       const bigram = `${words[i]} ${words[i + 1]}`;
       if (bigram.length >= 8 && bigram.length <= 40) {
@@ -388,7 +452,6 @@ async function saveApifyProducts(items, seedKeyword) {
       }
     }
     
-    // ⭐ Trigrams
     if (words.length >= 3) {
       for (let i = 0; i < words.length - 2; i++) {
         const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
@@ -399,7 +462,6 @@ async function saveApifyProducts(items, seedKeyword) {
     }
   }
   
-  // حفظ المنتجات
   if (statements.length > 0) {
     try {
       const result = await db.batch(statements, 'write');
@@ -407,31 +469,26 @@ async function saveApifyProducts(items, seedKeyword) {
     } catch (e) {}
   }
   
-  // ⭐ اختيار أفضل الكلمات
+  // اختيار أفضل الكلمات
   const candidates = [];
   
-  // Trigrams
   for (const [kw, freq] of trigrams) {
     if (freq >= 2) candidates.push({ keyword: kw, score: freq * 3 });
   }
   
-  // Bigrams
   for (const [kw, freq] of bigrams) {
     if (freq >= 2) candidates.push({ keyword: kw, score: freq * 2 });
   }
   
-  // Unigrams
   for (const [kw, freq] of unigrams) {
     if (freq >= 3 && kw.length >= 5) {
       candidates.push({ keyword: kw, score: freq });
     }
   }
   
-  // رتّب حسب النقاط
   candidates.sort((a, b) => b.score - a.score);
   const top = candidates.slice(0, 15);
   
-  // حفظ في القاعدة
   let newKeywords = 0;
   for (const c of top) {
     try {
@@ -449,7 +506,7 @@ async function saveApifyProducts(items, seedKeyword) {
 }
 
 // ═══════════════════════════════════════════
-// 9. اختيار الكلمات
+// 10. اختيار الكلمات
 // ═══════════════════════════════════════════
 
 async function pickKeywordsFromDB(count) {
@@ -476,7 +533,7 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// 10. الجلب من ScrapingAnt
+// 11. الجلب من ScrapingAnt
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
@@ -516,7 +573,7 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 11. الجلب من ScraperAPI
+// 12. الجلب من ScraperAPI
 // ═══════════════════════════════════════════
 
 async function fetchFromScraperAPI(keyword, page = 1) {
@@ -555,7 +612,7 @@ async function fetchFromScraperAPI(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 12. التبديل الذكي بين المزودين
+// 13. التبديل الذكي بين المزودين
 // ═══════════════════════════════════════════
 
 async function fetchWithFallback(keyword, page = 1) {
@@ -631,7 +688,7 @@ async function fetchWithFallback(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 13. Parser قوي (6 طبقات)
+// 14. Parser قوي
 // ═══════════════════════════════════════════
 
 function parseHTML(html) {
@@ -727,7 +784,7 @@ function parseHTML(html) {
     if (products.length > 0) console.log(`        📊 title-explicit: ${products.length}`);
   }
   
-  // الطبقة 5: HTML structure (id + h3)
+  // الطبقة 5: HTML structure
   if (products.length === 0) {
     const linkTitlePattern = /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*>[\s\S]{0,1500}?<h[23][^>]*>([^<]{15,200})<\/h[23]>/g;
     const matches = [...html.matchAll(linkTitlePattern)];
@@ -777,7 +834,7 @@ function parseHTML(html) {
 }
 
 // ═══════════════════════════════════════════
-// 14. حفظ Batch
+// 15. حفظ Batch
 // ═══════════════════════════════════════════
 
 async function saveProductsBatch(products, keyword) {
@@ -813,12 +870,12 @@ async function saveProductsBatch(products, keyword) {
 }
 
 // ═══════════════════════════════════════════
-// 15. الدالة الرئيسية
+// 16. الدالة الرئيسية
 // ═══════════════════════════════════════════
 
 async function main() {
   const start = Date.now();
-  console.log('🧠 Smart Pipeline - نظام ذكي مع Failover\n');
+  console.log('🧠 Smart Pipeline - نظام ذكي مع Failover + Seeds متغيرة\n');
   console.log('═'.repeat(55));
   
   await restoreProviderState();
