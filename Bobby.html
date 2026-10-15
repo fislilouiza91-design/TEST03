@@ -1,25 +1,3 @@
-name: Init Keywords Pipeline
+UPDATE keywords_pipeline SET category = 'Men Fashion' WHERE category = 'أزياء رجالية';UPDATE keywords_pipeline SET category = 'Home & Kitchen' WHERE category = 'المنزل والمطبخ';UPDATE keywords_pipeline SET category = 'Beauty & Health' WHERE category = 'الجمال والصحة';UPDATE keywords_pipeline SET category = 'Sports & Outdoors' WHERE category = 'الرياضة والهواء الطلق';UPDATE keywords_pipeline SET category = 'Toys & Kids' WHERE category = 'الأطفال والألعاب';UPDATE keywords_pipeline SET category = 'Automotive' WHERE category = 'السيارات والدراجات النارية';UPDATE keywords_pipeline SET category = 'Phones & Telecom' WHERE category = 'الهواتف والاتصالات';UPDATE keywords_pipeline SET category = 'Computer & Office' WHERE category = 'الكمبيوتر والمكتب';UPDATE keywords_pipeline SET category = 'Tools & Home Improvement' WHERE category = 'الأدوات والتحسين المنزلي';UPDATE keywords_pipeline SET category = 'Pet Supplies' WHERE category = 'الحيوانات الأليفة';UPDATE keywords_pipeline SET category = 'Sports & Entertainment' WHERE category = 'الرياضة والترفيه';UPDATE keywords_pipeline SET category = 'Food & Beverages' WHERE category = 'المواد الغذائية والمشروبات';UPDATE keywords_pipeline SET category = 'Luggage & Bags' WHERE category = 'الحقائب والأمتعة';UPDATE keywords_pipeline SET category = 'Watches & Jewelry' WHERE category = 'الساعات والمجوهرات';UPDATE keywords_pipeline SET category = 'Health & Personal Care' WHERE category = 'الصحة والرعاية الشخصية';UPDATE keywords_pipeline SET category = 'Furniture' WHERE category = 'الأثاث';UPDATE keywords_pipeline SET category = 'Chemicals' WHERE category = 'المواد الكيميائية';UPDATE keywords_pipeline SET category = 'Industrial Machinery' WHERE category = 'الآلات الصناعية';UPDATE keywords_pipeline SET category = 'Stationery & Office' WHERE category = 'القرطاسية والمكتب';UPDATE keywords_pipeline SET category = 'Kitchen Tools' WHERE category = 'أدوات المطبخ';
 
-on:
-  workflow_dispatch:
-
-jobs:
-  init:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Init keywords pipeline
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node src/init-pipeline.js
+SELECT DISTINCT category FROM keywords_pipeline ORDER BY category;
