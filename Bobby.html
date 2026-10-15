@@ -1,4 +1,4 @@
-// src/scrapingant-search.js - ملء القاعدة بأسرع وقت + ربط المتشابهات
+// src/scrapingant-search.js - ملء القاعدة + ربط هجين 4 إشارات
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -94,14 +94,14 @@ async function fetchSearchFromScrapingAnt(keyword) {
 }
 
 // ═══════════════════════════════════════════
-// parser موسّع - يقبل كل شيء
+// Parser موسّع (5 طبقات)
 // ═══════════════════════════════════════════
 
 function parseSearchResults(html) {
   const products = [];
   const seen = new Set();
   
-  // ═══ الطبقة 1: JSON-LD ═══
+  // الطبقة 1: JSON-LD
   const ldMatches = [...html.matchAll(/<script type="application\/ld\+json">([^<]+)<\/script>/g)];
   for (const m of ldMatches) {
     try {
@@ -128,7 +128,7 @@ function parseSearchResults(html) {
   }
   console.log(`    📊 JSON-LD: ${products.length}`);
   
-  // ═══ الطبقة 2: _dida_config_ ═══
+  // الطبقة 2: _dida_config_
   if (products.length === 0) {
     const jsonMatch = html.match(/window\._dida_config_\s*=\s*({.+?});\s*<\/script>/s);
     if (jsonMatch) {
@@ -155,7 +155,7 @@ function parseSearchResults(html) {
     }
   }
   
-  // ═══ الطبقة 3: runParams ═══
+  // الطبقة 3: runParams
   if (products.length === 0) {
     const runMatch = html.match(/window\.runParams\s*=\s*({.+?});/s);
     if (runMatch) {
@@ -182,7 +182,7 @@ function parseSearchResults(html) {
     }
   }
   
-  // ═══ الطبقة 4: HTML structure (href + h3) ═══
+  // الطبقة 4: HTML structure
   if (products.length === 0) {
     const patterns = [
       /href="[^"]*\/item\/(\d+)\.html[^"]*"[^>]*>[\s\S]{0,2000}?<h3[^>]*>([^<]{15,200})<\/h3>/g,
@@ -215,22 +215,18 @@ function parseSearchResults(html) {
     }
   }
   
-  // ═══ الطبقة 5: IDs فقط (بدون عنوان) - نملأ القاعدة! ═══
+  // الطبقة 5: استخراج أساسي (IDs + Images)
   if (products.length === 0) {
-    // استخرج ID من الروابط
     const idRegex = /\/item\/(\d{10,})\.html/g;
     const idMatches = [...html.matchAll(idRegex)];
     
-    // استخرج الصور
     const imgRegex = /"(https:\/\/ae[^"]+\.(jpg|jpeg|png|webp))"/g;
     const imgMatches = [...html.matchAll(imgRegex)];
     
-    // استخرج العناوين من أي مكان
     const titlePatterns = [
       /<h3[^>]*>([^<]{10,200})<\/h3>/g,
       /<h2[^>]*>([^<]{10,200})<\/h2>/g,
       /data-title="([^"]{10,200})"/g,
-      /aria-label="([^"]{10,200})"/g,
     ];
     
     let titles = [];
@@ -241,7 +237,6 @@ function parseSearchResults(html) {
     
     console.log(`    📊 IDs: ${idMatches.length} | Titles: ${titles.length} | Images: ${imgMatches.length}`);
     
-    // استخدم IDs كمصدر أساسي
     const uniqueIds = [...new Set(idMatches.map(m => m[1]))];
     
     for (let i = 0; i < uniqueIds.length && products.length < 100; i++) {
@@ -251,7 +246,7 @@ function parseSearchResults(html) {
       
       products.push({
         product_id: pid,
-        title: titles[i] ? titles[i].replace(/&amp;/g, '&') : `Product ${pid}`, // placeholder
+        title: titles[i] ? titles[i].replace(/&amp;/g, '&') : `Product ${pid}`,
         current_price: 0,
         original_price: 0,
         image_url: imgMatches[i] ? imgMatches[i][1] : '',
@@ -267,7 +262,7 @@ function parseSearchResults(html) {
 }
 
 // ═══════════════════════════════════════════
-// حفظ في Turso مع ربط المتشابهات
+// حفظ في Turso
 // ═══════════════════════════════════════════
 
 async function saveToTurso(keyword, products) {
@@ -276,8 +271,6 @@ async function saveToTurso(keyword, products) {
   
   for (const p of products) {
     if (!p.product_id) continue;
-    
-    // ⭐ تخفيف الشرط: نقبل أي منتج له ID
     const title = p.title || `Product ${p.product_id}`;
     
     try {
@@ -319,92 +312,194 @@ async function saveToTurso(keyword, products) {
       });
       
       if (result.rowsAffected > 0) saved++;
-    } catch (e) {
-      // تجاهل
-    }
+    } catch (e) {}
   }
   
   return saved;
 }
 
 // ═══════════════════════════════════════════
-// ⭐ بناء روابط التشابه
+// ⭐ بناء روابط التشابه (نظام هجين 4 إشارات)
 // ═══════════════════════════════════════════
 
 async function buildSimilarityLinks() {
-  console.log('\n🔗 بناء روابط التشابه...');
+  const start = Date.now();
+  console.log('\n🔗 بناء روابط التشابه (نظام هجين)...');
   
-  // جلب كل المنتجات مع tokens
+  // 1. جلب المنتجات
   const all = await db.execute(`
-    SELECT product_id, title_tokens, category 
+    SELECT product_id, title_tokens, category, image_hash, title
     FROM products_current 
     WHERE title_tokens IS NOT NULL AND title_tokens != ''
-    LIMIT 500
+    LIMIT 1000
   `);
   
   console.log(`  📊 ${all.rows.length} منتج للتحليل`);
+  if (all.rows.length < 2) return 0;
   
-  const products = all.rows.map(r => ({
-    id: r.product_id,
-    tokens: r.title_tokens.split(' ').filter(t => t.length > 2),
-    category: r.category || 'general',
-    tokensSet: new Set(r.title_tokens.split(' ').filter(t => t.length > 2)),
-  }));
+  const products = all.rows.map(r => {
+    const tokens = r.title_tokens.split(' ').filter(t => t.length > 2);
+    const titleLower = (r.title || '').toLowerCase();
+    const brandMatch = titleLower.match(/^([a-z]{3,15})\s/);
+    
+    return {
+      id: r.product_id,
+      title: r.title || '',
+      tokens: tokens,
+      tokensSet: new Set(tokens),
+      category: r.category || 'general',
+      imageHash: r.image_hash || null,
+      brand: brandMatch ? brandMatch[1] : null,
+    };
+  });
   
-  let linksCreated = 0;
-  const now = Date.now();
+  // 2. بناء الفهارس
+  const tokenIndex = new Map();
+  const imageIndex = new Map();
   
-  // مقارنة كل منتج بأقرب 200 منتج آخر
   for (let i = 0; i < products.length; i++) {
-    const p1 = products[i];
-    if (p1.tokens.length < 2) continue;
-    
-    let matches = [];
-    
-    for (let j = 0; j < products.length; j++) {
-      if (i === j) continue;
-      const p2 = products[j];
-      if (p2.tokens.length < 2) continue;
-      
-      // احسب تشابه Jaccard
-      const intersection = [...p1.tokensSet].filter(t => p2.tokensSet.has(t));
-      if (intersection.length < 2) continue; // على الأقل كلمتين مشتركتين
-      
-      const union = new Set([...p1.tokensSet, ...p2.tokensSet]);
-      const jaccard = intersection.length / union.size;
-      
-      if (jaccard >= 0.15) { // عتبة منخفضة لزيادة الروابط
-        let score = jaccard * 70;
-        if (p1.category === p2.category) score += 30;
-        
-        matches.push({
-          match_id: p2.id,
-          score: Math.round(score),
-          type: 'token_jaccard',
-        });
-      }
+    for (const token of products[i].tokens) {
+      if (!tokenIndex.has(token)) tokenIndex.set(token, []);
+      tokenIndex.get(token).push(i);
     }
-    
-    // احتفظ بأفضل 10 روابط
-    matches.sort((a, b) => b.score - a.score);
-    matches = matches.slice(0, 10);
-    
-    // خزّن
-    for (const m of matches) {
-      try {
-        await db.execute({
-          sql: `INSERT OR IGNORE INTO product_matches 
-                (source_id, match_id, similarity_score, match_type, computed_at)
-                VALUES (?, ?, ?, ?, ?)`,
-          args: [p1.id, m.match_id, m.score, m.type, now],
-        });
-        linksCreated++;
-      } catch (e) {}
+    if (products[i].imageHash) {
+      if (!imageIndex.has(products[i].imageHash)) imageIndex.set(products[i].imageHash, []);
+      imageIndex.get(products[i].imageHash).push(i);
     }
   }
   
-  console.log(`  ✅ ${linksCreated} رابط تشابه أُنشئ`);
-  return linksCreated;
+  console.log(`  🔍 ${tokenIndex.size} كلمة + ${imageIndex.size} صورة فريدة`);
+  
+  // 3. البحث عن الروابط
+  const allLinks = [];
+  const seenPairs = new Set();
+  
+  for (let i = 0; i < products.length; i++) {
+    const p1 = products[i];
+    if (p1.tokens.length < 1) continue;
+    
+    const candidates = new Map();
+    
+    // إشارة 1: نفس الصورة (95%)
+    if (p1.imageHash) {
+      const ids = imageIndex.get(p1.imageHash) || [];
+      for (const j of ids) {
+        if (i === j) continue;
+        if (!candidates.has(j)) candidates.set(j, { signals: [], score: 0 });
+        const c = candidates.get(j);
+        c.signals.push('same_image');
+        c.score = Math.max(c.score, 95);
+      }
+    }
+    
+    // إشارة 2: نفس البراند + الفئة (80%)
+    if (p1.brand && p1.brand.length > 3) {
+      for (let j = 0; j < products.length; j++) {
+        if (i === j) continue;
+        const p2 = products[j];
+        if (p2.brand === p1.brand && p2.category === p1.category) {
+          if (!candidates.has(j)) candidates.set(j, { signals: [], score: 0 });
+          const c = candidates.get(j);
+          if (!c.signals.includes('same_brand')) {
+            c.signals.push('same_brand');
+            c.score = Math.max(c.score, 80);
+          }
+        }
+      }
+    }
+    
+    // إشارة 3: تشابه الكلمات
+    const tokenCount = new Map();
+    for (const token of p1.tokens) {
+      const ids = tokenIndex.get(token) || [];
+      for (const j of ids) {
+        if (i === j) continue;
+        tokenCount.set(j, (tokenCount.get(j) || 0) + 1);
+      }
+    }
+    
+    for (const [j, shared] of tokenCount) {
+      if (shared < 2) continue;
+      
+      const p2 = products[j];
+      const union = p1.tokensSet.size + p2.tokensSet.size - shared;
+      const jaccard = shared / union;
+      
+      if (jaccard < 0.2) continue;
+      
+      if (!candidates.has(j)) candidates.set(j, { signals: [], score: 0 });
+      const c = candidates.get(j);
+      
+      let score = jaccard * 70;
+      if (p1.category === p2.category) score += 25;
+      if (p1.brand && p1.brand === p2.brand) score += 5;
+      
+      c.signals.push('token_match');
+      c.score = Math.max(c.score, Math.round(score));
+    }
+    
+    // 4. أفضل 10
+    const matches = [];
+    for (const [j, c] of candidates) {
+      if (c.score < 40) continue;
+      
+      const pairKey = i < j ? `${i}-${j}` : `${j}-${i}`;
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
+      
+      let primaryType = 'token_jaccard';
+      if (c.signals.includes('same_image')) primaryType = 'exact_image';
+      else if (c.signals.includes('same_brand')) primaryType = 'brand_category';
+      
+      matches.push({
+        match_id: products[j].id,
+        score: c.score,
+        type: primaryType,
+      });
+    }
+    
+    matches.sort((a, b) => b.score - a.score);
+    for (const m of matches.slice(0, 10)) {
+      allLinks.push({
+        source_id: p1.id,
+        match_id: m.match_id,
+        score: m.score,
+        type: m.type,
+      });
+    }
+    
+    if (i > 0 && i % 200 === 0) {
+      console.log(`    🔍 ${i}/${products.length}`);
+    }
+  }
+  
+  console.log(`  🔗 ${allLinks.length} رابط للكتابة`);
+  
+  // 5. Batch Insert
+  const now = Date.now();
+  const BATCH_SIZE = 100;
+  let inserted = 0;
+  
+  for (let i = 0; i < allLinks.length; i += BATCH_SIZE) {
+    const batch = allLinks.slice(i, i + BATCH_SIZE);
+    const statements = batch.map(link => ({
+      sql: `INSERT OR IGNORE INTO product_matches 
+            (source_id, match_id, similarity_score, match_type, computed_at)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [link.source_id, link.match_id, link.score, link.type, now],
+    }));
+    
+    try {
+      await db.batch(statements, 'write');
+      inserted += batch.length;
+    } catch (e) {
+      console.error(`    ❌ دفعة: ${e.message.substring(0, 60)}`);
+    }
+  }
+  
+  const duration = ((Date.now() - start) / 1000).toFixed(1);
+  console.log(`  ✅ ${inserted} رابط في ${duration} ثانية`);
+  return inserted;
 }
 
 // ═══════════════════════════════════════════
@@ -438,7 +533,7 @@ async function markProcessed(keyword, success) {
 
 async function main() {
   const start = Date.now();
-  console.log('🔍 المرحلة 2: ScrapingAnt (ملء سريع + ربط المتشابهات)...\n');
+  console.log('🔍 المرحلة 2: ScrapingAnt (ملء + ربط هجين)...\n');
   
   if (!SCRAPINGANT_KEY) {
     console.error('❌ SCRAPINGANT_API_KEY غير موجود!');
@@ -483,7 +578,7 @@ async function main() {
     }
   }
   
-  // ⭐ بناء روابط التشابه
+  // بناء روابط التشابه
   let linksCreated = 0;
   if (totalSaved > 0) {
     linksCreated = await buildSimilarityLinks();
