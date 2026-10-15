@@ -1,4 +1,4 @@
-// src/smart-pipeline.js - نظام ثلاثي: ScrapingAnt + ScraperAPI + BrightData
+// src/smart-pipeline.js - Apify + BrightData (أساسي) + ScrapingAnt + ScraperAPI
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -38,14 +38,13 @@ const COMMON_WORDS = new Set([
   'size','men','women','kids','baby','without','use','used','home',
   'car','phone','case','made','material','style','fashion','design','item',
   'top','super','ultra','mini','max','premium','fast','pack','box',
-  'support','compatible','inch','cm','mm','gb','tb','mah','watt',
 ]);
 
-// ⭐ حالة المزودين الثلاثة
+// ⭐ حالة المزودين
 const providerState = {
+  brightdata: { status: 'active', failures: 0, reason: null },
   scrapingant: { status: 'active', failures: 0, reason: null },
   scraperapi: { status: 'active', failures: 0, reason: null },
-  brightdata: { status: 'active', failures: 0, reason: null },
 };
 
 // ═══════════════════════════════════════════
@@ -63,7 +62,7 @@ async function restoreProviderState() {
     const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
     if (ageHours > 24) return;
 
-    for (const key of ['scrapingant', 'scraperapi', 'brightdata']) {
+    for (const key of ['brightdata', 'scrapingant', 'scraperapi']) {
       if (prev[key]?.status === 'exhausted' && ageHours < 24 * 25) {
         providerState[key].status = 'exhausted';
         providerState[key].reason = prev[key].reason;
@@ -79,9 +78,9 @@ async function saveProviderState() {
       sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
             VALUES ('providers_status', ?, ?)`,
       args: [JSON.stringify({
+        brightdata: providerState.brightdata,
         scrapingant: providerState.scrapingant,
         scraperapi: providerState.scraperapi,
-        brightdata: providerState.brightdata,
         savedAt: Date.now(),
       }), Date.now()],
     });
@@ -239,13 +238,13 @@ async function runEnrichment(isEmergency = false) {
   if (keywords.length === 0) return { totalSaved: 0 };
 
   let totalSaved = 0;
-  let stats = { scrapingant: 0, scraperapi: 0, brightdata: 0 };
+  let stats = { brightdata: 0, scrapingant: 0, scraperapi: 0 };
   let blocked = false;
 
   for (const row of keywords) {
-    const anyActive = providerState.scrapingant.status === 'active' ||
-                      providerState.scraperapi.status === 'active' ||
-                      providerState.brightdata.status === 'active';
+    const anyActive = providerState.brightdata.status === 'active' ||
+                      providerState.scrapingant.status === 'active' ||
+                      providerState.scraperapi.status === 'active';
 
     if (!anyActive) { blocked = true; break; }
 
@@ -278,7 +277,7 @@ async function runEnrichment(isEmergency = false) {
 
   console.log(`\n📊 Enrichment:`);
   console.log(`  📦 مخزّن: ${totalSaved}`);
-  console.log(`  🔵 ScrapingAnt: ${stats.scrapingant} | 🟠 ScraperAPI: ${stats.scraperapi} | 🟣 BrightData: ${stats.brightdata}`);
+  console.log(`  🟣 BrightData: ${stats.brightdata} | 🔵 ScrapingAnt: ${stats.scrapingant} | 🟠 ScraperAPI: ${stats.scraperapi}`);
 
   return { totalSaved, blocked };
 }
@@ -440,7 +439,49 @@ async function markProcessed(keyword, success) {
 }
 
 // ═══════════════════════════════════════════
-// 10. Fetch from ScrapingAnt
+// 10. ⭐ Bright Data (الأساسي للإثراء)
+// ═══════════════════════════════════════════
+
+async function fetchFromBrightData(keyword, page = 1) {
+  const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
+
+  console.log(`      🟣 BrightData p${page}...`);
+
+  const response = await fetch('https://api.brightdata.com/request', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${BRIGHTDATA_KEY}`,
+    },
+    body: JSON.stringify({
+      zone: BRIGHTDATA_ZONE,
+      url: url,
+      format: 'raw',
+      country: 'us',
+    }),
+    timeout: 90000,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    const lowerErr = errText.toLowerCase();
+
+    if (response.status === 402 || lowerErr.includes('credit') ||
+        lowerErr.includes('quota') || lowerErr.includes('exhausted')) {
+      throw new Error('CREDIT_EXHAUSTED: BrightData');
+    }
+    if (response.status === 403 || response.status === 429 ||
+        lowerErr.includes('blocked') || lowerErr.includes('forbidden')) {
+      throw new Error('BLOCKED: BrightData');
+    }
+    throw new Error(`BrightData ${response.status}`);
+  }
+
+  return await response.text();
+}
+
+// ═══════════════════════════════════════════
+// 11. ScrapingAnt (احتياطي)
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
@@ -469,7 +510,7 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 11. Fetch from ScraperAPI
+// 12. ScraperAPI (احتياطي أخير)
 // ═══════════════════════════════════════════
 
 async function fetchFromScraperAPI(keyword, page = 1) {
@@ -497,53 +538,15 @@ async function fetchFromScraperAPI(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 12. ⭐ Fetch from Bright Data (Web Unlocker)
-// ═══════════════════════════════════════════
-
-async function fetchFromBrightData(keyword, page = 1) {
-  const url = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html?page=${page}`;
-
-  const response = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${BRIGHTDATA_KEY}`,
-    },
-    body: JSON.stringify({
-      zone: BRIGHTDATA_ZONE,
-      url: url,
-      format: 'raw',
-      country: 'us',
-    }),
-    timeout: 90000,
-  });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    const lowerErr = errText.toLowerCase();
-
-    if (response.status === 402 || lowerErr.includes('credit') ||
-        lowerErr.includes('quota') || lowerErr.includes('exhausted')) {
-      throw new Error('CREDIT_EXHAUSTED: BrightData');
-    }
-    if (response.status === 403 || response.status === 429 || lowerErr.includes('blocked')) {
-      throw new Error('BLOCKED: BrightData');
-    }
-    throw new Error(`BrightData ${response.status}`);
-  }
-
-  return await response.text();
-}
-
-// ═══════════════════════════════════════════
-// 13. Fallback Chain
+// 13. ⭐ Fallback Chain (BrightData أولاً!)
 // ═══════════════════════════════════════════
 
 async function fetchWithFallback(keyword, page = 1) {
+  // ⭐ الترتيب الجديد: BrightData → ScrapingAnt → ScraperAPI
   const providers = [
+    { name: 'brightdata', fn: fetchFromBrightData, state: providerState.brightdata, icon: '🟣' },
     { name: 'scrapingant', fn: fetchFromScrapingAnt, state: providerState.scrapingant, icon: '🔵' },
     { name: 'scraperapi', fn: fetchFromScraperAPI, state: providerState.scraperapi, icon: '🟠' },
-    { name: 'brightdata', fn: fetchFromBrightData, state: providerState.brightdata, icon: '🟣' },
   ];
 
   for (const p of providers) {
@@ -715,7 +718,7 @@ async function saveProductsBatch(products, keyword) {
 
 async function main() {
   const start = Date.now();
-  console.log('🧠 Smart Pipeline - 3 مزودين\n');
+  console.log('🧠 Smart Pipeline - Apify + BrightData (أساسي)\n');
   console.log('═'.repeat(55));
 
   await restoreProviderState();
@@ -735,7 +738,7 @@ async function main() {
       enrichmentProducts: enrichment.totalSaved,
     };
   } else {
-    console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
+    console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode مع BrightData\n`);
     const emergency = await runEnrichment(true);
     result = {
       mode: 'emergency',
@@ -764,9 +767,9 @@ async function main() {
   console.log(`  📚 كلمات: ${s.total_keywords}`);
   console.log(`  ⏳ في الانتظار: ${s.pending}`);
   console.log(`\n🔌 حالة المزودين:`);
-  console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.failures} فشل)`);
-  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.failures} فشل)`);
-  console.log(`  🟣 BrightData: ${providerState.brightdata.status} (${providerState.brightdata.failures} فشل)`);
+  console.log(`  🟣 BrightData (الأساسي): ${providerState.brightdata.status} (${providerState.brightdata.failures} فشل)`);
+  console.log(`  🔵 ScrapingAnt (احتياطي): ${providerState.scrapingant.status} (${providerState.scrapingant.failures} فشل)`);
+  console.log(`  🟠 ScraperAPI (احتياطي): ${providerState.scraperapi.status} (${providerState.scraperapi.failures} فشل)`);
 }
 
 main().catch(err => {
