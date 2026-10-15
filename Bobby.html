@@ -1,28 +1,15 @@
-name: Auto Fetch (Scheduled)
+DELETE FROM products_current 
+WHERE title LIKE '%Deals%discounts%'
+   OR title LIKE '%Delivery%service%'
+   OR title LIKE '%Quality%trust%'
+   OR title LIKE '%FREE%with%purchase%'
+   OR title LIKE '%Main color%'
+   OR title = 'Dollar Express'
+   OR LENGTH(title) < 20;
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+SELECT COUNT(*) AS total FROM products_current;
 
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Fetch products (Apify)
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-        run: node src/apify-fetcher.js
+SELECT category, COUNT(*) AS count 
+FROM products_current 
+GROUP BY category 
+ORDER BY count DESC;
