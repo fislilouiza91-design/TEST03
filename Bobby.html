@@ -1,3 +1,364 @@
-DELETE FROM keywords_pipeline;
+// src/apify-discovery.js - Apify يكتشف الفئات والكلمات
+import fetch from 'node-fetch';
+import crypto from 'crypto';
+import { createClient } from '@libsql/client';
 
-DELETE FROM products;
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
+const ITEMS_PER_SEED = 20;
+const MAX_ITEMS_PER_KEYWORD = 20;
+
+// ⭐ Seeds أولية عامة (30 كلمة عبر كل الفئات)
+// ملاحظة: كلمات إنجليزية عامة لتغطية كل الفئات
+const SEED_KEYWORDS = [
+  // Electronics
+  'bluetooth earphones', 'smart watch', 'usb charger',
+  // Fashion Women
+  'women dress', 'women handbag', 'women shoes',
+  // Fashion Men
+  'men t-shirt', 'men wallet', 'men sneakers',
+  // Home
+  'kitchen knife', 'coffee mug', 'led lights',
+  // Beauty
+  'makeup brush', 'perfume', 'hair curler',
+  // Sports
+  'yoga mat', 'dumbbell', 'running shoes',
+  // Kids
+  'kids toy', 'baby clothes', 'lego blocks',
+  // Auto
+  'car charger', 'car phone holder', 'car vacuum',
+  // Pets
+  'dog collar', 'cat toy', 'fish tank',
+  // Tools
+  'screwdriver set', 'drill bit', 'wrench set',
+];
+
+// ═══════════════════════════════════════════
+// دوال مساعدة
+// ═══════════════════════════════════════════
+
+function generateImageHash(url) {
+  if (!url) return null;
+  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
+  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
+  return null;
+}
+
+function extractTokens(title) {
+  if (!title) return '';
+  const stop = new Set(['for','the','and','with','from','new','hot','best','free',
+    'high','pro','sale','shipping','pcs','piece','set','original','official',
+    'men','women','kids','baby','type','model','color','size']);
+  return title.toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !stop.has(w) && !/^\d+$/.test(w))
+    .slice(0, 12)
+    .join(' ');
+}
+
+// ⭐ استخراج الفئات من المسار
+function extractCategoriesFromPath(categoryPath) {
+  if (!categoryPath || !Array.isArray(categoryPath)) return [];
+  
+  const categories = [];
+  const rootMap = {
+    '44': 'Electronics', '3': 'Home & Kitchen', '100001540': 'Women Fashion',
+    '100001541': 'Men Fashion', '66': 'Beauty & Health', '18': 'Sports & Outdoors',
+    '26': 'Toys & Kids', '34': 'Automotive', '36': 'Pet Supplies',
+    '1420': 'Tools & Home Improvement', '509': 'Watches & Jewelry',
+    '1511': 'Jewelry', '200000348': 'Phones & Telecom', '7': 'Computer & Office',
+  };
+  
+  const rootId = String(categoryPath[0]);
+  const rootName = rootMap[rootId];
+  
+  if (rootName) {
+    categories.push({ id: rootId, name: rootName, level: 1, parent_id: null });
+  }
+  
+  // الفئات الفرعية
+  for (let i = 1; i < categoryPath.length; i++) {
+    const catId = String(categoryPath[i]);
+    categories.push({
+      id: catId,
+      name: `${rootName || 'Unknown'} - Sub ${i}`,
+      level: i + 1,
+      parent_id: String(categoryPath[i - 1]),
+    });
+  }
+  
+  return categories;
+}
+
+// ═══════════════════════════════════════════
+// Apify Actor
+// ═══════════════════════════════════════════
+
+async function runApifyActor(keyword) {
+  const actorId = 'apt_marble~aliexpress-search-scraper';
+  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
+  
+  const response = await fetch(runUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      keyword: keyword,
+      country: 'us',
+      currency: 'USD',
+      sortOrder: 'best_match',
+      maxItems: MAX_ITEMS_PER_KEYWORD,
+    }),
+    timeout: 300000,
+  });
+  
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Apify ${response.status}: ${err.substring(0, 100)}`);
+  }
+  
+  return await response.json();
+}
+
+// ═══════════════════════════════════════════
+// حفظ الفئات
+// ═══════════════════════════════════════════
+
+async function saveCategories(categories) {
+  let inserted = 0;
+  for (const cat of categories) {
+    const result = await db.execute({
+      sql: `INSERT OR IGNORE INTO categories 
+            (id, parent_id, level, name_en, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [cat.id, cat.parent_id, cat.level, cat.name, Date.now(), Date.now()],
+    });
+    if (result.rowsAffected > 0) inserted++;
+  }
+  return inserted;
+}
+
+// ═══════════════════════════════════════════
+// حفظ المنتجات + استخراج الكلمات
+// ═══════════════════════════════════════════
+
+async function saveProductsAndExtractKeywords(seedKeyword, items) {
+  const now = Date.now();
+  let saved = 0;
+  const derivedKeywords = new Map();
+  const categoriesFound = new Map();
+  
+  for (const item of items) {
+    if (!item.productId || !item.title) continue;
+    if (item.title.length < 15) continue;
+    
+    try {
+      const productId = String(item.productId);
+      const imageHash = generateImageHash(item.imageUrl);
+      const tokens = extractTokens(item.title);
+      const categoryPath = item.categoryPath || [];
+      
+      // استخراج الفئات
+      const cats = extractCategoriesFromPath(categoryPath);
+      for (const c of cats) {
+        if (!categoriesFound.has(c.id)) categoriesFound.set(c.id, c);
+      }
+      
+      // حفظ الفئات
+      if (cats.length > 0) {
+        await saveCategories(cats);
+      }
+      
+      const primaryCategory = cats[0]?.name || 'General';
+      
+      // حساب الدرجات
+      const rating = parseFloat(item.rating || 0);
+      const ordersCount = parseInt(item.soldCount || 0);
+      const isFreeShipping = item.hasFreeShippingOffer === true;
+      const price = parseFloat(item.price || 0);
+      
+      const trustScore = 
+        (rating >= 4.8 ? 40 : rating >= 4.5 ? 30 : rating >= 4.0 ? 20 : 10) +
+        (ordersCount >= 10000 ? 30 : ordersCount >= 1000 ? 20 : ordersCount >= 100 ? 10 : 0) +
+        (isFreeShipping ? 10 : 0);
+      
+      const valueScore = 
+        (rating / 5.0) * 35 +
+        Math.min(ordersCount / 5000, 1.0) * 30 +
+        Math.max(0, 1 - (price / 100.0)) * 20;
+      
+      await db.execute({
+        sql: `INSERT INTO products 
+              (product_id, global_product_id, sku_id, title, title_tokens,
+               category_path, current_price_usd, original_price_usd, discount_percent,
+               rating, orders_count, orders_display, is_free_shipping, ships_from_country,
+               shipping_days_min, shipping_days_max, is_choice, is_promoted,
+               image_url, image_hash, product_url, source_keyword, source_type,
+               trust_score, value_score, total_score,
+               first_seen_at, last_updated_at, update_count)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT (product_id) DO UPDATE SET
+                current_price_usd = excluded.current_price_usd,
+                last_updated_at = excluded.last_updated_at,
+                update_count = update_count + 1`,
+        args: [
+          productId, item.globalProductId || null, item.skuId || null,
+          item.title, tokens, categoryPath.join(','),
+          price, parseFloat(item.originalPrice || 0), parseFloat(item.discountPercent || 0),
+          rating, ordersCount, item.soldCountDisplay || null,
+          isFreeShipping ? 1 : 0, item.shipsFromCountry || null,
+          parseInt(item.deliveryMinDays || 0), parseInt(item.deliveryMaxDays || 0),
+          item.isChoice ? 1 : 0, item.isPromoted ? 1 : 0,
+          item.imageUrl || '', imageHash,
+          item.productUrl || `https://www.aliexpress.com/item/${productId}.html`,
+          seedKeyword, 'apify_discovery',
+          trustScore, valueScore,
+          Math.round(trustScore * 0.5 + valueScore * 0.5),
+          now, now
+        ],
+      });
+      
+      saved++;
+      
+      // استخراج كلمات من العنوان
+      const words = tokens.split(' ').filter(w => w.length >= 4);
+      
+      // Bigrams
+      for (let i = 0; i < words.length - 1; i++) {
+        const bigram = `${words[i]} ${words[i + 1]}`;
+        if (bigram.length >= 8 && bigram.length <= 35) {
+          const existing = derivedKeywords.get(bigram);
+          if (existing) {
+            existing.freq++;
+          } else {
+            derivedKeywords.set(bigram, { freq: 1, category: primaryCategory });
+          }
+        }
+      }
+      
+      // Trigrams
+      if (words.length >= 3) {
+        for (let i = 0; i < words.length - 2; i++) {
+          const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+          if (trigram.length >= 15 && trigram.length <= 50) {
+            const existing = derivedKeywords.get(trigram);
+            if (existing) {
+              existing.freq++;
+            } else {
+              derivedKeywords.set(trigram, { freq: 1, category: primaryCategory });
+            }
+          }
+        }
+      }
+      
+    } catch (e) {
+      console.error(`    ❌ ${e.message.substring(0, 50)}`);
+    }
+  }
+  
+  // ⭐ إضافة الكلمات المفتاحية الجديدة للدوران
+  let newKeywords = 0;
+  const sorted = [...derivedKeywords.entries()]
+    .filter(([kw, data]) => data.freq >= 2)
+    .sort((a, b) => b[1].freq - a[1].freq)
+    .slice(0, 30);
+  
+  for (const [kw, data] of sorted) {
+    const result = await db.execute({
+      sql: `INSERT OR IGNORE INTO keywords_pipeline 
+            (keyword, category, source, priority, created_at)
+            VALUES (?, ?, 'apify_discovery', 5, ?)`,
+      args: [kw, data.category, now],
+    });
+    if (result.rowsAffected > 0) newKeywords++;
+  }
+  
+  return { saved, newKeywords, categoriesFound: categoriesFound.size };
+}
+
+// ═══════════════════════════════════════════
+// الدالة الرئيسية
+// ═══════════════════════════════════════════
+
+async function main() {
+  const start = Date.now();
+  console.log('🔍 Apify Discovery - اكتشاف الفئات والكلمات...\n');
+  
+  if (!APIFY_TOKEN) {
+    console.error('❌ APIFY_TOKEN غير موجود!');
+    process.exit(1);
+  }
+  
+  console.log(`📋 ${SEED_KEYWORDS.length} Seeds أولية\n`);
+  
+  let totalProducts = 0;
+  let totalNewKeywords = 0;
+  let totalCategories = 0;
+  let successCount = 0;
+  let failCount = 0;
+  
+  for (const seed of SEED_KEYWORDS) {
+    try {
+      console.log(`\n🔍 "${seed}"`);
+      const items = await runApifyActor(seed);
+      
+      if (!Array.isArray(items) || items.length === 0) {
+        console.log(`  ⚠️ 0 نتيجة`);
+        failCount++;
+        continue;
+      }
+      
+      const result = await saveProductsAndExtractKeywords(seed, items);
+      totalProducts += result.saved;
+      totalNewKeywords += result.newKeywords;
+      totalCategories += result.categoriesFound;
+      
+      console.log(`  ✅ ${result.saved} منتج | 🆕 ${result.newKeywords} كلمة | 📂 ${result.categoriesFound} فئة`);
+      successCount++;
+      
+      await new Promise(r => setTimeout(r, 1500));
+      
+    } catch (error) {
+      console.log(`  ❌ ${error.message.substring(0, 60)}`);
+      failCount++;
+    }
+  }
+  
+  // إحصائيات
+  const stats = await db.execute(`
+    SELECT 
+      (SELECT COUNT(*) FROM keywords_pipeline) as total_keywords,
+      (SELECT COUNT(*) FROM keywords_pipeline WHERE source = 'apify_discovery') as discovered_keywords,
+      (SELECT COUNT(*) FROM products) as total_products,
+      (SELECT COUNT(*) FROM categories) as total_categories
+  `);
+  
+  const s = stats.rows[0];
+  const mins = ((Date.now() - start) / 60000).toFixed(1);
+  
+  console.log(`\n${'='.repeat(55)}`);
+  console.log(`📊 تقرير Discovery (${mins} دقيقة):`);
+  console.log(`${'='.repeat(55)}`);
+  console.log(`  ✅ نجح: ${successCount}/${SEED_KEYWORDS.length}`);
+  console.log(`  ❌ فشل: ${failCount}`);
+  console.log(`  📦 منتجات جديدة: ${totalProducts}`);
+  console.log(`  🆕 كلمات مكتشفة: ${totalNewKeywords}`);
+  console.log(`  📂 فئات مكتشفة: ${totalCategories}`);
+  console.log(`\n📈 الحالة:`);
+  console.log(`  📚 إجمالي الكلمات: ${s.total_keywords}`);
+  console.log(`  🆕 كلمات من Apify: ${s.discovered_keywords}`);
+  console.log(`  📦 إجمالي المنتجات: ${s.total_products}`);
+  console.log(`  📂 إجمالي الفئات: ${s.total_categories}`);
+  console.log(`  💰 تكلفة Apify: $${(totalProducts * 0.0007).toFixed(4)}`);
+  
+  console.log(`\n✅ الآن شغّل scrapingant-fetcher.js لإثراء القاعدة!`);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
