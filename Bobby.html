@@ -1,25 +1,114 @@
-name: Seed Master Keywords
+// src/seed-from-master.js - زرع الكلمات من master_categories.json
+import fs from 'fs';
+import { createClient } from '@libsql/client';
 
-on:
-  workflow_dispatch:
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  seed:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+async function main() {
+  const start = Date.now();
+  console.log('🌱 زرع الكلمات من Master File...\n');
+  
+  // 1. اقرأ الملف
+  const masterPath = './config/master_categories.json';
+  if (!fs.existsSync(masterPath)) {
+    console.error(`❌ الملف غير موجود: ${masterPath}`);
+    process.exit(1);
+  }
+  
+  const master = JSON.parse(fs.readFileSync(masterPath, 'utf8'));
+  console.log(`📋 عدد الفئات: ${master.categories.length}`);
+  
+  // 2. إحصائيات قبل
+  const before = await db.execute(`SELECT COUNT(*) as c FROM keywords_pipeline`);
+  console.log(`📊 قبل الزرع: ${before.rows[0].c} كلمة\n`);
+  
+  // 3. زرع الفئات والكلمات
+  const now = Date.now();
+  let totalInserted = 0;
+  let totalSkipped = 0;
+  
+  for (const cat of master.categories) {
+    let catInserted = 0;
+    let catSkipped = 0;
     
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install
-      
-      - name: Seed keywords
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node src/seed-from-master.js
+    for (const sub of cat.subcategories) {
+      for (const kw of sub.keywords) {
+        const cleanedKw = kw.toLowerCase().trim();
+        
+        // فلترة: إنجليزي فقط
+        if (/[\u0600-\u06FF]/.test(cleanedKw)) {
+          catSkipped++;
+          continue;
+        }
+        
+        try {
+          const result = await db.execute({
+            sql: `INSERT OR IGNORE INTO keywords_pipeline 
+                  (keyword, category, subcategory, source, priority, created_at)
+                  VALUES (?, ?, ?, 'master_file', 5, ?)`,
+            args: [cleanedKw, cat.name, sub.name, now],
+          });
+          
+          if (result.rowsAffected > 0) {
+            catInserted++;
+            totalInserted++;
+          } else {
+            catSkipped++;
+            totalSkipped++;
+          }
+        } catch (e) {
+          catSkipped++;
+        }
+      }
+    }
+    
+    console.log(`  ✅ ${cat.name}: ${catInserted} جديد | ${catSkipped} مكرر`);
+  }
+  
+  // 4. إحصائيات بعد
+  const after = await db.execute(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN last_run_at = 0 THEN 1 ELSE 0 END) as pending,
+      COUNT(DISTINCT category) as categories,
+      COUNT(DISTINCT subcategory) as subcategories
+    FROM keywords_pipeline
+  `);
+  
+  const s = after.rows[0];
+  const mins = ((Date.now() - start) / 60000).toFixed(2);
+  
+  console.log(`\n${'═'.repeat(55)}`);
+  console.log(`📊 تقرير الزرع (${mins} دقيقة)`);
+  console.log(`${'═'.repeat(55)}`);
+  console.log(`  🆕 كلمات جديدة: ${totalInserted}`);
+  console.log(`  ⏭️ مكررة: ${totalSkipped}`);
+  console.log(`  📦 إجمالي في القاعدة: ${s.total}`);
+  console.log(`  ⏳ في الانتظار: ${s.pending}`);
+  console.log(`  📂 فئات: ${s.categories}`);
+  console.log(`  🔖 subcategories: ${s.subcategories}`);
+  
+  // 5. توزيع الفئات
+  const catDist = await db.execute(`
+    SELECT category, COUNT(*) as c 
+    FROM keywords_pipeline 
+    WHERE category IS NOT NULL
+    GROUP BY category 
+    ORDER BY c DESC
+  `);
+  
+  console.log(`\n📊 التوزيع حسب الفئة:`);
+  catDist.rows.forEach(r => {
+    console.log(`  ${r.category}: ${r.c}`);
+  });
+  
+  console.log(`\n✅ الآن شغّل Smart Pipeline للبدء بالدوران!`);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
