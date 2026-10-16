@@ -1,5 +1,4 @@
 // src/smart-pipeline.js - دورة الفئات: كل تشغيل = فئة عشوائية جديدة
-// ✅ دورة نظيفة كل تشغيل: Apify → BrightData → ScrapingAnt → ScraperAPI
 import fetch from 'node-fetch';
 import crypto from 'crypto';
 import { createClient } from '@libsql/client';
@@ -13,8 +12,6 @@ const db = createClient({
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
-const BRIGHTDATA_TOKEN = process.env.BRIGHTDATA_API_KEY;
-const BRIGHTDATA_ZONE = process.env.BRIGHTDATA_ZONE || 'aliexpress_unlocker';
 
 // ═══════════════════════════════════════════
 // الإعدادات
@@ -40,12 +37,10 @@ const COMMON_WORDS = new Set([
   'top','super','ultra','mini','max','premium','fast','pack','box',
 ]);
 
-// ⭐ Circuit Breaker — 4 مزودين
+// ⭐ Circuit Breaker State
 const providerState = {
-  apify:       { status: 'active', consecutiveFailures: 0, reason: null },
-  brightdata:  { status: 'active', consecutiveFailures: 0, reason: null },
   scrapingant: { status: 'active', consecutiveFailures: 0, reason: null },
-  scraperapi:  { status: 'active', consecutiveFailures: 0, reason: null },
+  scraperapi: { status: 'active', consecutiveFailures: 0, reason: null },
 };
 
 // ═══════════════════════════════════════════
@@ -61,23 +56,24 @@ function toNum(v) {
 }
 
 // ═══════════════════════════════════════════
-// ⭐ 1. حالة المزودين — كل تشغيل نظيف
+// ⭐ 1. حالة نظيفة كل تشغيل — لا معطل محفوظ
 // ═══════════════════════════════════════════
 
 async function restoreProviderState() {
-  // ✅ كل تشغيل يبدأ من الصفر — لا حالة سابقة
+  // ✅ كل تشغيل يبدأ من جديد — كل المزودين نشطون
   console.log('🔄 حالة نظيفة — كل المزودين نشطون من جديد');
   
-  for (const key of ['apify', 'brightdata', 'scrapingant', 'scraperapi']) {
-    providerState[key].status = 'active';
-    providerState[key].consecutiveFailures = 0;
-    providerState[key].reason = null;
-  }
+  providerState.scrapingant.status = 'active';
+  providerState.scrapingant.consecutiveFailures = 0;
+  providerState.scrapingant.reason = null;
+  
+  providerState.scraperapi.status = 'active';
+  providerState.scraperapi.consecutiveFailures = 0;
+  providerState.scraperapi.reason = null;
 }
 
 async function saveProviderState() {
-  // ❌ لا نحفظ — كل تشغيل مستقل
-  // (الدالة موجودة للتوافق لكنها لا تفعل شيئاً)
+  // ❌ لا نحفظ — كل تشغيل مستقل تماماً
   return;
 }
 
@@ -102,8 +98,6 @@ async function checkApifyHealth() {
       const err = await response.text();
       if (err.includes('insufficient') || err.includes('limit') || err.includes('402')) {
         console.log('  ❌ Apify: نفد الرصيد');
-        providerState.apify.status = 'disabled';
-        providerState.apify.reason = 'quota_exhausted';
         return { healthy: false, reason: 'no_credit' };
       }
       return { healthy: false, reason: 'error' };
@@ -144,6 +138,7 @@ async function pickRandomCategory() {
     );
 
     let used = [];
+    let lastPicked = null;
 
     if (saved.rows.length > 0) {
       try {
@@ -151,6 +146,7 @@ async function pickRandomCategory() {
         const ageDays = (Date.now() - (state.savedAt || 0)) / (1000 * 60 * 60 * 24);
         if (ageDays < 7) {
           used = Array.isArray(state.used) ? state.used : [];
+          lastPicked = state.lastPicked;
         }
       } catch (e) {}
     }
@@ -242,7 +238,7 @@ async function pickDiscoverySeeds(count, category) {
 }
 
 // ═══════════════════════════════════════════
-// 5. Apify Discovery
+// 5. Apify Discovery (داخل الفئة)
 // ═══════════════════════════════════════════
 
 async function runApifyDiscovery(category) {
@@ -254,11 +250,6 @@ async function runApifyDiscovery(category) {
   let totalKeywords = 0;
 
   for (const seed of seeds) {
-    if (providerState.apify.status === 'disabled') {
-      console.log('  ⏭️ Apify معطل — توقف Discovery');
-      break;
-    }
-
     try {
       console.log(`  🔍 "${seed.keyword}"`);
       const items = await runApifyActor(seed.keyword, APIFY_MAX_ITEMS);
@@ -277,13 +268,6 @@ async function runApifyDiscovery(category) {
       await new Promise(r => setTimeout(r, 1000));
     } catch (e) {
       console.log(`     ❌ ${e.message.substring(0, 50)}`);
-      
-      if (e.message.includes('QUOTA')) {
-        providerState.apify.status = 'disabled';
-        providerState.apify.reason = 'quota_exhausted';
-        break;
-      }
-      
       await markProcessed(seed.keyword, false);
     }
   }
@@ -292,7 +276,7 @@ async function runApifyDiscovery(category) {
 }
 
 // ═══════════════════════════════════════════
-// 6. Enrichment
+// 6. Enrichment (داخل الفئة)
 // ═══════════════════════════════════════════
 
 async function runEnrichment(isEmergency = false, category = null) {
@@ -314,14 +298,11 @@ async function runEnrichment(isEmergency = false, category = null) {
   if (keywords.length === 0) return { totalSaved: 0 };
 
   let totalSaved = 0;
-  let stats = { apify: 0, brightdata: 0, scrapingant: 0, scraperapi: 0 };
+  let stats = { scrapingant: 0, scraperapi: 0 };
   let blocked = false;
 
   for (const row of keywords) {
-    // ⭐ فحص 4 مزودين
-    const anyActive = providerState.apify.status === 'active' ||
-                      providerState.brightdata.status === 'active' ||
-                      providerState.scrapingant.status === 'active' ||
+    const anyActive = providerState.scrapingant.status === 'active' ||
                       providerState.scraperapi.status === 'active';
 
     if (!anyActive) {
@@ -334,39 +315,22 @@ async function runEnrichment(isEmergency = false, category = null) {
 
     for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
       try {
-        const result = await fetchWithFallback(row.keyword, page);
-        const { html, items, source, kind } = result;
+        const { html, source } = await fetchWithFallback(row.keyword, page);
 
-        if (!html && !items) {
+        if (!html) {
           console.log(`      ⛔ p${page}: كل المزودين فشلوا`);
           blocked = true;
           break;
         }
 
-        stats[source] = (stats[source] || 0) + 1;
+        stats[source]++;
 
-        // ⭐ معالجة Apify (items) أو HTML
-        let products;
-        if (kind === 'items') {
-          products = items.map(item => ({
-            product_id: String(item.productId || ''),
-            title: item.title || 'Product',
-            price: parseFloat(item.price || 0) || 0,
-            original_price: parseFloat(item.originalPrice || 0) || 0,
-            discount: '',
-            rating: parseFloat(item.rating || 0) || 0,
-            orders_count: String(item.soldCount || ''),
-            image_url: item.imageUrl || '',
-          }));
-          console.log(`        📊 Apify items: ${products.length}`);
-        } else {
-          if (html.length < 5000) {
-            console.log(`      ⚠️ p${page}: HTML صغير (${html.length})`);
-            continue;
-          }
-          products = parseItems(html);
+        if (html.length < 5000) {
+          console.log(`      ⚠️ p${page}: HTML صغير (${html.length})`);
+          continue;
         }
 
+        const products = parseItems(html);
         const saved = await saveProductsBatch(products, row.keyword);
 
         console.log(`      ✅ p${page}: ${products.length} حلّل، ${saved} مخزّن (${source})`);
@@ -396,7 +360,7 @@ async function runEnrichment(isEmergency = false, category = null) {
 
   console.log(`\n📊 Enrichment:`);
   console.log(`  📦 مخزّن: ${totalSaved}`);
-  console.log(`  🅰️ Apify: ${stats.apify} | 🟣 BrightData: ${stats.brightdata} | 🔵 ScrapingAnt: ${stats.scrapingant} | 🟠 ScraperAPI: ${stats.scraperapi}`);
+  console.log(`  🔵 ScrapingAnt: ${stats.scrapingant} | 🟠 ScraperAPI: ${stats.scraperapi}`);
 
   return { totalSaved, blocked };
 }
@@ -416,15 +380,7 @@ async function runApifyActor(keyword, maxItems = 20) {
     timeout: 300000,
   });
 
-  if (!response.ok) {
-    if (response.status === 402 || response.status === 429) {
-      throw new Error('QUOTA: Apify');
-    }
-    if (response.status === 401 || response.status === 403) {
-      throw new Error('AUTH: Apify');
-    }
-    throw new Error(`Apify ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Apify ${response.status}`);
   return await response.json();
 }
 
@@ -518,7 +474,7 @@ async function saveApifyProducts(items, seedKeyword, category) {
 }
 
 // ═══════════════════════════════════════════
-// 10. اختيار Keywords
+// 10. اختيار Keywords من فئة محددة
 // ═══════════════════════════════════════════
 
 async function pickKeywordsFromDB(count, category) {
@@ -556,52 +512,7 @@ function buildSearchUrl(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 12. 🟣 BrightData
-// ═══════════════════════════════════════════
-
-async function fetchFromBrightData(keyword, page = 1) {
-  const targetUrl = buildSearchUrl(keyword, page);
-
-  const res = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${BRIGHTDATA_TOKEN.trim()}`,
-    },
-    body: JSON.stringify({
-      zone: BRIGHTDATA_ZONE.trim(),
-      url: targetUrl,
-      format: 'raw',
-      country: 'us',
-    }),
-    timeout: 90000,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    const lowerErr = errBody.toLowerCase();
-
-    if (lowerErr.includes('concurrency') || lowerErr.includes('too many')) {
-      throw new Error('CONCURRENCY: BrightData');
-    }
-    if (res.status === 429 || lowerErr.includes('rate limit')) {
-      throw new Error('RATE: BrightData');
-    }
-    if (lowerErr.includes('credits exhausted') || lowerErr.includes('quota') ||
-        lowerErr.includes('out of') || res.status === 402) {
-      throw new Error('QUOTA: BrightData');
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error('AUTH: BrightData');
-    }
-    throw new Error(`BrightData ${res.status}`);
-  }
-
-  return await res.text();
-}
-
-// ═══════════════════════════════════════════
-// 13. ScrapingAnt
+// 12. ScrapingAnt
 // ═══════════════════════════════════════════
 
 async function fetchFromScrapingAnt(keyword, page = 1) {
@@ -631,7 +542,7 @@ async function fetchFromScrapingAnt(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// 14. ScraperAPI
+// 13. ScraperAPI
 // ═══════════════════════════════════════════
 
 async function fetchFromScraperAPI(keyword, page = 1) {
@@ -661,16 +572,13 @@ async function fetchFromScraperAPI(keyword, page = 1) {
 }
 
 // ═══════════════════════════════════════════
-// ⭐⭐ 15. الدورة الكاملة
-// Apify → BrightData → ScrapingAnt → ScraperAPI
+// 14. Circuit Breaker + Fallback
 // ═══════════════════════════════════════════
 
 async function fetchWithFallback(keyword, page = 1) {
   const providers = [
-    { name: 'apify',       fn: runApifyActor,         state: providerState.apify,       icon: '🅰️', kind: 'items', onlyPage1: true },
-    { name: 'brightdata',  fn: fetchFromBrightData,   state: providerState.brightdata,  icon: '🟣', kind: 'html',  onlyPage1: false },
-    { name: 'scrapingant', fn: fetchFromScrapingAnt,  state: providerState.scrapingant, icon: '🔵', kind: 'html',  onlyPage1: false },
-    { name: 'scraperapi',  fn: fetchFromScraperAPI,   state: providerState.scraperapi,  icon: '🟠', kind: 'html',  onlyPage1: false },
+    { name: 'scrapingant', fn: fetchFromScrapingAnt, state: providerState.scrapingant, icon: '🔵' },
+    { name: 'scraperapi', fn: fetchFromScraperAPI, state: providerState.scraperapi, icon: '🟠' },
   ];
 
   for (const p of providers) {
@@ -679,41 +587,22 @@ async function fetchWithFallback(keyword, page = 1) {
       continue;
     }
 
-    // Apify لا يدعم الصفحات المتعددة
-    if (p.onlyPage1 && page > 1) {
-      console.log(`      ⏭️ ${p.name}: لا يدعم p${page}`);
-      continue;
-    }
-
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         console.log(`      ${p.icon} ${p.name} p${page} (${attempt}/3)...`);
-
-        const result = p.kind === 'items'
-          ? await p.fn(keyword, APIFY_MAX_ITEMS)
-          : await p.fn(keyword, page);
-
+        const html = await p.fn(keyword, page);
         p.state.consecutiveFailures = 0;
-
-        return {
-          html: p.kind === 'html' ? result : null,
-          items: p.kind === 'items' ? result : null,
-          source: p.name,
-          kind: p.kind,
-        };
-
+        return { html, source: p.name };
       } catch (e) {
         const msg = e.message;
         console.log(`      ⚠️ ${msg.substring(0, 80)}`);
 
         if (msg.includes('QUOTA')) {
-          console.log(`      🔴 ${p.name}: نفد الرصيد → تعطيل`);
           p.state.status = 'disabled';
           p.state.reason = 'quota_exhausted';
           break;
         }
         if (msg.includes('AUTH')) {
-          console.log(`      🔴 ${p.name}: مفتاح خاطئ → تعطيل`);
           p.state.status = 'disabled';
           p.state.reason = 'auth_failed';
           break;
@@ -737,11 +626,11 @@ async function fetchWithFallback(keyword, page = 1) {
     }
   }
 
-  return { html: null, items: null, source: null, kind: null };
+  return { html: null, source: null };
 }
 
 // ═══════════════════════════════════════════
-// 16. Parser
+// 15. Parser
 // ═══════════════════════════════════════════
 
 function extractText(v) {
@@ -868,7 +757,7 @@ function parseItems(html) {
 }
 
 // ═══════════════════════════════════════════
-// 17. حفظ Batch
+// 16. حفظ Batch
 // ═══════════════════════════════════════════
 
 async function saveProductsBatch(products, keyword) {
@@ -903,7 +792,7 @@ async function saveProductsBatch(products, keyword) {
 }
 
 // ═══════════════════════════════════════════
-// 18. الدالة الرئيسية
+// 17. الدالة الرئيسية
 // ═══════════════════════════════════════════
 
 async function main() {
@@ -911,8 +800,9 @@ async function main() {
   console.log('🧠 Smart Pipeline - دورة الفئات\n');
   console.log('═'.repeat(60));
   console.log('🎯 Endpoint: /wholesale?SearchText=');
-  console.log('🔄 الترتيب: Apify → BrightData → ScrapingAnt → ScraperAPI');
+  console.log('🎯 ScrapingAnt: browser=false | ScraperAPI: render=false');
   console.log('🎯 النمط: فئة عشوائية جديدة في كل تشغيل');
+  console.log('🎯 حالة نظيفة كل تشغيل — لا مزود معطل محفوظ');
   console.log('═'.repeat(60));
 
   const category = await pickRandomCategory();
@@ -922,7 +812,6 @@ async function main() {
     process.exit(1);
   }
 
-  // ⭐ حالة نظيفة كل تشغيل
   await restoreProviderState();
   const health = await checkApifyHealth();
 
@@ -951,7 +840,7 @@ async function main() {
     };
   }
 
-  await saveProviderState();  // لا يحفظ شيئاً
+  await saveProviderState();
 
   const stats = await db.execute(`
     SELECT 
@@ -973,11 +862,9 @@ async function main() {
   console.log(`  📚 كلمات: ${toNum(s.total_keywords)}`);
   console.log(`  ⏳ في الانتظار: ${toNum(s.pending)}`);
   console.log(`\n🔌 حالة المزودين:`);
-  console.log(`  🅰️  Apify:       ${providerState.apify.status} (${providerState.apify.consecutiveFailures} فشل)`);
-  console.log(`  🟣 BrightData:  ${providerState.brightdata.status} (${providerState.brightdata.consecutiveFailures} فشل)`);
   console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.consecutiveFailures} فشل)`);
-  console.log(`  🟠 ScraperAPI:  ${providerState.scraperapi.status} (${providerState.scraperapi.consecutiveFailures} فشل)`);
-  console.log(`\n💡 التشغيل التالي سيبدأ من جديد بنفس الترتيب`);
+  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.consecutiveFailures} فشل)`);
+  console.log(`\n💡 التشغيل التالي سيبدأ بحالة نظيفة جديدة`);
 }
 
 main().catch(err => {
