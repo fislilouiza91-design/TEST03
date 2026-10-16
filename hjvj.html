@@ -1,83 +1,34 @@
-name: Unzip and Extract
+name: Unzip Any Archive
 
 on:
-  workflow_dispatch:
+  push:
+  workflow_dispatch: # يسمح لك بتشغيله يدوياً في أي وقت
 
 jobs:
   unzip:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-
+      contents: write # ضروري جداً لكي يستطيع رفع الملفات
+      workflows: write #
+      
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract ZIP
+      - name: Unzip all zip files
         run: |
-          echo "🔍 البحث عن ملف ZIP..."
-          
-          # ابحث عن أي ملف zip
-          ZIP_FILE=$(find . -maxdepth 1 -name "*.zip" -type f | head -1)
-          
-          if [ -z "$ZIP_FILE" ]; then
-            echo "❌ لم أجد أي ملف ZIP"
-            exit 1
-          fi
-          
-          echo "📦 وجدت: $ZIP_FILE"
-          
-          # فك الضغط
-          unzip -o "$ZIP_FILE" -d ./extracted
-          
-          echo "✅ تم فك الضغط"
-          
-          # اعرض المحتوى
-          ls -la ./extracted
+          # البحث عن أي ملف ينتهي بـ zip وفك ضغطه في نفس المكان
+          for file in *.zip; do
+            if [ -f "$file" ]; then
+              echo "جاري فك ضغط الملف: $file"
+              unzip -o "$file"
+            fi
+          done
 
-      - name: Move files to root
+      - name: Commit extracted files
         run: |
-          # إذا كان هناك مجلد داخل extracted، انقل محتواه
-          EXTRACTED_DIR="./extracted"
-          
-          # إذا كان هناك مجلد واحد فقط داخل extracted
-          SUBDIRS=$(find "$EXTRACTED_DIR" -maxdepth 1 -type d | tail -n +2 | wc -l)
-          
-          if [ "$SUBDIRS" -eq 1 ]; then
-            # هناك مجلد واحد — انقل محتواه
-            SUBDIR=$(find "$EXTRACTED_DIR" -maxdepth 1 -type d | tail -n +2 | head -1)
-            echo "📁 نقل محتوى: $SUBDIR"
-            
-            # انقل كل شيء
-            mv "$SUBDIR"/* . 2>/dev/null || true
-            mv "$SUBDIR"/.[!.]* . 2>/dev/null || true
-            
-          else
-            # عدة عناصر — انقلها مباشرة
-            mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
-            mv "$EXTRACTED_DIR"/.[!.]* . 2>/dev/null || true
-          fi
-          
-          # احذف المجلدات المؤقتة
-          rm -rf ./extracted
-          
-          # احذف ملف ZIP الأصلي
-          rm -f *.zip
-          
-          echo "✅ تم التنظيف"
-          echo "📁 المحتوى النهائي:"
-          ls -la
-
-      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add -A
-          
-          if git diff --staged --quiet; then
-            echo "لا يوجد تغييرات"
-          else
-            git commit -m "Extract ZIP contents"
-            git push
-          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Auto-extract zip files to root" || echo "No changes to commit"
+          git push
