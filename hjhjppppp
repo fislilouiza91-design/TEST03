@@ -1,111 +1,27 @@
-// src/test-brightdata.js - اختبار BrightData مباشرة
-import fetch from 'node-fetch';
+name: Test BrightData
 
-const BRIGHTDATA_TOKEN = process.env.BRIGHTDATA_API_KEY;
-const BRIGHTDATA_ZONE = process.env.BRIGHTDATA_ZONE || 'aliexpress_unlocker';
+on:
+  workflow_dispatch:
 
-console.log('🧪 اختبار BrightData\n');
-console.log('═'.repeat(60));
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
-// ─── 1. التحقق من المتغيرات ───
-console.log('\n📋 المتغيرات:');
-console.log(`  BRIGHTDATA_API_KEY: ${BRIGHTDATA_TOKEN ? '✅ موجود (' + BRIGHTDATA_TOKEN.substring(0, 10) + '...)' : '❌ مفقود'}`);
-console.log(`  BRIGHTDATA_ZONE: ${BRIGHTDATA_ZONE}`);
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-if (!BRIGHTDATA_TOKEN) {
-  console.error('\n❌ BRIGHTDATA_API_KEY غير موجود!');
-  process.exit(1);
-}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-// ─── 2. اختبار الاتصال ───
-console.log('\n🌐 إرسال طلب إلى BrightData...');
-console.log('═'.repeat(60));
+      - name: Install node-fetch
+        run: npm install node-fetch@3 --no-audit --no-fund
 
-const targetUrl = 'https://www.aliexpress.com/wholesale?SearchText=bluetooth+earphones&catId=0&page=1';
-
-const start = Date.now();
-
-try {
-  const res = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${BRIGHTDATA_TOKEN.trim()}`,
-    },
-    body: JSON.stringify({
-      zone: BRIGHTDATA_ZONE.trim(),
-      url: targetUrl,
-      format: 'raw',
-      country: 'us',
-    }),
-  });
-
-  const elapsed = Date.now() - start;
-
-  console.log(`\n📥 الاستجابة (${elapsed}ms):`);
-  console.log(`  Status: ${res.status}`);
-  console.log(`  Status Text: ${res.statusText}`);
-
-  const body = await res.text();
-
-  console.log(`  Body length: ${body.length} حرف`);
-  console.log(`  أول 500 حرف:`);
-  console.log('─'.repeat(60));
-  console.log(body.substring(0, 500));
-  console.log('─'.repeat(60));
-
-  if (!res.ok) {
-    console.log('\n❌ فشل!');
-    console.log(`  HTTP ${res.status}: ${res.statusText}`);
-    
-    if (res.status === 401) console.log('  💡 التوكن غير صحيح');
-    if (res.status === 403) console.log('  💡 لا تملك صلاحية أو Zone خطأ');
-    if (res.status === 402) console.log('  💡 نفد الرصيد');
-    if (res.status === 400) console.log('  💡 طلب خاطئ — تحقق من Zone name');
-    if (res.status === 429) console.log('  💡 وصلت لحد الطلبات');
-    
-    process.exit(1);
-  }
-
-  // ─── 3. تحليل HTML ───
-  console.log('\n✅ نجح الاتصال!');
-  
-  if (body.length < 5000) {
-    console.log(`\n⚠️ HTML صغير (${body.length}) — قد يكون محظوراً`);
-    console.log('  محتوى:');
-    console.log(body.substring(0, 1000));
-  } else {
-    console.log(`\n✅ HTML كبير (${body.length}) — يبدو صحيحاً`);
-    
-    // ابحث عن مؤشرات المنتجات
-    const hasProductIds = body.includes('"productId"');
-    const hasItemList = body.includes('"itemList"');
-    const hasGridItems = body.includes('"gridItems"');
-    
-    console.log('\n📊 مؤشرات AliExpress:');
-    console.log(`  "productId": ${hasProductIds ? '✅' : '❌'}`);
-    console.log(`  "itemList": ${hasItemList ? '✅' : '❌'}`);
-    console.log(`  "gridItems": ${hasGridItems ? '✅' : '❌'}`);
-    
-    // احسب عدد المنتجات
-    const productMatches = body.match(/"productId"\s*:\s*"(\d{6,})"/g);
-    if (productMatches) {
-      const unique = new Set(productMatches.map(m => m.match(/\d{6,}/)[0]));
-      console.log(`\n🎯 منتجات فريدة: ${unique.size}`);
-    }
-  }
-
-} catch (e) {
-  const elapsed = Date.now() - start;
-  console.log(`\n❌ خطأ بعد ${elapsed}ms:`);
-  console.log(`  ${e.message}`);
-  
-  if (e.name === 'AbortError') console.log('  💡 انتهت المهلة');
-  if (e.message.includes('ENOTFOUND')) console.log('  💡 مشكلة DNS');
-  if (e.message.includes('ECONNREFUSED')) console.log('  💡 لا يمكن الاتصال');
-  
-  process.exit(1);
-}
-
-console.log('\n' + '═'.repeat(60));
-console.log('✅ انتهى الاختبار');
+      - name: Run BrightData Test
+        env:
+          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
+          BRIGHTDATA_ZONE: ${{ secrets.BRIGHTDATA_ZONE }}
+        run: node src/test-brightdata.js
