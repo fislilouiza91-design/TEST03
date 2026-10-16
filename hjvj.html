@@ -2,33 +2,71 @@ name: Unzip Any Archive
 
 on:
   push:
-  workflow_dispatch: # يسمح لك بتشغيله يدوياً في أي وقت
+  workflow_dispatch:
 
 jobs:
   unzip:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # ضروري جداً لكي يستطيع رفع الملفات
-      workflows: write #
-      
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip all zip files
+      - name: Unzip all zip files (excluding .github)
         run: |
-          # البحث عن أي ملف ينتهي بـ zip وفك ضغطه في نفس المكان
+          set -e
+          
           for file in *.zip; do
             if [ -f "$file" ]; then
-              echo "جاري فك ضغط الملف: $file"
-              unzip -o "$file"
+              echo "📦 جاري فك ضغط: $file"
+              
+              # فك الضغط في مجلد مؤقت
+              mkdir -p ./_temp_extract
+              unzip -o "$file" -d ./_temp_extract
+              
+              echo "📂 محتوى الـ ZIP:"
+              ls -la ./_temp_extract
+              
+              # انقل كل شيء ما عدا .github و .git
+              cd ./_temp_extract
+              
+              for item in * .[!.]*; do
+                [ "$item" = "." ] && continue
+                [ "$item" = ".." ] && continue
+                
+                if [ "$item" = ".github" ] || [ "$item" = ".git" ]; then
+                  echo "⏭️  تجاهل: $item"
+                  continue
+                fi
+                
+                if [ -e "$item" ]; then
+                  echo "➡️  نقل: $item"
+                  cp -r "$item" ../../
+                fi
+              done
+              
+              cd ../..
+              
+              # احذف المجلد المؤقت
+              rm -rf ./_temp_extract
+              
+              # احذف الـ ZIP الأصلي
+              rm -f "$file"
+              
+              echo "✅ انتهى: $file"
             fi
           done
+          
+          echo ""
+          echo "📁 المحتوى النهائي:"
+          ls -la
 
       - name: Commit extracted files
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Auto-extract zip files to root" || echo "No changes to commit"
+          git diff --staged --quiet || git commit -m "Auto-extract zip files (excluding .github)"
           git push
