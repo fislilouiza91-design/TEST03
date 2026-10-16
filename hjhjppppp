@@ -1,26 +1,1037 @@
-name: Test WebScraping.AI
+// src/smart-pipeline.js - دورة الفئات: كل تشغيل = فئة عشوائية جديدة
+// ✅ دورة نظيفة كل تشغيل + جاهز لاستقبال الكوبونات لاحقاً
+import fetch from 'node-fetch';
+import crypto from 'crypto';
+import { createClient } from '@libsql/client';
+import { generateCrossVariations, generateFromProductTitles, saveVariations } from './keyword-variations.js';
 
-on:
-  workflow_dispatch:
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
+const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
+const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+// ═══════════════════════════════════════════
+// الإعدادات
+// ═══════════════════════════════════════════
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+const DISCOVERY_KEYWORDS = 10;
+const ENRICHMENT_KEYWORDS = 30;
+const PAGES_PER_KEYWORD = 3;
+const MAX_CONSECUTIVE_FAILURES = 3;
+const APIFY_MAX_ITEMS = 50;
 
-      - name: Install node-fetch
-        run: npm install node-fetch@3 --no-audit --no-fund
+const FALLBACK_SEEDS = [
+  'bluetooth earphones', 'women dress', 'men t-shirt',
+  'kitchen knife', 'makeup brush', 'yoga mat',
+];
 
-      - name: Run WebScraping.AI Test
-        env:
-          WEBSCRAPING_API_KEY: ${{ secrets.WEBSCRAPING_API_KEY }}
-        run: node src/test-webscraping.js
+const COMMON_WORDS = new Set([
+  'for','the','and','with','from','new','hot','best','free','high','pro',
+  'sale','shipping','pcs','piece','set','plus','original','official','good',
+  'quality','smart','portable','wireless','digital','type','model','color',
+  'size','men','women','kids','baby','without','use','used','home',
+  'car','phone','case','made','material','style','fashion','design','item',
+  'top','super','ultra','mini','max','premium','fast','pack','box',
+]);
+
+// ⭐ Circuit Breaker State — 4 مزودين
+const providerState = {
+  apify:       { status: 'active', consecutiveFailures: 0, reason: null },
+  brightdata:  { status: 'active', consecutiveFailures: 0, reason: null },
+  scrapingant: { status: 'active', consecutiveFailures: 0, reason: null },
+  scraperapi:  { status: 'active', consecutiveFailures: 0, reason: null },
+};
+
+// ═══════════════════════════════════════════
+// 🔧 Helper: تحويل آمن للأرقام (BigInt من libsql)
+// ═══════════════════════════════════════════
+
+function toNum(v) {
+  if (v == null) return 0;
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// ═══════════════════════════════════════════
+// ⭐ 1. حالة المزودين — كل تشغيل نظيف
+// ═══════════════════════════════════════════
+
+async function restoreProviderState() {
+  // ✅ كل تشغيل يبدأ من الصفر — لا حالة سابقة
+  console.log('🔄 حالة نظيفة — كل المزودين نشطون من جديد');
+  
+  for (const key of ['apify', 'brightdata', 'scrapingant', 'scraperapi']) {
+    providerState[key].status = 'active';
+    providerState[key].consecutiveFailures = 0;
+    providerState[key].reason = null;
+  }
+}
+
+async function saveProviderState() {
+  // ❌ لا نحفظ — كل تشغيل مستقل
+  return;
+}
+
+// ═══════════════════════════════════════════
+// 2. فحص صحة Apify
+// ═══════════════════════════════════════════
+
+async function checkApifyHealth() {
+  console.log('🏥 فحص صحة Apify...');
+  try {
+    const actorId = 'apt_marble~aliexpress-search-scraper';
+    const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
+
+    const response = await fetch(runUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyword: 'bluetooth earphones', country: 'us', maxItems: 1 }),
+      timeout: 60000,
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      if (err.includes('insufficient') || err.includes('limit') || err.includes('402')) {
+        console.log('  ❌ Apify: نفد الرصيد');
+        providerState.apify.status = 'disabled';
+        providerState.apify.reason = 'quota_exhausted';
+        return { healthy: false, reason: 'no_credit' };
+      }
+      return { healthy: false, reason: 'error' };
+    }
+
+    const items = await response.json();
+    if (Array.isArray(items) && items.length > 0) {
+      console.log('  ✅ Apify: يعمل');
+      return { healthy: true };
+    }
+    return { healthy: false, reason: 'empty' };
+  } catch (error) {
+    console.log(`  ❌ Apify: ${error.message.substring(0, 60)}`);
+    return { healthy: false, reason: 'network' };
+  }
+}
+
+// ═══════════════════════════════════════════
+// ⭐ 3. اختيار فئة عشوائية لكل تشغيل
+// ═══════════════════════════════════════════
+
+async function pickRandomCategory() {
+  try {
+    const res = await db.execute(`
+      SELECT DISTINCT category FROM keywords_pipeline
+      WHERE enabled = 1 AND category IS NOT NULL AND category != ''
+    `);
+
+    if (res.rows.length === 0) {
+      console.log('⚠️ لا توجد فئات في keywords_pipeline');
+      return null;
+    }
+
+    const cats = res.rows.map(r => String(r.category));
+
+    const saved = await db.execute(
+      `SELECT value FROM system_state WHERE key = 'category_cycle'`
+    );
+
+    let used = [];
+
+    if (saved.rows.length > 0) {
+      try {
+        const state = JSON.parse(saved.rows[0].value);
+        const ageDays = (Date.now() - (state.savedAt || 0)) / (1000 * 60 * 60 * 24);
+        if (ageDays < 7) {
+          used = Array.isArray(state.used) ? state.used : [];
+        }
+      } catch (e) {}
+    }
+
+    let remaining = cats.filter(c => !used.includes(c));
+    let cycleReset = false;
+
+    if (remaining.length === 0) {
+      console.log('  🔄 اكتملت كل الفئات — بدء دورة جديدة');
+      used = [];
+      remaining = cats;
+      cycleReset = true;
+    }
+
+    const picked = remaining[Math.floor(Math.random() * remaining.length)];
+    used.push(picked);
+
+    await db.execute({
+      sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
+            VALUES ('category_cycle', ?, ?)`,
+      args: [JSON.stringify({
+        used,
+        lastPicked: picked,
+        totalCats: cats.length,
+        savedAt: Date.now(),
+      }), Date.now()],
+    });
+
+    console.log(`\n🎲 الفئة المختارة: [${picked}]`);
+    console.log(`   📚 إجمالي الفئات: ${cats.length}`);
+    console.log(`   ⏳ متبقٍ في الدورة: ${remaining.length - 1}`);
+    console.log(`   📋 مستخدمة حتى الآن: ${used.length}`);
+
+    const stRes = await db.execute({
+      sql: `SELECT 
+              COUNT(*) as total,
+              SUM(CASE WHEN last_run_at = 0 OR last_run_at IS NULL THEN 1 ELSE 0 END) as pending
+            FROM keywords_pipeline
+            WHERE enabled = 1 AND category = ?`,
+      args: [picked],
+    });
+    const total = toNum(stRes.rows[0]?.total);
+    const pending = toNum(stRes.rows[0]?.pending);
+    console.log(`   📊 كلمات الفئة: ${total} (جديدة: ${pending})\n`);
+
+    return picked;
+  } catch (e) {
+    console.error(`❌ فشل اختيار الفئة: ${e.message}`);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════
+// 4. اختيار Seeds من فئة محددة
+// ═══════════════════════════════════════════
+
+async function pickDiscoverySeeds(count, category) {
+  const existing = await db.execute({
+    sql: `SELECT keyword, category, source, run_count, last_run_at
+          FROM keywords_pipeline
+          WHERE enabled = 1 
+            AND category = ?
+            AND (last_run_at = 0 OR last_run_at IS NULL)
+          ORDER BY priority ASC, run_count ASC, RANDOM()
+          LIMIT ?`,
+    args: [category, count * 3],
+  });
+
+  let pool = existing.rows;
+
+  if (pool.length === 0) {
+    console.log(`  ⚠️ لا كلمات جديدة في [${category}] — استخدام أي كلمات متاحة`);
+    const all = await db.execute({
+      sql: `SELECT keyword, category, source FROM keywords_pipeline
+            WHERE enabled = 1 AND category = ?
+            ORDER BY RANDOM() LIMIT ?`,
+      args: [category, count],
+    });
+    return all.rows;
+  }
+
+  const rows = [...pool];
+  for (let i = rows.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+  }
+
+  return rows.slice(0, count);
+}
+
+// ═══════════════════════════════════════════
+// 5. Apify Discovery (داخل الفئة)
+// ═══════════════════════════════════════════
+
+async function runApifyDiscovery(category) {
+  console.log('\n🎭 Apify Discovery...');
+  const seeds = await pickDiscoverySeeds(DISCOVERY_KEYWORDS, category);
+  console.log(`  📋 ${seeds.length} كلمة من [${category}]\n`);
+
+  let totalProducts = 0;
+  let totalKeywords = 0;
+
+  for (const seed of seeds) {
+    if (providerState.apify.status === 'disabled') {
+      console.log('  ⏭️ Apify معطل — توقف Discovery');
+      break;
+    }
+
+    try {
+      console.log(`  🔍 "${seed.keyword}"`);
+      const items = await runApifyActor(seed.keyword, APIFY_MAX_ITEMS);
+
+      if (!Array.isArray(items) || items.length === 0) {
+        await markProcessed(seed.keyword, false);
+        continue;
+      }
+
+      const result = await saveApifyProducts(items, seed.keyword, category);
+      totalProducts += result.saved;
+      totalKeywords += result.newKeywords;
+
+      console.log(`     ✅ ${result.saved} منتج | ${result.newKeywords} كلمة`);
+      await markProcessed(seed.keyword, result.saved > 0);
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (e) {
+      console.log(`     ❌ ${e.message.substring(0, 50)}`);
+      
+      if (e.message.includes('QUOTA')) {
+        providerState.apify.status = 'disabled';
+        providerState.apify.reason = 'quota_exhausted';
+        break;
+      }
+      
+      await markProcessed(seed.keyword, false);
+    }
+  }
+
+  return { totalProducts, totalKeywords };
+}
+
+// ═══════════════════════════════════════════
+// 6. Enrichment (داخل الفئة)
+// ═══════════════════════════════════════════
+
+async function runEnrichment(isEmergency = false, category = null) {
+  if (isEmergency) {
+    console.log('\n🚨 Emergency Mode - توليد variations...');
+    try {
+      const crossVars = await generateCrossVariations();
+      const titleVars = await generateFromProductTitles();
+      const inserted = await saveVariations([...crossVars, ...titleVars].slice(0, 50));
+      console.log(`  ✅ ${inserted} كلمة أُضيفت`);
+    } catch (e) {
+      console.log(`  ⚠️ ${e.message.substring(0, 60)}`);
+    }
+  }
+
+  const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS, category);
+  console.log(`\n📋 ${keywords.length} كلمة من [${category}] (${PAGES_PER_KEYWORD} صفحات)\n`);
+
+  if (keywords.length === 0) return { totalSaved: 0 };
+
+  let totalSaved = 0;
+  let totalCoupons = 0;   // ⭐ عدّاد الكوبونات
+  let stats = { scrapingant: 0, scraperapi: 0 };
+  let blocked = false;
+
+  for (const row of keywords) {
+    const anyActive = providerState.scrapingant.status === 'active' ||
+                      providerState.scraperapi.status === 'active';
+
+    if (!anyActive) {
+      blocked = true;
+      break;
+    }
+
+    console.log(`\n🔍 "${row.keyword}"`);
+    let keywordSaved = 0;
+
+    for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
+      try {
+        const { html, source } = await fetchWithFallback(row.keyword, page);
+
+        if (!html) {
+          console.log(`      ⛔ p${page}: كل المزودين فشلوا`);
+          blocked = true;
+          break;
+        }
+
+        stats[source]++;
+
+        if (html.length < 5000) {
+          console.log(`      ⚠️ p${page}: HTML صغير (${html.length})`);
+          continue;
+        }
+
+        const products = parseItems(html);
+        const result = await saveProductsBatch(products, row.keyword);
+        
+        // ⭐ استقبال النتيجة الجديدة (كائن بدل رقم)
+        const saved = typeof result === 'object' ? result.products : result;
+        const coupons = typeof result === 'object' ? result.coupons : 0;
+
+        console.log(`      ✅ p${page}: ${products.length} حلّل، ${saved} مخزّن (${source})`);
+        if (coupons > 0) {
+          console.log(`      🎁 ${coupons} كوبون محفوظ`);
+        }
+        
+        keywordSaved += saved;
+        totalCoupons += coupons;
+
+        if (products.length === 0) {
+          console.log(`      ⏹️ لا مزيد من النتائج`);
+          break;
+        }
+
+        await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
+
+      } catch (error) {
+        console.log(`      ❌ p${page}: ${error.message.substring(0, 60)}`);
+      }
+    }
+
+    if (blocked) break;
+
+    if (keywordSaved > 0) {
+      console.log(`  📦 "${row.keyword}": ${keywordSaved} منتج`);
+      totalSaved += keywordSaved;
+    }
+
+    await markProcessed(row.keyword, keywordSaved > 0);
+  }
+
+  console.log(`\n📊 Enrichment:`);
+  console.log(`  📦 مخزّن: ${totalSaved}`);
+  if (totalCoupons > 0) {
+    console.log(`  🎁 كوبونات: ${totalCoupons}`);
+  }
+  console.log(`  🔵 ScrapingAnt: ${stats.scrapingant} | 🟠 ScraperAPI: ${stats.scraperapi}`);
+
+  return { totalSaved, totalCoupons, blocked };
+}
+
+// ═══════════════════════════════════════════
+// 7. Apify Actor
+// ═══════════════════════════════════════════
+
+async function runApifyActor(keyword, maxItems = 20) {
+  const actorId = 'apt_marble~aliexpress-search-scraper';
+  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
+
+  const response = await fetch(runUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keyword, country: 'us', currency: 'USD', maxItems }),
+    timeout: 300000,
+  });
+
+  if (!response.ok) {
+    if (response.status === 402 || response.status === 429) {
+      throw new Error('QUOTA: Apify');
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('AUTH: Apify');
+    }
+    throw new Error(`Apify ${response.status}`);
+  }
+  return await response.json();
+}
+
+// ═══════════════════════════════════════════
+// 8. دوال مساعدة
+// ═══════════════════════════════════════════
+
+function generateImageHash(url) {
+  if (!url) return null;
+  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
+  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
+  return null;
+}
+
+function extractTokens(title) {
+  if (!title) return '';
+  const stop = new Set(['for','the','and','with','from','new','hot','best','free',
+    'high','pro','sale','shipping','pcs','piece','set']);
+  return title.toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !stop.has(w) && !/^\d+$/.test(w))
+    .slice(0, 12)
+    .join(' ');
+}
+
+// ═══════════════════════════════════════════
+// 🎁 9. حفظ الكوبونات (جاهز — ينتظر البيانات)
+// ═══════════════════════════════════════════
+
+async function saveCoupons(productId, coupons) {
+  if (!coupons || coupons.length === 0) return 0;
+  
+  const now = Date.now();
+  let saved = 0;
+  
+  for (const c of coupons) {
+    if (!c.code) continue;
+    
+    try {
+      const r = await db.execute({
+        sql: `INSERT INTO product_coupons 
+              (product_id, coupon_code, discount_type, discount_value,
+               min_spend_usd, expires_at, is_active, description, source,
+               created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+              ON CONFLICT(product_id, coupon_code) DO UPDATE SET
+                discount_value = excluded.discount_value,
+                min_spend_usd = excluded.min_spend_usd,
+                expires_at = excluded.expires_at,
+                is_active = excluded.is_active,
+                updated_at = excluded.updated_at`,
+        args: [
+          productId,
+          c.code,
+          c.type || 'USD',
+          c.value || 0,
+          c.minSpend || 0,
+          c.expiresAt || (now + 30 * 24 * 60 * 60 * 1000),
+          c.description || '',
+          c.source || 'unknown',
+          now,
+          now,
+        ],
+      });
+      
+      if (toNum(r.rowsAffected) > 0) saved++;
+    } catch (e) {
+      // تجاهل أخطاء الكوبون — لا توقف التدفق
+    }
+  }
+  
+  return saved;
+}
+
+// ═══════════════════════════════════════════
+// 🎁 10. استخراج الكوبونات من بيانات المنتج
+// ═══════════════════════════════════════════
+// ⏳ جاهزة — ستُملأ عند إضافة:
+//    - AliExpress Affiliate API
+//    - ScrapingAnt لصفحة المنتج
+//    - مساهمات المستخدمين (لاحقاً)
+
+function extractCouponsFromProduct(p) {
+  const coupons = [];
+  
+  // ═══════════════════════════════════
+  // المصدر 1: Affiliate API (لاحقاً)
+  // ═══════════════════════════════════
+  if (p.coupon_info) {
+    coupons.push({
+      code: p.coupon_info.coupon_code,
+      type: p.coupon_info.discount_type || 'USD',
+      value: parseFloat(p.coupon_info.discount_value) || 0,
+      minSpend: parseFloat(p.coupon_info.min_spend_usd) || 0,
+      expiresAt: p.coupon_info.expires_at 
+        ? new Date(p.coupon_info.expires_at).getTime()
+        : null,
+      description: p.coupon_info.description || '',
+      source: 'affiliate_api',
+    });
+  }
+  
+  // ═══════════════════════════════════
+  // المصدر 2: scraping صفحة المنتج (لاحقاً)
+  // ═══════════════════════════════════
+  if (p.scraped_coupons && Array.isArray(p.scraped_coupons)) {
+    for (const c of p.scraped_coupons) {
+      coupons.push({
+        code: c.code,
+        type: c.type || 'USD',
+        value: c.value || 0,
+        minSpend: c.minSpend || 0,
+        expiresAt: c.expiresAt,
+        description: c.description || '',
+        source: 'scraping',
+      });
+    }
+  }
+  
+  return coupons;
+}
+
+// ═══════════════════════════════════════════
+// 11. حفظ Apify Products
+// ═══════════════════════════════════════════
+
+async function saveApifyProducts(items, seedKeyword, category) {
+  const now = Date.now();
+  let saved = 0;
+  let couponsSaved = 0;
+  const statements = [];
+  const derived = new Map();
+
+  for (const item of items) {
+    if (!item.productId || !item.title) continue;
+    if (item.title.length < 15) continue;
+
+    const tokens = extractTokens(item.title);
+    const words = tokens.split(' ').filter(w => w.length >= 4 && !COMMON_WORDS.has(w));
+
+    statements.push({
+      sql: `INSERT OR IGNORE INTO products 
+            (product_id, title, title_tokens, category_path,
+             current_price_usd, original_price_usd, rating, orders_count,
+             image_url, image_hash, source_keyword, source_type,
+             first_seen_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'apify', ?, ?)`,
+      args: [String(item.productId), item.title, tokens,
+        (item.categoryPath || []).join(','),
+        parseFloat(item.price || 0) || 0,
+        parseFloat(item.originalPrice || 0) || 0,
+        parseFloat(item.rating || 0) || 0,
+        parseInt(item.soldCount || 0) || 0,
+        item.imageUrl || '', generateImageHash(item.imageUrl),
+        seedKeyword, now, now],
+    });
+
+    // 🎁 استخرج الكوبونات
+    const coupons = extractCouponsFromProduct(item);
+    if (coupons.length > 0) {
+      couponsSaved += await saveCoupons(String(item.productId), coupons);
+    }
+
+    for (let i = 0; i < words.length - 1; i++) {
+      const bigram = `${words[i]} ${words[i + 1]}`;
+      if (bigram.length >= 10 && bigram.length <= 35) {
+        derived.set(bigram, (derived.get(bigram) || 0) + 1);
+      }
+    }
+  }
+
+  if (statements.length > 0) {
+    try {
+      const result = await db.batch(statements, 'write');
+      for (const r of result) if (toNum(r.rowsAffected) > 0) saved++;
+    } catch (e) {}
+  }
+
+  const sorted = [...derived.entries()].filter(([_, f]) => f >= 2)
+    .sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+  let newKeywords = 0;
+  for (const [kw] of sorted) {
+    const r = await db.execute({
+      sql: `INSERT OR IGNORE INTO keywords_pipeline 
+            (keyword, category, source, priority, created_at) 
+            VALUES (?, ?, 'apify_derived', 7, ?)`,
+      args: [kw, category, now],
+    });
+    if (toNum(r.rowsAffected) > 0) newKeywords++;
+  }
+
+  return { saved, newKeywords, coupons: couponsSaved };
+}
+
+// ═══════════════════════════════════════════
+// 12. اختيار Keywords من فئة محددة
+// ═══════════════════════════════════════════
+
+async function pickKeywordsFromDB(count, category) {
+  if (!category) return [];
+
+  const all = await db.execute({
+    sql: `SELECT keyword, category FROM keywords_pipeline
+          WHERE enabled = 1 
+            AND category = ?
+            AND (last_run_at = 0 OR last_run_at IS NULL)
+          ORDER BY priority ASC, run_count ASC, RANDOM()
+          LIMIT ?`,
+    args: [category, count],
+  });
+
+  return all.rows;
+}
+
+async function markProcessed(keyword, success) {
+  await db.execute({
+    sql: `UPDATE keywords_pipeline
+          SET last_run_at = ?, run_count = run_count + 1,
+              success_count = success_count + ?, fail_count = fail_count + ?
+          WHERE keyword = ?`,
+    args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword],
+  });
+}
+
+// ═══════════════════════════════════════════
+// 13. buildSearchUrl
+// ═══════════════════════════════════════════
+
+function buildSearchUrl(keyword, page = 1) {
+  return `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&catId=0&page=${page}`;
+}
+
+// ═══════════════════════════════════════════
+// 14. ScrapingAnt
+// ═══════════════════════════════════════════
+
+async function fetchFromScrapingAnt(keyword, page = 1) {
+  const targetUrl = buildSearchUrl(keyword, page);
+  const url = new URL('https://api.scrapingant.com/v2/general');
+
+  url.searchParams.set('x-api-key', SCRAPINGANT_KEY);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('browser', 'false');
+  url.searchParams.set('proxy_country', 'US');
+
+  const res = await fetch(url.toString(), { timeout: 60000 });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    const lowerErr = errBody.toLowerCase();
+
+    if (lowerErr.includes('concurrency') || lowerErr.includes('too many')) throw new Error('CONCURRENCY: ScrapingAnt');
+    if (res.status === 429 || lowerErr.includes('rate limit')) throw new Error('RATE: ScrapingAnt');
+    if (lowerErr.includes('credits exhausted') || lowerErr.includes('quota') ||
+        lowerErr.includes('no credits') || res.status === 402) throw new Error('QUOTA: ScrapingAnt');
+    if (res.status === 401 || res.status === 403) throw new Error('AUTH: ScrapingAnt');
+    throw new Error(`ScrapingAnt ${res.status}`);
+  }
+
+  return await res.text();
+}
+
+// ═══════════════════════════════════════════
+// 15. ScraperAPI
+// ═══════════════════════════════════════════
+
+async function fetchFromScraperAPI(keyword, page = 1) {
+  const targetUrl = buildSearchUrl(keyword, page);
+  const url = new URL('https://api.scraperapi.com/');
+
+  url.searchParams.set('api_key', SCRAPERAPI_KEY);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('render', 'false');
+  url.searchParams.set('country_code', 'us');
+
+  const res = await fetch(url.toString(), { timeout: 60000 });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    const lowerErr = errBody.toLowerCase();
+
+    if (lowerErr.includes('concurrency') || lowerErr.includes('too many concurrent')) throw new Error('CONCURRENCY: ScraperAPI');
+    if (res.status === 429 || lowerErr.includes('rate limit')) throw new Error('RATE: ScraperAPI');
+    if (lowerErr.includes('credits exhausted') || lowerErr.includes('no credits') ||
+        lowerErr.includes('quota') || res.status === 402) throw new Error('QUOTA: ScraperAPI');
+    if (res.status === 401 || res.status === 403) throw new Error('AUTH: ScraperAPI');
+    throw new Error(`ScraperAPI ${res.status}`);
+  }
+
+  return await res.text();
+}
+
+// ═══════════════════════════════════════════
+// 16. Circuit Breaker + Fallback
+// ═══════════════════════════════════════════
+
+async function fetchWithFallback(keyword, page = 1) {
+  const providers = [
+    { name: 'scrapingant', fn: fetchFromScrapingAnt, state: providerState.scrapingant, icon: '🔵' },
+    { name: 'scraperapi', fn: fetchFromScraperAPI, state: providerState.scraperapi, icon: '🟠' },
+  ];
+
+  for (const p of providers) {
+    if (p.state.status === 'disabled') {
+      console.log(`      ⏭️ ${p.name}: معطل`);
+      continue;
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`      ${p.icon} ${p.name} p${page} (${attempt}/3)...`);
+        const html = await p.fn(keyword, page);
+        p.state.consecutiveFailures = 0;
+        return { html, source: p.name };
+      } catch (e) {
+        const msg = e.message;
+        console.log(`      ⚠️ ${msg.substring(0, 80)}`);
+
+        if (msg.includes('QUOTA')) {
+          p.state.status = 'disabled';
+          p.state.reason = 'quota_exhausted';
+          break;
+        }
+        if (msg.includes('AUTH')) {
+          p.state.status = 'disabled';
+          p.state.reason = 'auth_failed';
+          break;
+        }
+        if (msg.includes('CONCURRENCY') || msg.includes('RATE')) {
+          if (attempt < 3) {
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+            continue;
+          } else {
+            p.state.consecutiveFailures++;
+            if (p.state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+              p.state.status = 'disabled';
+              p.state.reason = 'too_many_failures';
+            }
+            break;
+          }
+        }
+        p.state.consecutiveFailures++;
+        break;
+      }
+    }
+  }
+
+  return { html: null, source: null };
+}
+
+// ═══════════════════════════════════════════
+// 17. Parser
+// ═══════════════════════════════════════════
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : '';
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
+      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
+      'price', 'desc', 'label'];
+    for (const k of keys) {
+      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    }
+    for (const k in v) {
+      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    }
+    return '';
+  }
+  return String(v);
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+
+  if (arrText) {
+    let arr;
+    try { arr = JSON.parse(arrText); } catch (e) { arr = null; }
+
+    if (Array.isArray(arr) && arr.length > 0) {
+      const out = [];
+      for (const o of arr) {
+        try {
+          if (!o || typeof o !== 'object') continue;
+          const id = o.productId || o.id || (o.item && o.item.productId);
+          if (!id) continue;
+
+          const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+          const title = clean(extractText(rawTitle));
+
+          let img = '';
+          if (o.image) {
+            img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+          }
+          if (!img && o.picUrl) {
+            img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+          }
+          if (img && img.startsWith('//')) img = 'https:' + img;
+
+          const p = o.prices || {};
+          const sale = p.salePrice || {};
+          const orig = p.originalPrice || {};
+          const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
+                        sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+          const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
+          const discount = extractText(o.discount || sale.discount || '');
+
+          const rating = extractText(
+            (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
+            o.averageStarRate || o.starRating || ''
+          );
+          const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+          out.push({
+            product_id: String(id),
+            title: title || 'Product',
+            price: parseFloat(String(price).replace(/[^\d.]/g, '')) || 0,
+            original_price: parseFloat(String(oldPrice).replace(/[^\d.]/g, '')) || 0,
+            discount: discount,
+            rating: parseFloat(String(rating).replace(/[^\d.]/g, '')) || 0,
+            orders_count: String(sold),
+            image_url: img,
+            
+            // 🎁 حقول للكوبونات (فارغة حالياً)
+            coupon_info: null,
+            scraped_coupons: null,
+          });
+        } catch (e) {}
+      }
+
+      if (out.length > 0) {
+        console.log(`        📊 JSON: ${out.length}`);
+        return out;
+      }
+    }
+  }
+
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      product_id: m[1], title: 'Product', price: 0, original_price: 0,
+      discount: '', rating: 0, orders_count: '', image_url: '',
+      coupon_info: null,
+      scraped_coupons: null,
+    });
+  }
+
+  if (out.length > 0) console.log(`        📊 regex: ${out.length}`);
+  return out;
+}
+
+// ═══════════════════════════════════════════
+// 18. حفظ Batch
+// ═══════════════════════════════════════════
+
+async function saveProductsBatch(products, keyword) {
+  if (products.length === 0) return { products: 0, coupons: 0 };
+
+  const now = Date.now();
+  const statements = products
+    .filter(p => p.product_id && p.title && p.title.length > 5)
+    .map(p => ({
+      sql: `INSERT OR IGNORE INTO products 
+            (product_id, title, title_tokens, current_price_usd,
+             original_price_usd, rating, orders_count, image_url,
+             image_hash, source_keyword, source_type,
+             first_seen_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enrichment', ?, ?)`,
+      args: [p.product_id, p.title, extractTokens(p.title), p.price || 0,
+        p.original_price || 0, p.rating || 0, 0,
+        p.image_url || '', generateImageHash(p.image_url), keyword, now, now],
+    }));
+
+  let inserted = 0;
+  let couponsSaved = 0;
+  
+  // ═══════════════════════════════════════
+  // حفظ المنتجات
+  // ═══════════════════════════════════════
+  if (statements.length > 0) {
+    try {
+      const result = await db.batch(statements, 'write');
+      for (const r of result) if (toNum(r.rowsAffected) > 0) inserted++;
+    } catch (e) {
+      console.error(`        ❌ ${e.message.substring(0, 60)}`);
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // 🎁 استخرج الكوبونات (إن وُجدت)
+  // ═══════════════════════════════════════
+  for (const p of products) {
+    const coupons = extractCouponsFromProduct(p);
+    if (coupons.length > 0) {
+      couponsSaved += await saveCoupons(p.product_id, coupons);
+    }
+  }
+
+  return { products: inserted, coupons: couponsSaved };
+}
+
+// ═══════════════════════════════════════════
+// 19. الدالة الرئيسية
+// ═══════════════════════════════════════════
+
+async function main() {
+  const start = Date.now();
+  console.log('🧠 Smart Pipeline - دورة الفئات\n');
+  console.log('═'.repeat(60));
+  console.log('🎯 Endpoint: /wholesale?SearchText=');
+  console.log('🎯 ScrapingAnt: browser=false | ScraperAPI: render=false');
+  console.log('🎯 النمط: فئة عشوائية جديدة في كل تشغيل');
+  console.log('🎯 حالة نظيفة كل تشغيل — لا مزود معطل محفوظ');
+  console.log('🎁 جاهز لاستقبال الكوبونات');
+  console.log('═'.repeat(60));
+
+  const category = await pickRandomCategory();
+
+  if (!category) {
+    console.log('\n⚠️ لا توجد فئات — نفّذ import-categories.js أولاً');
+    process.exit(1);
+  }
+
+  await restoreProviderState();
+  const health = await checkApifyHealth();
+
+  let result;
+
+  if (health.healthy) {
+    console.log('\n✅ Apify سليم → Discovery + Enrichment\n');
+    const discovery = await runApifyDiscovery(category);
+    console.log('\n' + '─'.repeat(60));
+    const enrichment = await runEnrichment(false, category);
+    result = {
+      mode: 'normal',
+      category,
+      apifyProducts: discovery.totalProducts,
+      apifyKeywords: discovery.totalKeywords,
+      enrichmentProducts: enrichment.totalSaved,
+      enrichmentCoupons: enrichment.totalCoupons || 0,
+    };
+  } else {
+    console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
+    const emergency = await runEnrichment(true, category);
+    result = {
+      mode: 'emergency',
+      category,
+      reason: health.reason,
+      emergencyProducts: emergency.totalSaved,
+      emergencyCoupons: emergency.totalCoupons || 0,
+    };
+  }
+
+  await saveProviderState();
+
+  const stats = await db.execute(`
+    SELECT 
+      (SELECT COUNT(*) FROM products) as total_products,
+      (SELECT COUNT(*) FROM keywords_pipeline) as total_keywords,
+      (SELECT COUNT(*) FROM keywords_pipeline 
+        WHERE last_run_at IS NULL OR last_run_at = 0) as pending,
+      (SELECT COUNT(*) FROM product_coupons WHERE is_active = 1) as total_coupons
+  `);
+
+  const s = stats.rows[0];
+  const mins = ((Date.now() - start) / 60000).toFixed(1);
+
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`📊 تقرير Smart Pipeline (${mins} دقيقة)`);
+  console.log(`${'═'.repeat(60)}`);
+  console.log(`  🎯 الوضع: ${result.mode.toUpperCase()}`);
+  console.log(`  🏷️  الفئة: [${result.category}]`);
+  console.log(`  📦 منتجات: ${toNum(s.total_products)}`);
+  console.log(`  📚 كلمات: ${toNum(s.total_keywords)}`);
+  console.log(`  ⏳ في الانتظار: ${toNum(s.pending)}`);
+  console.log(`  🎁 كوبونات نشطة: ${toNum(s.total_coupons)}`);
+  console.log(`\n🔌 حالة المزودين:`);
+  console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.consecutiveFailures} فشل)`);
+  console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.consecutiveFailures} فشل)`);
+  console.log(`\n💡 التشغيل التالي سيبدأ بحالة نظيفة جديدة`);
+}
+
+main().catch(err => {
+  console.error('💥 خطأ قاتل:', err);
+  process.exit(1);
+});
