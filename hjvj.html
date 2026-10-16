@@ -1,8 +1,10 @@
 name: Unzip Any Archive
 
 on:
-  push:
   workflow_dispatch:
+  push:
+    paths:
+      - '*.zip'
 
 jobs:
   unzip:
@@ -13,60 +15,95 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Unzip all zip files (excluding .github)
+      - name: Clean old temp folders
+        run: |
+          echo "🧹 تنظيف قديم..."
+          rm -rf _temp_extract
+          rm -rf proj0101-main
+          ls -la
+
+      - name: Extract ZIP to root
         run: |
           set -e
           
-          for file in *.zip; do
-            if [ -f "$file" ]; then
-              echo "📦 جاري فك ضغط: $file"
-              
-              # فك الضغط في مجلد مؤقت
-              mkdir -p ./_temp_extract
-              unzip -o "$file" -d ./_temp_extract
-              
-              echo "📂 محتوى الـ ZIP:"
-              ls -la ./_temp_extract
-              
-              # انقل كل شيء ما عدا .github و .git
-              cd ./_temp_extract
-              
-              for item in * .[!.]*; do
-                [ "$item" = "." ] && continue
-                [ "$item" = ".." ] && continue
-                
-                if [ "$item" = ".github" ] || [ "$item" = ".git" ]; then
-                  echo "⏭️  تجاهل: $item"
-                  continue
-                fi
-                
-                if [ -e "$item" ]; then
-                  echo "➡️  نقل: $item"
-                  cp -r "$item" ../../
-                fi
-              done
-              
-              cd ../..
-              
-              # احذف المجلد المؤقت
-              rm -rf ./_temp_extract
-              
-              # احذف الـ ZIP الأصلي
-              rm -f "$file"
-              
-              echo "✅ انتهى: $file"
+          # ابحث عن ZIP
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1)
+          
+          if [ -z "$ZIP_FILE" ]; then
+            echo "⚠️ لا يوجد ملف ZIP"
+            exit 0
+          fi
+          
+          echo "📦 فك الضغط: $ZIP_FILE"
+          
+          # فك الضغط في مجلد مؤقت
+          mkdir -p _temp_extract
+          unzip -o "$ZIP_FILE" -d _temp_extract
+          
+          echo "📂 محتوى ZIP:"
+          ls -la _temp_extract
+          
+          # ⭐ اكتشف المجلد الأعلى المستوى (إن وُجد)
+          # إذا كان هناك مجلد واحد فقط، ادخل إليه
+          
+          cd _temp_extract
+          
+          # احسب عدد المجلدات (بدون الملفات)
+          DIRS=$(find . -maxdepth 1 -type d | tail -n +2)
+          DIR_COUNT=$(echo "$DIRS" | wc -l)
+          
+          if [ "$DIR_COUNT" -eq 1 ]; then
+            # مجلد واحد — ادخل إليه
+            TOP_DIR=$(basename "$DIRS")
+            echo "📁 المجلد الأعلى: $TOP_DIR"
+            cd "$TOP_DIR"
+          fi
+          
+          echo "📂 المحتوى المراد نقله:"
+          ls -la
+          
+          # ⭐ انقل كل شيء إلى الجذر
+          for item in * .[!.]*; do
+            [ "$item" = "." ] && continue
+            [ "$item" = ".." ] && continue
+            
+            # تجاهل .github و .git
+            if [ "$item" = ".github" ] || [ "$item" = ".git" ]; then
+              echo "⏭️  تجاهل: $item"
+              continue
+            fi
+            
+            if [ -e "$item" ]; then
+              echo "➡️  نقل: $item"
+              cp -r "$item" "$GITHUB_WORKSPACE/"
             fi
           done
           
-          echo ""
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Cleanup
+        run: |
+          echo "🧹 حذف الملفات المؤقتة..."
+          rm -rf _temp_extract
+          rm -f *.zip
+          
           echo "📁 المحتوى النهائي:"
           ls -la
 
-      - name: Commit extracted files
+      - name: Commit and push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git diff --staged --quiet || git commit -m "Auto-extract zip files (excluding .github)"
-          git push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ لا توجد تغييرات"
+          else
+            git commit -m "Extract ZIP to root (clean)"
+            git push
+            echo "✅ تم الحفظ"
+          fi
