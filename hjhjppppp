@@ -1,1 +1,99 @@
-10861669-8714-4121-bf6c-20ea6743a152
+// src/test-webscraping.js - اختبار WebScraping.AI
+import fetch from 'node-fetch';
+
+const API_KEY = process.env.WEBSCRAPING_API_KEY;
+
+console.log('🧪 اختبار WebScraping.AI\n');
+console.log('═'.repeat(60));
+
+if (!API_KEY) {
+  console.error('❌ WEBSCRAPING_API_KEY غير موجود');
+  process.exit(1);
+}
+
+console.log(`🔑 API Key: ${API_KEY.substring(0, 10)}...\n`);
+
+// ─── دالة اختبار ───
+async function testCase(name, url, options = {}) {
+  console.log(`\n${'━'.repeat(60)}`);
+  console.log(`🧪 ${name}`);
+  console.log(`${'━'.repeat(60)}`);
+  
+  const params = new URLSearchParams({
+    api_key: API_KEY,
+    url: url,
+    ...options,
+  });
+  
+  const fullUrl = `https://api.webscraping.ai/html?${params}`;
+  
+  const start = Date.now();
+  
+  try {
+    const res = await fetch(fullUrl, { timeout: 120000 });
+    const elapsed = Date.now() - start;
+    
+    console.log(`📥 Status: ${res.status} ${res.statusText}`);
+    console.log(`⏱️  Time: ${elapsed}ms`);
+    
+    const text = await res.text();
+    console.log(`📏 Body length: ${text.length}`);
+    
+    if (!res.ok) {
+      console.log(`❌ خطأ:`);
+      console.log(text.substring(0, 500));
+      return { ok: false, status: res.status };
+    }
+    
+    if (text.length < 5000) {
+      console.log(`⚠️ محتوى صغير:`);
+      console.log(text.substring(0, 300));
+      return { ok: false, length: text.length };
+    }
+    
+    console.log(`✅ نجح! HTML كبير (${text.length} حرف)`);
+    
+    // احسب المنتجات
+    const matches = text.match(/"productId"\s*:\s*"(\d{6,})"/g);
+    if (matches) {
+      const unique = new Set(matches.map(m => m.match(/\d{6,}/)[0]));
+      console.log(`🎯 منتجات فريدة: ${unique.size}`);
+    }
+    
+    return { ok: true, length: text.length };
+    
+  } catch (e) {
+    const elapsed = Date.now() - start;
+    console.log(`❌ خطأ بعد ${elapsed}ms: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ─── اختبار 1: موقع بسيط (1 credit) ───
+await testCase(
+  'httpbin.org - Basic (1 credit)',
+  'https://httpbin.org/html'
+);
+
+// ─── اختبار 2: AliExpress - Basic ───
+await testCase(
+  'AliExpress - Basic (1 credit)',
+  'https://www.aliexpress.com/wholesale?SearchText=bluetooth+earphones'
+);
+
+// ─── اختبار 3: AliExpress + JS (5 credits) ───
+await testCase(
+  'AliExpress + JS (5 credits)',
+  'https://www.aliexpress.com/wholesale?SearchText=bluetooth+earphones',
+  { js: 'true' }
+);
+
+// ─── اختبار 4: AliExpress + JS + US (5 credits) ───
+await testCase(
+  'AliExpress + JS + US proxy',
+  'https://www.aliexpress.com/wholesale?SearchText=bluetooth+earphones',
+  { js: 'true', proxy: 'datacenter', country: 'us' }
+);
+
+console.log(`\n${'═'.repeat(60)}`);
+console.log('✅ انتهى الاختبار');
