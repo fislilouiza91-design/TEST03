@@ -38,6 +38,7 @@ export default {
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
+  // قائمة ضخمة جداً بالكلمات التي يجب تجاهلها (تشمل كلمات الحشو والمواصفات التقنية)
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
     'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
@@ -46,8 +47,9 @@ async function searchTursoDB(title, page, existingIds, env) {
     'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
     'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
     'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
-    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mAh',
-    'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'iphone', 
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mah',
+    'large', 'capacity', 'charging', 'charger', 'external', 'device', 'storage', 'capsule',
+    'cable', 'adapter', 'cover', 'protector', 'glass', 'iphone', 
     'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
   ]);
   
@@ -56,20 +58,24 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // نأخذ أول كلمتين مهمتين (لأن البحث بـ AND يحتاج لكلمات دقيقة)
-  let keywords = meaningfulWords.slice(0, 2);
+  // نأخذ أول 3 كلمات مهمة (مثل: romoss, power, bank)
+  let keywords = meaningfulWords.slice(0, 3);
   
+  // إزالة الجمع
   keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
-  // 🔥 هنا التغيير: استخدام AND بدلاً من OR لضمان تطابق كل الكلمات
-  const conditions = keywords.map(() => `p.title LIKE ?`).join(' AND ');
+  // العودة إلى OR لضمان عدم إرجاع نتائج فارغة
+  const conditions = keywords.map(() => `p.title LIKE ?`).join(' OR ');
   
-  // نظام النقاط: إعطاء نقاط أعلى للمنتجات التي تحتوي على الكلمات في بداية العنوان
+  // نظام النقاط: المنتج الذي يحتوي على كلمتين (20 نقطة) سيظهر قبل الذي يحتوي على كلمة واحدة (10 نقاط)
   let scoreSql = keywords.map(() => `(CASE WHEN p.title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
 
   const queryArgs = [];
+  // 1. متغيرات حساب النقاط (للـ SELECT)
   keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  
+  // 2. متغيرات شروط البحث (للـ WHERE)
   keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
