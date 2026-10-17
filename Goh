@@ -23,8 +23,14 @@ export default {
           throw new Error("Missing Turso configuration");
         }
 
-        // 🔥 الحل السحري للغات: جلب العنوان الإنجليزي باستخدام رقم المنتج
-        if (pid) {
+        // 🔥 1. ترجمة العنوان إلى الإنجليزية تلقائياً (إذا لم يكن إنجليزياً)
+        if (title) {
+          title = await translateToEnglish(title);
+          console.log("Translated Title:", title);
+        }
+
+        // 🔥 2. إذا كانت الترجمة فاشلة، نقوم بجلب العنوان الإنجليزي من صفحة المنتج
+        if (!title && pid) {
           try {
             const scraperUrl = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=https://www.aliexpress.com/item/${pid}.html`;
             const scrapeRes = await fetch(scraperUrl);
@@ -33,7 +39,6 @@ export default {
               const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
               if (ogTitleMatch && ogTitleMatch[1]) {
                 title = ogTitleMatch[1];
-                console.log("Translated Title:", title);
               }
             }
           } catch (e) {
@@ -56,6 +61,30 @@ export default {
   }
 }
 
+// ═══════════════════════════════════════════
+// دالة الترجمة التلقائية (بدون الحاجة لمفتاح API)
+// ═══════════════════════════════════════════
+async function translateToEnglish(text) {
+  try {
+    // استخدام نقطة نهاية جوجل المجانية للترجمة
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+    const res = await fetch(url);
+    if (!res.ok) return text; // إذا فشل الاتصال، نرجع النص الأصلي
+    
+    const data = await res.json();
+    if (data && data[0] && data[0][0] && data[0][0][0]) {
+      // دمج الترجمة في جملة واحدة
+      return data[0].map(item => item[0]).join('');
+    }
+  } catch (e) {
+    console.warn("Translation error:", e);
+  }
+  return text;
+}
+
+// ═══════════════════════════════════════════
+// دالة البحث في قاعدة البيانات
+// ═══════════════════════════════════════════
 async function searchTursoDB(title, page, existingIds, env) {
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
