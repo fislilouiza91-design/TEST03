@@ -21,6 +21,11 @@ export default {
       const existingIds = url.searchParams.get('existingIds') || '';
       
       try {
+        // التحقق من وجود متغيرات البيئة
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) {
+          throw new Error("Missing Turso configuration in Cloudflare Variables");
+        }
+
         const result = await searchTursoDB(title, page, existingIds, env);
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -32,19 +37,28 @@ export default {
       }
     }
 
-    return new Response('Smart-Turso API is running.', { status: 200, headers: corsHeaders });
+    return new Response('Smart-Turso API is running. Use /search-db', { status: 200, headers: corsHeaders });
   }
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
-  const stopWords = new Set(['for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best']);
+  // قائمة الكلمات العامة التي يجب تجاهلها لأنها تمنع ظهور النتائج
+  const stopWords = new Set([
+    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 
+    'quick', 'release', 'replacement', 'original', 'pcs', 'piece', 
+    'set', 'plus', 'high', 'quality', 'smart', 'portable'
+  ]);
+  
+  // استخراج أول 3 كلمات مهمة
   const keywords = title.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/)
     .filter(w => w.length > 3 && !stopWords.has(w))
     .slice(0, 3);
 
   if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  const conditions = keywords.map(() => `title LIKE ?`).join(' AND ');
+  // 🔥 التعديل الأهم: استخدام OR بدلاً من AND
+  // هذا يعني: ابحث عن المنتجات التي تحتوي على "watch" أو "strap" أو "silicone"
+  const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
   const queryArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
@@ -65,7 +79,7 @@ async function searchTursoDB(title, page, existingIds, env) {
            current_price_usd as price, original_price_usd as oldPrice, 
            rating, orders_count as sold 
     FROM products 
-    WHERE ${conditions} ${excludeCondition}
+    WHERE (${conditions}) ${excludeCondition}
     ORDER BY last_updated_at DESC
     LIMIT ? OFFSET ?
   `;
@@ -99,6 +113,7 @@ async function searchTursoDB(title, page, existingIds, env) {
     const obj = {};
     cols.forEach((col, i) => { obj[col] = row[i].value; });
     
+    // حساب نسبة الخصم
     const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
     
     return {
