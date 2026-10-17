@@ -20,9 +20,8 @@ export default {
         if (!env.TURSO_URL || !env.TURSO_TOKEN) throw new Error("Missing Turso config");
         
         let englishTitle = '';
-        const isNonEnglish = /[^\x00-\x7F]/.test(title);
-
-        // 1. جلب العنوان الإنجليزي الأصلي
+        
+        // 1. جلب العنوان الإنجليزي الأصلي من القاعدة
         if (pid) {
           try {
             const dbTitle = await getDbTitle(pid, env);
@@ -30,22 +29,38 @@ export default {
           } catch (e) {}
         }
 
-        if (!englishTitle && isNonEnglish) {
-          englishTitle = await translateToEnglish(title);
+        if (!englishTitle) {
+          // الترجمة للاحتياط
+          const isNonEnglish = /[^\x00-\x7F]/.test(title);
+          if (isNonEnglish) englishTitle = await translateToEnglish(title);
         }
         if (!englishTitle) englishTitle = title;
 
-        // 2. البحث في قاعدة البيانات
+        // 2. البحث في قاعدة البيانات (بالنظام الذكي)
         const dbResult = await searchTursoDB(englishTitle, page, existingIds, env);
         
-        // 🔥 3. الحل الجذري: إذا كانت قاعدة البيانات فارغة من هذا المنتج، نجلبه من علي إكسبرس مباشرة!
-        if (dbResult.items.length === 0 && page === 1) {
-          console.log("⚠️ DB empty, falling back to Live AliExpress Scraper...");
-          const liveResult = await fetchLiveFromAliExpress(englishTitle, page, existingIds);
-          if (liveResult.items.length > 0) {
-             return new Response(JSON.stringify(liveResult), {
-               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-             });
+        // 3. إذا كانت النتائج قليلة جداً (أقل من 5) وكانت هذه هي الصفحة الأولى، نلجأ للإنقاذ
+        if (dbResult.items.length < 5 && page === 1) {
+          console.log("⚠️ DB results are too low, fetching live from AliExpress...");
+          const liveResult = await fetchLiveFromAliExpress(englishTitle);
+          
+          if (liveResult.length > 0) {
+            // دمج النتائج الحية مع نتائج القاعدة
+            const combined = [...dbResult.items];
+            const existingCombinedIds = new Set(combined.map(x => x.id));
+            
+            for (const item of liveResult) {
+              if (!existingCombinedIds.has(item.id) && !existingIds.includes(item.id)) {
+                combined.push(item);
+                existingCombinedIds.add(item.id);
+              }
+            }
+            
+            // نأخذ أول 60 نتيجة
+            const finalItems = combined.slice(0, 60);
+            return new Response(JSON.stringify({ ok: true, items: finalItems, hasMore: finalItems.length === 60 }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
           }
         }
         
@@ -63,7 +78,6 @@ export default {
   }
 }
 
-// دالة جلب العنوان من القاعدة
 async function getDbTitle(pid, env) {
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
   const res = await fetch(`${httpUrl}/v2/pipeline`, {
@@ -92,9 +106,6 @@ async function translateToEnglish(text) {
   return text;
 }
 
-// ═══════════════════════════════════════════
-// الخوارزمية الذكية (تحافظ على الكلمات القصيرة المهمة مثل fan و usb)
-// ═══════════════════════════════════════════
 async function searchTursoDB(title, page, existingIds, env) {
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
@@ -111,27 +122,27 @@ async function searchTursoDB(title, page, existingIds, env) {
   ]);
   
   const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
+  let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
   
-  // 🔥 نأخذ الكلمات التي طولها 3 أحرف أو أكثر (مثل fan, usb)
-  let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w));
-  
-  // استخراج الأرقام والموديلات (مثل 8010, 80mm)
   const modelNumbers = allWords.filter(w => /\d+/.test(w));
 
-  // نأخذ أول 3 كلمات مهمة + أول رقم موديل
-  let keywords = meaningfulWords.slice(0, 3);
-  if (modelNumbers.length > 0) {
-    keywords.push(modelNumbers[0]); // إضافة الموديل
-  }
+  // نأخذ أول 4 كلمات مهمة + رقم الموديل
+  let keywords = meaningfulWords.slice(0, 4);
+  if (modelNumbers.length > 0) keywords.push(modelNumbers[0]);
   
-  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
   if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // بحث AND لضمان الدقة العالية جداً
-  const conditions = keywords.map(() => `title LIKE ?`).join(' AND ');
-  const queryArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
+  // 🔥 التغيير الجوهري: استخدام OR بدلاً من AND
+  const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+  
+  // 🔥 ترتيب النتائج: المنتج الذي يطابق كلمات أكثر سيأخذ نقاطاً أعلى ويظهر أولاً
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+
+  const queryArgs = [];
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` })); // للنقاط
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` })); // للبحث
 
   let excludeCondition = '';
   if (existingIds && existingIds.trim() !== '') {
@@ -146,11 +157,12 @@ async function searchTursoDB(title, page, existingIds, env) {
   const sql = `
     SELECT product_id as id, title, image_url as img,
            current_price_usd as price, original_price_usd as oldPrice, 
-           rating, orders_count as sold
+           rating, orders_count as sold,
+           (${scoreSql}) AS score
     FROM products
     WHERE (${conditions})
       ${excludeCondition}
-    ORDER BY rowid DESC
+    ORDER BY score DESC, rowid DESC
     LIMIT ${LIMIT} OFFSET ${OFFSET}
   `;
 
@@ -192,32 +204,22 @@ async function searchTursoDB(title, page, existingIds, env) {
 }
 
 // ═══════════════════════════════════════════
-// دالة جلب المنتجات مباشرة من علي إكسبرس (إذا لم نجدها في قاعدة البيانات)
+// دالة جلب المنتجات الحية (Live Scraping)
 // ═══════════════════════════════════════════
-async function fetchLiveFromAliExpress(title, page, existingIds) {
+async function fetchLiveFromAliExpress(title) {
   try {
-    // نستخدم الـ Worker القديم الخاص بك لجلب الصفحة
     const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + encodeURIComponent(title.slice(0, 90)) + '&catId=0';
-    const aliexpressUrl = baseUrl + '&page=' + page;
-    
-    // رابط الـ Worker القديم الخاص بسحب الصفحات
-    const workerEndpoint = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=${encodeURIComponent(aliexpressUrl)}`;
+    const workerEndpoint = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=${encodeURIComponent(baseUrl)}`;
     
     const res = await fetch(workerEndpoint);
-    if (!res.ok) return { ok: true, items: [], hasMore: false };
+    if (!res.ok) return [];
     
     const html = await res.text();
-    if (html.length < 5000) return { ok: true, items: [], hasMore: false };
+    if (html.length < 5000) return [];
 
-    // نفس دالة الاستخراج الخاصة بالإضافة
-    const items = parseAliExpressHtml(html);
-    
-    // فلترة المنتجات المكررة
-    const filteredItems = items.filter(it => !existingIds.includes(it.id));
-
-    return { ok: true, items: filteredItems, hasMore: filteredItems.length === 60 };
+    return parseAliExpressHtml(html);
   } catch (e) {
-    return { ok: true, items: [], hasMore: false };
+    return [];
   }
 }
 
@@ -273,7 +275,17 @@ function parseAliExpressHtml(html) {
       const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '';
       const sold = o.tradeDesc || o.sold || o.soldCount || '';
 
-      out.push({ id: String(id), title: title || 'Produit', img, price, oldPrice, rating, sold });
+      out.push({ 
+        id: String(id), 
+        title: title || 'Produit', 
+        img, 
+        price: price ? String(price) : '', 
+        oldPrice: oldPrice ? String(oldPrice) : '', 
+        discount: '', // يمكن حسابه لاحقاً
+        rating: rating ? String(rating) : '', 
+        sold: sold ? String(sold) : '', 
+        link: `https://www.aliexpress.com/item/${id}.html`
+      });
     } catch (e) {}
   }
   return out;
