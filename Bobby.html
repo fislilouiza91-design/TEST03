@@ -6,9 +6,7 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
     const url = new URL(request.url);
 
@@ -19,40 +17,26 @@ export default {
       const existingIds = url.searchParams.get('existingIds') || '';
       
       try {
-        if (!env.TURSO_URL || !env.TURSO_TOKEN) {
-          throw new Error("Missing Turso configuration in Cloudflare Variables");
-        }
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) throw new Error("Missing Turso config");
         
         let englishTitle = '';
-        
-        // التحقق مما إذا كان العنوان يحتوي على حروف غير إنجليزية (عربية، فرنسية، إلخ)
         const isNonEnglish = /[^\x00-\x7F]/.test(title);
 
-        // ⚡ 1. البحث في قاعدة البيانات فوراً (إذا كان المنتج موجوداً نأخذ عنوانه الإنجليزي)
-        if (isNonEnglish && pid) {
+        // 1. جلب العنوان الإنجليزي الأصلي من قاعدة البيانات
+        if (pid) {
           try {
             const dbTitle = await getDbTitle(pid, env);
-            if (dbTitle) {
-              englishTitle = dbTitle;
-              console.log("✅ Found in DB:", englishTitle);
-            }
-          } catch (e) {
-            console.warn("DB Lookup failed:", e.message);
-          }
+            if (dbTitle) englishTitle = dbTitle;
+          } catch (e) {}
         }
 
-        // ⚡ 2. إذا لم نجده في القاعدة، نترجمه فوراً باستخدام جوجل
+        // 2. إذا لم نجد المنتج في القاعدة، نترجم العنوان
         if (!englishTitle && isNonEnglish) {
           englishTitle = await translateToEnglish(title);
-          console.log("🌐 Translated:", englishTitle);
         }
+        if (!englishTitle) englishTitle = title;
 
-        // إذا كان العنوان إنجليزياً بالفعل، نستخدمه كما هو
-        if (!englishTitle) {
-          englishTitle = title;
-        }
-
-        // ⚡ 3. البحث السريع في القاعدة
+        // 3. البحث الدقيق
         const result = await searchTursoDB(englishTitle, page, existingIds, env);
         
         return new Response(JSON.stringify(result), {
@@ -69,19 +53,13 @@ export default {
   }
 }
 
-// ═══════════════════════════════════════════
-// دالة جلب العنوان من قاعدة البيانات (سريعة جداً بفضل الفهرس)
-// ═══════════════════════════════════════════
 async function getDbTitle(pid, env) {
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
   const res = await fetch(`${httpUrl}/v2/pipeline`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      requests: [
-        { type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } },
-        { type: 'close' }
-      ]
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } }, { type: 'close' }]
     })
   });
   const data = await res.json();
@@ -90,9 +68,6 @@ async function getDbTitle(pid, env) {
   return rows.length > 0 ? rows[0][0].value : null;
 }
 
-// ═══════════════════════════════════════════
-// دالة الترجمة السريعة (خطة بديلة)
-// ═══════════════════════════════════════════
 async function translateToEnglish(text) {
   if (!text) return text;
   try {
@@ -100,17 +75,12 @@ async function translateToEnglish(text) {
     const res = await fetch(url);
     if (res.ok) {
       const data = await res.json();
-      if (data && data[0] && data[0][0]) {
-        return data[0].map(item => item[0]).join('');
-      }
+      if (data && data[0] && data[0][0]) return data[0].map(item => item[0]).join('');
     }
   } catch (e) {}
   return text;
 }
 
-// ═══════════════════════════════════════════
-// دالة البحث (محسنة للسرعة القصوى)
-// ═══════════════════════════════════════════
 async function searchTursoDB(title, page, existingIds, env) {
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
@@ -134,40 +104,34 @@ async function searchTursoDB(title, page, existingIds, env) {
   }
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // نأخذ أطول كلمة (لأنها عادة اسم المنتج الأساسي) لتسريع البحث
-  meaningfulWords.sort((a, b) => b.length - a.length);
-  let keyword = meaningfulWords[0]; 
-  
-  if (keyword.endsWith('s') && keyword.length > 4) {
-    keyword = keyword.slice(0, -1); // إزالة الجمع (s)
-  }
+  // نأخذ أول 5 كلمات مهمة
+  let keywords = meaningfulWords.slice(0, 5);
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
+  keywords = [...new Set(keywords)];
 
-  // ⚡ استخدام LIKE 'keyword%' (البحث بالبادئة) لتسريع البحث بفضل الفهرس
-  const conditions = `p.title LIKE ?`;
-  const queryArgs = [{ type: 'text', value: `${keyword}%` }];
+  const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+  const queryArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
   if (existingIds && existingIds.trim() !== '') {
     const ids = existingIds.split(',');
-    excludeCondition = `AND p.product_id NOT IN (${ids.map(() => '?').join(',')})`;
+    excludeCondition = `AND product_id NOT IN (${ids.map(() => '?').join(',')})`;
     ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
   }
 
-  const LIMIT = 60;
-  const OFFSET = (page - 1) * LIMIT;
+  // 🔥 السر: نجلب 300 منتج لإتاحة الفرصة للفرز الدقيق
+  const FETCH_LIMIT = 300;
+  const OFFSET = (page - 1) * 60;
 
-  // ⚡ الترتيب باستخدام rowid (أسرع بكثير من last_updated_at)
   const sql = `
-    SELECT p.product_id as id, p.title, 
-           COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
-           p.current_price_usd as price, p.original_price_usd as oldPrice, 
-           p.rating, p.orders_count as sold
-    FROM products p
-    LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
+    SELECT product_id as id, title, 
+           image_url as img,
+           current_price_usd as price, original_price_usd as oldPrice, 
+           rating, orders_count as sold
+    FROM products
     WHERE (${conditions})
       ${excludeCondition}
-    ORDER BY p.rowid DESC
-    LIMIT ${LIMIT} OFFSET ${OFFSET}
+    LIMIT ${FETCH_LIMIT} OFFSET ${OFFSET}
   `;
 
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
@@ -186,17 +150,50 @@ async function searchTursoDB(title, page, existingIds, env) {
   if (result.type === 'error') throw new Error(result.error.message);
   
   const cols = result.response.result.cols.map(c => c.name);
-  const rows = result.response.result.rows;
-  
-  const items = rows.map(row => {
+  let rows = result.response.result.rows.map(row => {
     const obj = {};
     cols.forEach((col, i) => { obj[col] = row[i].value; });
-    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
+    return obj;
+  });
+
+  // 🔥 نظام النقاط (Scoring) لجعل النتائج دقيقة جداً
+  rows.forEach(item => {
+    const itemTitle = (item.title || '').toLowerCase();
+    let score = 0;
     
+    // 1. إعطاء نقاط لكل كلمة مطابقة
+    keywords.forEach(kw => {
+      if (itemTitle.includes(kw)) score += 10;
+    });
+
+    // 2. إعطاء نقاط إضافية إذا كان العنوان يحتوي على "كل" الكلمات (تطابق تام)
+    const matchAll = keywords.every(kw => itemTitle.includes(kw));
+    if (matchAll && keywords.length > 1) score += 50;
+
+    // 3. خصم نقاط إذا كان المنتج إكسسواراً (لمنع الكابلات والحافظات)
+    const badWords = ['cable', 'case', 'cover', 'adapter', 'charger', 'protector'];
+    badWords.forEach(bad => {
+      if (itemTitle.includes(bad) && !title.toLowerCase().includes(bad)) {
+        score -= 40;
+      }
+    });
+
+    item.score = score;
+  });
+
+  // ترتيب المنتجات حسب النقاط (الأعلى أولاً)
+  rows.sort((a, b) => b.score - a.score);
+
+  // فلترة المنتجات التي ليس لها أي نقاط (لم تتطابق مع أي كلمة)
+  rows = rows.filter(item => item.score > 0);
+
+  // نأخذ أفضل 60 نتيجة فقط
+  rows = rows.slice(0, 60);
+
+  const items = rows.map(obj => {
+    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
     return {
-      id: obj.id,
-      title: obj.title,
-      img: obj.img || '',
+      id: obj.id, title: obj.title, img: obj.img || '',
       price: obj.price ? String(obj.price) : '',
       oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
       discount: discount > 0 ? String(discount) : '',
@@ -206,5 +203,5 @@ async function searchTursoDB(title, page, existingIds, env) {
     };
   });
 
-  return { ok: true, items: items, hasMore: items.length === LIMIT };
+  return { ok: true, items: items, hasMore: items.length === 60 };
 }
