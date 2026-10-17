@@ -13,8 +13,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/search-db') {
-      let originalTitle = url.searchParams.get('q') || '';
-      let title = originalTitle;
+      let title = url.searchParams.get('q') || '';
       const pid = url.searchParams.get('pid') || '';
       const page = parseInt(url.searchParams.get('page')) || 1;
       const existingIds = url.searchParams.get('existingIds') || '';
@@ -24,27 +23,48 @@ export default {
           throw new Error("Missing Turso configuration");
         }
 
-        // 1. جلب العنوان الإنجليزي الأصلي
+        const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+
+        // 🔥 1. أذكى خطوة: إذا كان المنتج موجوداً في قاعدة البيانات، اجلب عنوانه الإنجليزي الأصلي مباشرة!
         if (pid) {
           try {
-            const scraperUrl = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=https://www.aliexpress.com/item/${pid}.html`;
-            const scrapeRes = await fetch(scraperUrl);
-            if (scrapeRes.ok) {
-              const html = await scrapeRes.text();
-              const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
-              if (ogTitleMatch && ogTitleMatch[1]) {
-                title = ogTitleMatch[1];
+            const dbTitleRes = await fetch(`${httpUrl}/v2/pipeline`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                requests: [{ type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } }, { type: 'close' }]
+              })
+            });
+            const dbData = await dbTitleRes.json();
+            if (dbData.results[0].response.result.rows.length > 0) {
+              title = dbData.results[0].response.result.rows[0][0].value;
+              console.log("✅ Found exact English title in DB:", title);
+            } else {
+              // إذا لم يكن موجوداً في DB، نجلبه من صفحة المنتج مباشرة
+              const scraperUrl = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=https://www.aliexpress.us/item/${pid}.html`;
+              const scrapeRes = await fetch(scraperUrl);
+              if (scrapeRes.ok) {
+                const html = await scrapeRes.text();
+                const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
+                if (ogTitleMatch && ogTitleMatch[1]) {
+                  title = ogTitleMatch[1];
+                  console.log("✅ Fetched English title from US page:", title);
+                }
               }
             }
-          } catch (e) {}
+          } catch (e) {
+            console.warn("Could not fetch DB/Scraped title:", e.message);
+          }
         }
 
-        // 2. الترجمة (كخطة بديلة)
-        if (title === originalTitle && title.length > 0) {
+        // 2. الترجمة كخطة أخيرة (إذا فشل كل ما سبق)
+        const containsNonEnglish = /[^\x00-\x7F]+/.test(title);
+        if (containsNonEnglish || title.length === 0) {
           title = await translateToEnglish(title);
+          console.log("🌐 Translated Title:", title);
         }
 
-        // 3. البحث في قاعدة البيانات
+        // 3. البحث المرن في قاعدة البيانات
         const result = await searchTursoDB(title, page, existingIds, env);
         
         return new Response(JSON.stringify(result), {
@@ -62,6 +82,7 @@ export default {
 }
 
 async function translateToEnglish(text) {
+  if (!text) return text;
   try {
     const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
     const res = await fetch(url);
@@ -94,10 +115,12 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
+  // نأخذ أول 4 كلمات مهمة
   let keywords = meaningfulWords.slice(0, 4);
   keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
+  // استخدام OR لضمان جلب جميع النتائج المحتملة
   const conditions = keywords.map(() => `p.title LIKE ?`).join(' OR ');
   let scoreSql = keywords.map(() => `(CASE WHEN p.title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
 
@@ -115,62 +138,48 @@ async function searchTursoDB(title, page, existingIds, env) {
   const LIMIT = 60;
   const OFFSET = (page - 1) * LIMIT;
   
-  // نمرر المتغيرات لاستعلام الدقة العالية
   queryArgs.push({ type: 'float', value: LIMIT });
   queryArgs.push({ type: 'float', value: OFFSET });
 
-  // 🔥 تم إصلاح الاستعلام: إضافة last_updated_at داخل الاستعلام الفرعي
+  // 🔥 التعديل الأهم: ألغينا شرط minScore، واعتمدنا فقط على ترتيب النتائج
+  // المنتجات التي تطابق كلمتين أو أكثر ستظهر أولاً (Score أعلى)، والباقي أسفل القائمة.
   const sql = `
-    SELECT * FROM (
-      SELECT p.product_id as id, p.title, p.last_updated_at,
-             COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
-             p.current_price_usd as price, p.original_price_usd as oldPrice, 
-             p.rating, p.orders_count as sold,
-             (${scoreSql}) AS score
-      FROM products p
-      LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
-      WHERE (${conditions})
-        ${excludeCondition}
-    ) AS sub
-    WHERE score >= 20
-    ORDER BY score DESC, last_updated_at DESC
+    SELECT p.product_id as id, p.title, 
+           COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
+           p.current_price_usd as price, p.original_price_usd as oldPrice, 
+           p.rating, p.orders_count as sold,
+           (${scoreSql}) AS score
+    FROM products p
+    LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
+    WHERE (${conditions})
+      ${excludeCondition}
+    ORDER BY score DESC, p.last_updated_at DESC
     LIMIT ? OFFSET ?
   `;
 
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
-  
-  // دالة داخلية لتنفيذ الاستعلام
-  const executeQuery = async (querySql, args) => {
-    const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.TURSO_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        requests: [
-          { type: 'execute', stmt: { sql: querySql, args: args } },
-          { type: 'close' }
-        ]
-      })
-    });
-    if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
-    const data = await tursoRes.json();
-    return data.results[0];
-  };
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.TURSO_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      requests: [
+        { type: 'execute', stmt: { sql: sql, args: queryArgs } },
+        { type: 'close' }
+      ]
+    })
+  });
 
-  // المحاولة الأولى: بحث دقيق (كلمتين على الأقل)
-  let result = await executeQuery(sql, queryArgs);
-
-  // إذا كانت الصفحة الأولى، ولم نجد أي نتائج بالبحث الدقيق، نتراجع للبحث المرن
-  if (result.response.result.rows.length === 0 && page === 1) {
-    console.log("⚠️ No strict results, falling back to loose search...");
-    
-    // نغير شرط النقاط إلى 10 (كلمة واحدة)
-    const fallbackSql = sql.replace('WHERE score >= 20', 'WHERE score >= 10');
-    result = await executeQuery(fallbackSql, queryArgs);
+  if (!tursoRes.ok) {
+    const errText = await tursoRes.text();
+    throw new Error(`Turso HTTP ${tursoRes.status}: ${errText}`);
   }
-
+  
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  
   if (result.type === 'error') throw new Error(result.error.message);
   
   const cols = result.response.result.cols.map(c => c.name);
