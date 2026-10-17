@@ -1,27 +1,150 @@
--- 1. إنشاء جدول البحث الشامل
-CREATE VIRTUAL TABLE IF NOT EXISTS products_search USING fts5(
-    product_id UNINDEXED,
-    title,
-    category_path,
-    source_keyword
-);
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
 
--- 2. نسخ البيانات الحالية من جدول المنتجات إلى جدول البحث
-INSERT INTO products_search (product_id, title, category_path, source_keyword)
-SELECT product_id, title, category_path, source_keyword FROM products;
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
 
--- 3. إنشاء مُشغلات (Triggers) لتحديث جدول البحث تلقائياً عند إضافة منتج جديد
-CREATE TRIGGER IF NOT EXISTS products_ai AFTER INSERT ON products BEGIN
-  INSERT INTO products_search(product_id, title, category_path, source_keyword) 
-  VALUES (new.product_id, new.title, new.category_path, new.source_keyword);
-END;
+    const url = new URL(request.url);
 
-CREATE TRIGGER IF NOT EXISTS products_ad AFTER DELETE ON products BEGIN
-  DELETE FROM products_search WHERE product_id = old.product_id;
-END;
+    if (url.pathname === '/search-db') {
+      const title = url.searchParams.get('q') || '';
+      const page = parseInt(url.searchParams.get('page')) || 1;
+      const existingIds = url.searchParams.get('existingIds') || '';
+      
+      try {
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) {
+          throw new Error("Missing Turso configuration");
+        }
 
-CREATE TRIGGER IF NOT EXISTS products_au AFTER UPDATE ON products BEGIN
-  UPDATE products_search 
-  SET title = new.title, category_path = new.category_path, source_keyword = new.source_keyword
-  WHERE product_id = old.product_id;
-END;
+        const result = await searchTursoDB(title, page, existingIds, env);
+        return new Response(JSON.stringify(result), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    return new Response('Smart-Turso API is running.', { status: 200, headers: corsHeaders });
+  }
+}
+
+async function searchTursoDB(title, page, existingIds, env) {
+  const stopWords = new Set([
+    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
+    'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
+    'good', 'quality', 'smart', 'portable', 'wireless', 'digital', 'type', 'model', 
+    'color', 'size', 'men', 'women', 'kids', 'baby', 'home', 'car', 'phone', 'case', 
+    'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
+    'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
+    'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100',
+    'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'iphone', 
+    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
+  ]);
+  
+  const allWords = title.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/);
+  let meaningfulWords = allWords.filter(w => w.length > 3 && !stopWords.has(w) && !/^\d+$/.test(w));
+
+  if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
+
+  // نأخذ أول 3 كلمات مهمة
+  let keywords = meaningfulWords.slice(0, 3);
+
+  // تحسين الجمع (Pluralization): إزالة حرف s من نهاية الكلمة
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
+  keywords = [...new Set(keywords)];
+
+  // 🔥 بناء استعلام FTS5: نستخدم * للبحث عن الكلمات كبادئة (مثلاً head* تجد headphone)
+  // ونستخدم OR للبحث عن أي كلمة
+  const ftsQuery = keywords.map(k => `${k}*`).join(' OR ');
+
+  const queryArgs = [{ type: 'text', value: ftsQuery }];
+
+  let excludeCondition = '';
+  if (existingIds) {
+    const ids = existingIds.split(',');
+    excludeCondition = `AND p.product_id NOT IN (${ids.map(() => '?').join(',')})`;
+    ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
+  }
+
+  const LIMIT = 60;
+  const OFFSET = (page - 1) * LIMIT;
+  
+  queryArgs.push({ type: 'integer', value: LIMIT });
+  queryArgs.push({ type: 'integer', value: OFFSET });
+
+  // استعلام FTS5: يبحث في العنوان، الفئة، والكلمة المفتاحية، ويرتب حسب دقة التطابق (bm25)
+  const sql = `
+    SELECT p.product_id as id, p.title, 
+           COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
+           p.current_price_usd as price, p.original_price_usd as oldPrice, 
+           p.rating, p.orders_count as sold,
+           bm25(products_search) as rank_score
+    FROM products_search f
+    JOIN products p ON f.product_id = p.product_id
+    LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
+    WHERE products_search MATCH ?
+      ${excludeCondition}
+    ORDER BY rank_score ASC, p.last_updated_at DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.TURSO_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      requests: [
+        { type: 'execute', stmt: { sql: sql, args: queryArgs } },
+        { type: 'close' }
+      ]
+    })
+  });
+
+  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
+  
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  
+  if (result.type === 'error') throw new Error(result.error.message);
+  
+  const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows;
+  
+  const items = rows.map(row => {
+    const obj = {};
+    cols.forEach((col, i) => { obj[col] = row[i].value; });
+    
+    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
+    
+    return {
+      id: obj.id,
+      title: obj.title,
+      img: obj.img || '',
+      price: obj.price ? String(obj.price) : '',
+      oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
+      discount: discount > 0 ? String(discount) : '',
+      rating: obj.rating ? String(obj.rating) : '',
+      sold: obj.sold ? String(obj.sold) : '',
+      link: `https://www.aliexpress.com/item/${obj.id}.html`
+    };
+  });
+
+  return {
+    ok: true,
+    items: items,
+    hasMore: items.length === LIMIT
+  };
+}
