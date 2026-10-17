@@ -1,145 +1,552 @@
+/* ============================================
+   Smart Shopper - Cloudflare Worker
+   ScrapingAnt (Primary) + ScraperAPI (Fallback)
+   + Smart Retry (Concurrency vs Quota)
+   + Daily Cron Auto-Recovery
+   ============================================ */
+
+const CACHE_TTL_SECONDS = 3600;
+const MAX_CONSECUTIVE_FAILURES = 10;
+
 export default {
   async fetch(request, env, ctx) {
     const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400'
     };
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (url.pathname === '/search-db') {
-      const title = url.searchParams.get('q') || '';
-      const page = parseInt(url.searchParams.get('page')) || 1;
-      const existingIds = url.searchParams.get('existingIds') || '';
-      
-      try {
-        if (!env.TURSO_URL || !env.TURSO_TOKEN) {
-          throw new Error("Missing Turso configuration in Cloudflare Variables");
+      // ========================================
+      // /health
+      // ========================================
+      if (url.pathname === '/health') {
+        const statuses = await getProviderStatuses(env);
+        return json({
+          status: 'ok',
+          cron: 'daily (0 3 * * *)',
+          cache: env.NEON_DATABASE_URL ? 'neon' : 'disabled',
+          providers: {
+            scrapingant: formatStatus('scrapingant', statuses.scrapingant, !!env.SCRAPINGANT_API_KEY),
+            scraperapi: formatStatus('scraperapi', statuses.scraperapi, !!env.SCRAPER_API_KEY)
+          }
+        }, 200, corsHeaders);
+      }
+
+      // ========================================
+      // /fetch
+      // ========================================
+      if (url.pathname === '/fetch') {
+        const targetUrl = url.searchParams.get('url');
+        if (!targetUrl) return json({ error: 'Missing url' }, 400, corsHeaders);
+
+        if (!/^https?:\/\/([a-z0-9-]+\.)?aliexpress\.(com|us)\//i.test(targetUrl)) {
+          return json({ error: 'Only aliexpress.com URLs allowed' }, 400, corsHeaders);
         }
 
-        const result = await searchTursoDB(title, page, existingIds, env);
-        return new Response(JSON.stringify(result), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ ok: false, error: e.message }), {
-          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        const cacheKey = await hashUrl(targetUrl);
+        const cached = await getCacheFromNeon(cacheKey, env);
+        if (cached) {
+          return new Response(cached, {
+            status: 200,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/html; charset=utf-8',
+              'X-Cache': 'HIT'
+            }
+          });
+        }
+
+        const { html, provider } = await fetchWithFallback(targetUrl, env);
+
+        if (!html) {
+          return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
+        }
+
+        if (html.length > 5000) {
+          ctx.waitUntil(saveToCache(cacheKey, html, env));
+        }
+
+        return new Response(html, {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Cache': 'MISS',
+            'X-Provider': provider
+          }
         });
       }
+
+      // ========================================
+      // /providers
+      // ========================================
+      if (url.pathname === '/providers') {
+        const statuses = await getProviderStatuses(env);
+        return json(statuses, 200, corsHeaders);
+      }
+
+      // ========================================
+      // /run-health-check
+      // ========================================
+      if (url.pathname === '/run-health-check') {
+        ctx.waitUntil(healthCheckAllProviders(env));
+        return json({ success: true, message: 'Health check started' }, 200, corsHeaders);
+      }
+
+      // ========================================
+      // /reset-provider
+      // ========================================
+      if (url.pathname === '/reset-provider') {
+        const provider = url.searchParams.get('provider');
+        if (!provider) return json({ error: 'Missing provider' }, 400, corsHeaders);
+        await clearProviderStatus(provider, env);
+        return json({ success: true, reset: provider }, 200, corsHeaders);
+      }
+
+      // ========================================
+      // /stats
+      // ========================================
+      if (url.pathname === '/stats') {
+        const stats = await getNeonStats(env);
+        return json(stats, 200, corsHeaders);
+      }
+
+      return json({ error: 'Not found' }, 404, corsHeaders);
+    } catch (e) {
+      console.error('[Worker] Error:', e.message);
+      return json({ error: e.message }, 500, corsHeaders);
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    console.log('[Cron] Daily health check at', new Date().toISOString());
+    ctx.waitUntil(healthCheckAllProviders(env));
+  }
+};
+
+/* ============================================
+   Circuit Breaker + Fallback + Smart Retry
+   ============================================ */
+async function fetchWithFallback(targetUrl, env) {
+  const providers = [
+    { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY, fn: fetchFromScrapingAnt },
+    { name: 'scraperapi', key: env.SCRAPER_API_KEY, fn: fetchFromScraperAPI }
+  ].filter(p => p.key);
+
+  if (!providers.length) throw new Error('No providers configured');
+
+  for (const provider of providers) {
+    const status = await getProviderStatus(provider.name, env);
+
+    // ⛔ إذا كان معطلاً → تخطاه
+    if (status.disabled) {
+      console.log(`[CircuitBreaker] ${provider.name} disabled - skip`);
+      continue;
     }
 
-    return new Response('Smart-Turso API is running. Use /search-db', { status: 200, headers: corsHeaders });
+    // 🔁 3 محاولات لكل مزود عند خطأ concurrency مؤقت
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[CircuitBreaker] Trying ${provider.name} (attempt ${attempt}/3)...`);
+        const html = await provider.fn(targetUrl, provider.key);
+
+        if (html && html.length > 5000) {
+          console.log(`[CircuitBreaker] ✅ Success via ${provider.name}`);
+          return { html, provider: provider.name };
+        }
+      } catch (e) {
+        const errType = classifyError(e);
+        console.warn(`[CircuitBreaker] ${provider.name} attempt ${attempt}: ${errType} - ${e.message.slice(0, 100)}`);
+
+        // 🔴 نفاد رصيد حقيقي → عطّل المزود وانتقل للتالي
+        if (errType === 'QUOTA') {
+          await disableProvider(provider.name, e.message, status, env);
+          console.log(`[CircuitBreaker] 🔴 ${provider.name} DISABLED (quota exhausted)`);
+          break; // اخرج من حلقة المحاولات
+        }
+
+        // 🟡 concurrency limit أو rate limit → انتظر ثم أعد
+        if (errType === 'CONCURRENCY' || errType === 'RATE') {
+          if (attempt < 3) {
+            const waitMs = 2000 * attempt; // 2s, 4s
+            console.log(`[CircuitBreaker] ⏳ Waiting ${waitMs}ms before retry...`);
+            await sleep(waitMs);
+            continue;
+          } else {
+            console.warn(`[CircuitBreaker] ${provider.name} still busy after 3 attempts - trying next`);
+            break;
+          }
+        }
+
+        // ⚪ خطأ عام (network, timeout, etc) → انتقل للتالي
+        break;
+      }
+    }
+  }
+
+  return { html: null, provider: null };
+}
+
+/* ============================================
+   تصنيف الأخطاء
+   ============================================ */
+function classifyError(error) {
+  const msg = String(error.message || '').toLowerCase();
+
+  // 🟡 Concurrency limit (مؤقت)
+  if (msg.includes('concurrency') ||
+      msg.includes('too many') ||
+      msg.includes('simultaneous') ||
+      msg.includes('busy')) {
+    return 'CONCURRENCY';
+  }
+
+  // 🟡 Rate limit (مؤقت)
+  if (msg.includes('429') || msg.includes('rate limit')) {
+    return 'RATE';
+  }
+
+  // 🔴 نفاد رصيد حقيقي
+  if (msg.includes('credits exhausted') ||
+      msg.includes('quota exceeded') ||
+      msg.includes('out of credits') ||
+      msg.includes('no more credits') ||
+      msg.includes('insufficient credits') ||
+      msg.includes('credit balance') ||
+      msg.includes('subscription required') ||
+      msg.includes('payment required')) {
+    return 'QUOTA';
+  }
+
+  return 'OTHER';
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/* ============================================
+   Daily Health Check (Cron)
+   ============================================ */
+async function healthCheckAllProviders(env) {
+  const providers = [
+    { name: 'scrapingant', key: env.SCRAPINGANT_API_KEY },
+    { name: 'scraperapi', key: env.SCRAPER_API_KEY }
+  ].filter(p => p.key);
+
+  console.log(`[Cron] Checking ${providers.length} providers...`);
+
+  for (const provider of providers) {
+    const status = await getProviderStatus(provider.name, env);
+
+    if (!status.disabled) {
+      console.log(`[Cron] ${provider.name} active - skip`);
+      continue;
+    }
+
+    if (status.permanent) {
+      console.log(`[Cron] ${provider.name} permanently disabled - skip`);
+      continue;
+    }
+
+    console.log(`[Cron] Testing ${provider.name}...`);
+    const recovered = await testProvider(provider.name, provider.key);
+
+    if (recovered) {
+      await clearProviderStatus(provider.name, env);
+      console.log(`[Cron] ${provider.name} RECOVERED!`);
+    } else {
+      await updateLastHealthCheck(provider.name, status, env);
+      console.log(`[Cron] ${provider.name} still disabled`);
+    }
+  }
+
+  console.log('[Cron] Done');
+}
+
+async function testProvider(providerName, apiKey) {
+  try {
+    const testUrl = 'https://httpbin.org/ip';
+    const html = providerName === 'scrapingant'
+      ? await fetchFromScrapingAnt(testUrl, apiKey)
+      : await fetchFromScraperAPI(testUrl, apiKey);
+
+    return html && html.length > 20;
+  } catch (e) {
+    console.warn(`[Cron] ${providerName} test failed:`, e.message.slice(0, 100));
+    return false;
   }
 }
 
-async function searchTursoDB(title, page, existingIds, env) {
-  // قائمة كلمات يتم تجاهلها لأنها عامة جداً (تحديث مستمر)
-  const stopWords = new Set([
-    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
-    'sale', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 'good',
-    'quality', 'smart', 'portable', 'wireless', 'digital', 'type', 'model', 'color',
-    'size', 'men', 'women', 'kids', 'baby', 'without', 'use', 'used', 'home',
-    'car', 'phone', 'case', 'made', 'material', 'style', 'fashion', 'design', 'item',
-    'top', 'super', 'ultra', 'mini', 'max', 'premium', 'fast', 'pack', 'box',
-    'quick', 'release', 'replacement', 'gift', 'drop', 'ship'
-  ]);
-  
-  // استخراج أول 4 كلمات مهمة
-  const keywords = title.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/)
-    .filter(w => w.length > 3 && !stopWords.has(w))
-    .slice(0, 4);
+/* ============================================
+   Fetch from ScrapingAnt
+   ============================================ */
+async function fetchFromScrapingAnt(targetUrl, apiKey) {
+  const url = new URL('https://api.scrapingant.com/v2/general');
+  url.searchParams.set('x-api-key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('browser', 'false');
+  url.searchParams.set('proxy_country', 'US');
 
-  if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
+  const res = await fetch(url.toString());
 
-  // بناء شروط البحث
-  const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
-  
-  // 🔥 بناء نظام النقاط (Ranking): إذا تطابقت الكلمة نعطي نقاطاً أعلى
-  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 3 ELSE 0 END)`).join(' + ');
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch (e) {}
+    const lowerBody = errBody.toLowerCase();
 
-  const queryArgs = [];
-  // شروط WHERE
-  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
-  // شروط ORDER BY
-  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+    // 🟡 Concurrency limit
+    if (lowerBody.includes('concurrency') ||
+        lowerBody.includes('free user concurrency')) {
+      throw new Error(`CONCURRENCY_LIMIT: ${errBody.slice(0, 200)}`);
+    }
 
-  let excludeCondition = '';
-  if (existingIds) {
-    const ids = existingIds.split(',');
-    excludeCondition = `AND product_id NOT IN (${ids.map(() => '?').join(',')})`;
-    ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
+    // 🟡 Rate limit
+    if (res.status === 429 || lowerBody.includes('rate limit')) {
+      throw new Error(`429 rate limit: ${errBody.slice(0, 200)}`);
+    }
+
+    // 🔴 نفاد رصيد حقيقي
+    if (lowerBody.includes('credits exhausted') ||
+        lowerBody.includes('quota exceeded') ||
+        lowerBody.includes('out of credits') ||
+        lowerBody.includes('no credits')) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 200)}`);
+    }
+
+    // ⚪ Auth errors
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
+    }
+
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
   }
 
-  const LIMIT = 60;
-  const OFFSET = (page - 1) * LIMIT;
-  
-  queryArgs.push({ type: 'float', value: LIMIT });
-  queryArgs.push({ type: 'float', value: OFFSET });
+  return await res.text();
+}
 
-  // الاستعلام النهائي: يرتب حسب النقاط (الأكثر تطابقاً أولاً) ثم الأحدث
-  const sql = `
-    SELECT product_id as id, title, image_url as img, 
-           current_price_usd as price, original_price_usd as oldPrice, 
-           rating, orders_count as sold,
-           (${scoreSql}) AS score
-    FROM products 
-    WHERE (${conditions}) ${excludeCondition}
-    ORDER BY score DESC, last_updated_at DESC
-    LIMIT ? OFFSET ?
-  `;
+/* ============================================
+   Fetch from ScraperAPI
+   ============================================ */
+async function fetchFromScraperAPI(targetUrl, apiKey) {
+  const url = new URL('https://api.scraperapi.com/');
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('render', 'false');
+  url.searchParams.set('country_code', 'us');
 
-  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
-  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+  const res = await fetch(url.toString());
+
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch (e) {}
+    const lowerBody = errBody.toLowerCase();
+
+    // 🟡 Concurrency limit
+    if (lowerBody.includes('concurrency') ||
+        lowerBody.includes('too many concurrent')) {
+      throw new Error(`CONCURRENCY_LIMIT: ${errBody.slice(0, 200)}`);
+    }
+
+    // 🟡 Rate limit
+    if (res.status === 429 || lowerBody.includes('rate limit')) {
+      throw new Error(`429 rate limit: ${errBody.slice(0, 200)}`);
+    }
+
+    // 🔴 نفاد رصيد حقيقي
+    if (lowerBody.includes('credits exhausted') ||
+        lowerBody.includes('no credits') ||
+        lowerBody.includes('quota exceeded')) {
+      throw new Error(`402 credits exhausted: ${errBody.slice(0, 200)}`);
+    }
+
+    // ⚪ Auth errors
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`401 auth failed: ${errBody.slice(0, 150)}`);
+    }
+
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 100)}`);
+  }
+
+  return await res.text();
+}
+
+/* ============================================
+   Disable Provider (Circuit Breaker)
+   ============================================ */
+async function disableProvider(providerName, reason, currentStatus, env) {
+  if (!env.PROVIDER_KV) return;
+
+  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
+
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    const status = {
+      disabled: true,
+      permanent: true,
+      reason: 'Max consecutive failures reached',
+      consecutiveFailures: consecutiveFailures,
+      disabledAt: currentStatus.disabledAt || new Date().toISOString(),
+      lastHealthCheck: new Date().toISOString()
+    };
+    await env.PROVIDER_KV.put(`provider:${providerName}`,
+      JSON.stringify(status), { expirationTtl: 86400 * 30 });
+    console.warn(`[CircuitBreaker] ${providerName} PERMANENTLY disabled`);
+    return;
+  }
+
+  const status = {
+    disabled: true,
+    reason: reason,
+    consecutiveFailures: consecutiveFailures,
+    disabledAt: currentStatus.disabledAt || new Date().toISOString(),
+    lastHealthCheck: new Date().toISOString()
+  };
+
+  await env.PROVIDER_KV.put(`provider:${providerName}`,
+    JSON.stringify(status), { expirationTtl: 86400 * 30 });
+
+  console.log(`[CircuitBreaker] ${providerName} disabled (failure #${consecutiveFailures})`);
+}
+
+/* ============================================
+   Provider Status Management
+   ============================================ */
+async function getProviderStatus(providerName, env) {
+  if (!env.PROVIDER_KV) return { disabled: false };
+  try {
+    const raw = await env.PROVIDER_KV.get(`provider:${providerName}`);
+    if (!raw) return { disabled: false };
+    return JSON.parse(raw);
+  } catch (e) {
+    return { disabled: false };
+  }
+}
+
+async function getProviderStatuses(env) {
+  const statuses = {};
+  for (const p of ['scrapingant', 'scraperapi']) {
+    statuses[p] = await getProviderStatus(p, env);
+  }
+  return statuses;
+}
+
+async function clearProviderStatus(providerName, env) {
+  if (!env.PROVIDER_KV) return;
+  await env.PROVIDER_KV.delete(`provider:${providerName}`);
+  console.log(`[CircuitBreaker] Cleared status for ${providerName}`);
+}
+
+async function updateLastHealthCheck(providerName, status, env) {
+  if (!env.PROVIDER_KV) return;
+  status.lastHealthCheck = new Date().toISOString();
+  await env.PROVIDER_KV.put(`provider:${providerName}`,
+    JSON.stringify(status), { expirationTtl: 86400 * 30 });
+}
+
+function formatStatus(name, status, configured) {
+  return {
+    configured: configured,
+    disabled: status?.disabled || false,
+    permanent: status?.permanent || false,
+    consecutiveFailures: status?.consecutiveFailures || 0,
+    disabledAt: status?.disabledAt || null,
+    lastHealthCheck: status?.lastHealthCheck || null,
+    reason: status?.reason || null
+  };
+}
+
+/* ============================================
+   Neon Cache
+   ============================================ */
+async function hashUrl(url) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(url);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+async function getCacheFromNeon(cacheKey, env) {
+  if (!env.NEON_DATABASE_URL) return null;
+  try {
+    const result = await neonQuery(
+      'SELECT data FROM search_cache WHERE cache_key = $1 AND expires_at > NOW() LIMIT 1',
+      [cacheKey], env
+    );
+    return result.rows?.[0]?.data || null;
+  } catch (e) {
+    console.warn('[Cache] Read error:', e.message);
+    return null;
+  }
+}
+
+async function saveToCache(cacheKey, html, env) {
+  if (!env.NEON_DATABASE_URL) return;
+  try {
+    const expiresAt = new Date(Date.now() + CACHE_TTL_SECONDS * 1000).toISOString();
+    await neonQuery(
+      `INSERT INTO search_cache (cache_key, data, expires_at)
+       VALUES ($1, $2::jsonb, $3::timestamptz)
+       ON CONFLICT (cache_key)
+       DO UPDATE SET data = $2::jsonb, expires_at = $3::timestamptz`,
+      [cacheKey, JSON.stringify(html), expiresAt], env
+    );
+    console.log('[Cache] Saved:', cacheKey.slice(0, 12));
+  } catch (e) {
+    console.warn('[Cache] Save error:', e.message);
+  }
+}
+
+async function getNeonStats(env) {
+  if (!env.NEON_DATABASE_URL) return { error: 'Neon not configured' };
+  try {
+    const result = await neonQuery(
+      `SELECT 
+        (SELECT COUNT(*) FROM search_cache WHERE expires_at > NOW()) as active_cache,
+        (SELECT COUNT(*) FROM search_cache) as total_cache,
+        (SELECT pg_size_pretty(pg_database_size(current_database()))) as db_size`,
+      [], env
+    );
+    return result.rows?.[0] || {};
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function neonQuery(query, params, env) {
+  const neonUrl = env.NEON_DATABASE_URL;
+  const match = neonUrl.match(/@([^.]+)\./);
+  if (!match) throw new Error('Invalid Neon URL');
+  const projectId = match[1];
+
+  const res = await fetch(`https://${projectId}.neon.tech/sql`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${env.TURSO_TOKEN}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'Neon-Connection-String': neonUrl
     },
-    body: JSON.stringify({
-      requests: [
-        { type: 'execute', stmt: { sql: sql, args: queryArgs } },
-        { type: 'close' }
-      ]
-    })
+    body: JSON.stringify({ query, params })
   });
 
-  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
-  
-  const data = await tursoRes.json();
-  const result = data.results[0];
-  
-  if (result.type === 'error') throw new Error(result.error.message);
-  
-  const cols = result.response.result.cols.map(c => c.name);
-  const rows = result.response.result.rows;
-  
-  const items = rows.map(row => {
-    const obj = {};
-    cols.forEach((col, i) => { obj[col] = row[i].value; });
-    
-    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
-    
-    return {
-      id: obj.id,
-      title: obj.title,
-      img: obj.img || '',
-      price: obj.price ? String(obj.price) : '',
-      oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
-      discount: discount > 0 ? String(discount) : '',
-      rating: obj.rating ? String(obj.rating) : '',
-      sold: obj.sold ? String(obj.sold) : '',
-      link: `https://www.aliexpress.com/item/${obj.id}.html`
-    };
-  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Neon HTTP ${res.status}: ${err.slice(0, 200)}`);
+  }
 
-  return {
-    ok: true,
-    items: items,
-    hasMore: items.length === LIMIT
-  };
+  return await res.json();
+}
+
+function json(data, status, corsHeaders) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
 }
