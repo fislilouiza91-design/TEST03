@@ -24,7 +24,7 @@ export default {
           throw new Error("Missing Turso configuration");
         }
 
-        // 1. محاولة جلب العنوان الإنجليزي من صفحة المنتج (عبر رقم المنتج)
+        // 1. محاولة جلب العنوان الإنجليزي من صفحة المنتج (الأدق)
         if (pid) {
           try {
             const scraperUrl = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=https://www.aliexpress.com/item/${pid}.html`;
@@ -34,7 +34,7 @@ export default {
               const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
               if (ogTitleMatch && ogTitleMatch[1]) {
                 title = ogTitleMatch[1];
-                console.log("✅ Fetched English Title from Product Page:", title);
+                console.log("✅ Original English Title:", title);
               }
             }
           } catch (e) {
@@ -42,13 +42,13 @@ export default {
           }
         }
 
-        // 2. إذا فشل جلب العنوان الإنجليزي، نستخدم الترجمة
+        // 2. إذا فشل، نستخدم الترجمة
         if (title === originalTitle && title.length > 0) {
           title = await translateToEnglish(title);
-          console.log("🌐 Translated Title via Google:", title);
+          console.log("🌐 Translated Title:", title);
         }
 
-        // 3. البحث في قاعدة البيانات
+        // 3. البحث الدقيق في قاعدة البيانات
         const result = await searchTursoDB(title, page, existingIds, env);
         
         return new Response(JSON.stringify(result), {
@@ -79,6 +79,7 @@ async function translateToEnglish(text) {
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
+  // قائمة ضخمة جداً بالكلمات التي يجب تجاهلها (لأنها لا تحدد نوع المنتج)
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
     'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
@@ -98,19 +99,25 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // نأخذ أول 3 كلمات فقط
-  let keywords = meaningfulWords.slice(0, 3);
+  // نأخذ أول 5 كلمات مهمة لتغطية دقيقة
+  let keywords = meaningfulWords.slice(0, 5);
   
-  // إزالة الجمع (s)
+  // إزالة الجمع (s) لتطابق المفرد والجمع
   keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
-  // استخدام OR لضمان إيجاد أي منتج يطابق ولو كلمة واحدة
+  // شروط البحث (OR للسماح بأي تطابق)
   const conditions = keywords.map(() => `p.title LIKE ?`).join(' OR ');
+  
+  // نظام النقاط: كل كلمة تتطابق تعطي 10 نقاط
   let scoreSql = keywords.map(() => `(CASE WHEN p.title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
 
   const queryArgs = [];
+  
+  // 1. متغيرات حساب النقاط (للـ SELECT)
   keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  
+  // 2. متغيرات شروط البحث (للـ WHERE)
   keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
@@ -126,17 +133,24 @@ async function searchTursoDB(title, page, existingIds, env) {
   queryArgs.push({ type: 'float', value: LIMIT });
   queryArgs.push({ type: 'float', value: OFFSET });
 
+  // 🔥 فلتر الدقة: يجب أن يحصل المنتج على 20 نقطة (أي يطابق كلمتين على الأقل)
+  // إذا أردت دقة أعلى، يمكنك تغييرها إلى 30 (3 كلمات)
+  const minScore = keywords.length > 1 ? 20 : 10;
+
   const sql = `
-    SELECT p.product_id as id, p.title, 
-           COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
-           p.current_price_usd as price, p.original_price_usd as oldPrice, 
-           p.rating, p.orders_count as sold,
-           (${scoreSql}) AS score
-    FROM products p
-    LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
-    WHERE (${conditions})
-      ${excludeCondition}
-    ORDER BY score DESC, p.last_updated_at DESC
+    SELECT * FROM (
+      SELECT p.product_id as id, p.title, 
+             COALESCE(NULLIF(p.image_url, ''), pi.image_url) as img,
+             p.current_price_usd as price, p.original_price_usd as oldPrice, 
+             p.rating, p.orders_count as sold,
+             (${scoreSql}) AS score
+      FROM products p
+      LEFT JOIN product_images pi ON p.product_id = pi.product_id AND pi.is_main = 1
+      WHERE (${conditions})
+        ${excludeCondition}
+    ) AS sub
+    WHERE score >= ${minScore}
+    ORDER BY score DESC, last_updated_at DESC
     LIMIT ? OFFSET ?
   `;
 
