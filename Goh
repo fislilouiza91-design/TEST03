@@ -38,7 +38,6 @@ export default {
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
-  // قائمة ضخمة بالكلمات التي يجب تجاهلها (بما فيها الإكسسوارات والأسماء التجارية للأجهزة)
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
     'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
@@ -48,31 +47,30 @@ async function searchTursoDB(title, page, existingIds, env) {
     'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
     'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
     'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100',
-    // كلمات الإكسسوارات التي تفسد البحث:
-    'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'case', 'iphone', 
+    'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'iphone', 
     'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
   ]);
   
-  // تقسيم العنوان إلى كلمات
   const allWords = title.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/);
-  
-  // استخراج الكلمات المهمة فقط (أطول من 3 أحرف، وليست في قائمة الحظر)
   const meaningfulWords = allWords.filter(w => w.length > 3 && !stopWords.has(w) && !/^\d+$/.test(w));
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // 🔥 الحل الجذري: نأخذ أول 3 كلمات مهمة فقط (لأنها الماركة ونوع المنتج الرئيسي)
-  const keywords = meaningfulWords.slice(0, 3);
+  // نأخذ أول 3 كلمات مهمة
+  let keywords = meaningfulWords.slice(0, 3);
 
-  // بناء شروط البحث (OR)
+  // تحسين الجمع (Pluralization): إزالة حرف s من نهاية الكلمة لتطابق المفرد والجمع
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
+  keywords = [...new Set(keywords)]; 
+
   const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
   
-  // نظام النقاط: الكلمات التي تتطابق تعطي نقاطاً أعلى
-  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+  // 🔥 إعطاء نقاط أعلى بكثير للمنتجات التي تحتوي على الكلمات الأساسية
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 100 ELSE 0 END)`).join(' + ');
 
   const queryArgs = [];
-  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
-  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` })); // للبحث
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` })); // للنقاط
 
   let excludeCondition = '';
   if (existingIds) {
@@ -87,13 +85,17 @@ async function searchTursoDB(title, page, existingIds, env) {
   queryArgs.push({ type: 'float', value: LIMIT });
   queryArgs.push({ type: 'float', value: OFFSET });
 
+  // 🔥 فلترة النتائج: يجب أن يحصل المنتج على 100 نقطة على الأقل (أي يجب أن يطابق كلمة واحدة على الأقل)
+  // إذا أردت أن يطابق كلمتين، اجعل الشرط score >= 200
   const sql = `
-    SELECT product_id as id, title, image_url as img, 
-           current_price_usd as price, original_price_usd as oldPrice, 
-           rating, orders_count as sold,
-           (${scoreSql}) AS score
-    FROM products 
-    WHERE (${conditions}) ${excludeCondition}
+    SELECT * FROM (
+      SELECT product_id as id, title, image_url as img, 
+             current_price_usd as price, original_price_usd as oldPrice, 
+             rating, orders_count as sold,
+             (${scoreSql}) AS score
+      FROM products 
+      WHERE (${conditions}) ${excludeCondition}
+    ) WHERE score >= 100
     ORDER BY score DESC, last_updated_at DESC
     LIMIT ? OFFSET ?
   `;
