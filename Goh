@@ -1,36 +1,4 @@
-name: Smart Pipeline
-
-on:
-  schedule:
-    # يعمل كل 3 ساعات (00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00)
-    - cron: '0 */3 * * *'
-  workflow_dispatch: # يسمح لك بتشغيله يدوياً
-
-jobs:
-  smart:
-    runs-on: ubuntu-latest
-    # رفعنا الحد الأقصى إلى 90 دقيقة ليعمل السكريبت بحرية لمدة 30 دقيقة على الأقل
-    timeout-minutes: 90
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run Smart Pipeline
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
-          SCRAPERAPI_API_KEY: ${{ secrets.SCRAPERAPI_API_KEY }}
-          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
-          BRIGHTDATA_ZONE: ${{ secrets.BRIGHTDATA_ZONE }}
-        run: node src/smart-pipeline.js
+DROP TRIGGER IF EXISTS products_ai;
+DROP TRIGGER IF EXISTS products_ad;
+DROP TRIGGER IF EXISTS products_au;
+DROP TABLE IF EXISTS products_search;
