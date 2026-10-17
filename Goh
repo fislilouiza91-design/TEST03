@@ -46,7 +46,7 @@ async function searchTursoDB(title, page, existingIds, env) {
     'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
     'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
     'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
-    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100',
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mAh',
     'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'iphone', 
     'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
   ]);
@@ -56,12 +56,16 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  let keywords = meaningfulWords.slice(0, 3);
+  // نأخذ أول كلمتين مهمتين (لأن البحث بـ AND يحتاج لكلمات دقيقة)
+  let keywords = meaningfulWords.slice(0, 2);
   
   keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
-  const conditions = keywords.map(() => `p.title LIKE ?`).join(' OR ');
+  // 🔥 هنا التغيير: استخدام AND بدلاً من OR لضمان تطابق كل الكلمات
+  const conditions = keywords.map(() => `p.title LIKE ?`).join(' AND ');
+  
+  // نظام النقاط: إعطاء نقاط أعلى للمنتجات التي تحتوي على الكلمات في بداية العنوان
   let scoreSql = keywords.map(() => `(CASE WHEN p.title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
 
   const queryArgs = [];
@@ -78,7 +82,6 @@ async function searchTursoDB(title, page, existingIds, env) {
   const LIMIT = 60;
   const OFFSET = (page - 1) * LIMIT;
   
-  // 🔥 تم إصلاح هذه الأسطر لتكون float بدلاً من integer لتفادي خطأ Turso
   queryArgs.push({ type: 'float', value: LIMIT });
   queryArgs.push({ type: 'float', value: OFFSET });
 
