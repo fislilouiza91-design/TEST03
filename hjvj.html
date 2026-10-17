@@ -56,45 +56,25 @@ function toNum(v) {
 }
 
 // ═══════════════════════════════════════════
-// 1. استرجاع/حفظ حالة المزودين
+// ⭐ 1. حالة نظيفة كل تشغيل — لا معطل محفوظ
 // ═══════════════════════════════════════════
 
 async function restoreProviderState() {
-  try {
-    const saved = await db.execute(
-      `SELECT value FROM system_state WHERE key = 'providers_status'`
-    );
-    if (saved.rows.length === 0) return;
-
-    const prev = JSON.parse(saved.rows[0].value);
-    const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
-    if (ageHours > 24) {
-      console.log('🔄 مضى 24+ ساعة — إعادة تعيين الحالة');
-      return;
-    }
-
-    for (const key of ['scrapingant', 'scraperapi']) {
-      if (prev[key]?.status === 'disabled' && ageHours < 24) {
-        providerState[key].status = 'disabled';
-        providerState[key].reason = prev[key].reason;
-        console.log(`⚠️ ${key}: معطل (من الدورة السابقة)`);
-      }
-    }
-  } catch (e) {}
+  // ✅ كل تشغيل يبدأ من جديد — كل المزودين نشطون
+  console.log('🔄 حالة نظيفة — كل المزودين نشطون من جديد');
+  
+  providerState.scrapingant.status = 'active';
+  providerState.scrapingant.consecutiveFailures = 0;
+  providerState.scrapingant.reason = null;
+  
+  providerState.scraperapi.status = 'active';
+  providerState.scraperapi.consecutiveFailures = 0;
+  providerState.scraperapi.reason = null;
 }
 
 async function saveProviderState() {
-  try {
-    await db.execute({
-      sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
-            VALUES ('providers_status', ?, ?)`,
-      args: [JSON.stringify({
-        scrapingant: providerState.scrapingant,
-        scraperapi: providerState.scraperapi,
-        savedAt: Date.now(),
-      }), Date.now()],
-    });
-  } catch (e) {}
+  // ❌ لا نحفظ — كل تشغيل مستقل تماماً
+  return;
 }
 
 // ═══════════════════════════════════════════
@@ -141,7 +121,6 @@ async function checkApifyHealth() {
 
 async function pickRandomCategory() {
   try {
-    // 1. اجلب كل الفئات المتاحة
     const res = await db.execute(`
       SELECT DISTINCT category FROM keywords_pipeline
       WHERE enabled = 1 AND category IS NOT NULL AND category != ''
@@ -154,7 +133,6 @@ async function pickRandomCategory() {
 
     const cats = res.rows.map(r => String(r.category));
 
-    // 2. اقرأ سجل الدورة من system_state (لتجنب التكرار)
     const saved = await db.execute(
       `SELECT value FROM system_state WHERE key = 'category_cycle'`
     );
@@ -165,7 +143,6 @@ async function pickRandomCategory() {
     if (saved.rows.length > 0) {
       try {
         const state = JSON.parse(saved.rows[0].value);
-        // لو مضى أكثر من 7 أيام → ابدأ دورة جديدة
         const ageDays = (Date.now() - (state.savedAt || 0)) / (1000 * 60 * 60 * 24);
         if (ageDays < 7) {
           used = Array.isArray(state.used) ? state.used : [];
@@ -174,11 +151,9 @@ async function pickRandomCategory() {
       } catch (e) {}
     }
 
-    // 3. الفئات المتبقية في الدورة الحالية
     let remaining = cats.filter(c => !used.includes(c));
     let cycleReset = false;
 
-    // 4. انتهت الدورة → أعد التعيين
     if (remaining.length === 0) {
       console.log('  🔄 اكتملت كل الفئات — بدء دورة جديدة');
       used = [];
@@ -186,11 +161,9 @@ async function pickRandomCategory() {
       cycleReset = true;
     }
 
-    // 5. اختيار عشوائي
     const picked = remaining[Math.floor(Math.random() * remaining.length)];
     used.push(picked);
 
-    // 6. احفظ الحالة
     await db.execute({
       sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
             VALUES ('category_cycle', ?, ?)`,
@@ -202,13 +175,11 @@ async function pickRandomCategory() {
       }), Date.now()],
     });
 
-    // 7. اعرض معلومات
     console.log(`\n🎲 الفئة المختارة: [${picked}]`);
     console.log(`   📚 إجمالي الفئات: ${cats.length}`);
     console.log(`   ⏳ متبقٍ في الدورة: ${remaining.length - 1}`);
     console.log(`   📋 مستخدمة حتى الآن: ${used.length}`);
 
-    // 8. إحصائيات الفئة
     const stRes = await db.execute({
       sql: `SELECT 
               COUNT(*) as total,
@@ -246,7 +217,6 @@ async function pickDiscoverySeeds(count, category) {
 
   let pool = existing.rows;
 
-  // إذا لا توجد كلمات جديدة في الفئة → استخدم fallback
   if (pool.length === 0) {
     console.log(`  ⚠️ لا كلمات جديدة في [${category}] — استخدام أي كلمات متاحة`);
     const all = await db.execute({
@@ -258,7 +228,6 @@ async function pickDiscoverySeeds(count, category) {
     return all.rows;
   }
 
-  // Fisher-Yates shuffle
   const rows = [...pool];
   for (let i = rows.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -439,7 +408,7 @@ function extractTokens(title) {
 }
 
 // ═══════════════════════════════════════════
-// 9. حفظ Apify Products (يربط الكلمات المشتقة بنفس الفئة)
+// 9. حفظ Apify Products
 // ═══════════════════════════════════════════
 
 async function saveApifyProducts(items, seedKeyword, category) {
@@ -492,7 +461,6 @@ async function saveApifyProducts(items, seedKeyword, category) {
 
   let newKeywords = 0;
   for (const [kw] of sorted) {
-    // ⭐ الكلمات المشتقة تُضاف لنفس الفئة
     const r = await db.execute({
       sql: `INSERT OR IGNORE INTO keywords_pipeline 
             (keyword, category, source, priority, created_at) 
@@ -834,9 +802,9 @@ async function main() {
   console.log('🎯 Endpoint: /wholesale?SearchText=');
   console.log('🎯 ScrapingAnt: browser=false | ScraperAPI: render=false');
   console.log('🎯 النمط: فئة عشوائية جديدة في كل تشغيل');
+  console.log('🎯 حالة نظيفة كل تشغيل — لا مزود معطل محفوظ');
   console.log('═'.repeat(60));
 
-  // ⭐ اختيار الفئة أولاً
   const category = await pickRandomCategory();
 
   if (!category) {
@@ -896,7 +864,7 @@ async function main() {
   console.log(`\n🔌 حالة المزودين:`);
   console.log(`  🔵 ScrapingAnt: ${providerState.scrapingant.status} (${providerState.scrapingant.consecutiveFailures} فشل)`);
   console.log(`  🟠 ScraperAPI: ${providerState.scraperapi.status} (${providerState.scraperapi.consecutiveFailures} فشل)`);
-  console.log(`\n💡 التشغيل التالي سيختار فئة مختلفة تلقائياً`);
+  console.log(`\n💡 التشغيل التالي سيبدأ بحالة نظيفة جديدة`);
 }
 
 main().catch(err => {
