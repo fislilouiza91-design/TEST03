@@ -38,7 +38,7 @@ export default {
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
-  // 1. قائمة الكلمات التجارية والحشو (مستخرجة من خبرتنا في عناوين علي إكسبرس)
+  // قائمة ضخمة بالكلمات التي يجب تجاهلها (بما فيها الإكسسوارات والأسماء التجارية للأجهزة)
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
     'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
@@ -47,31 +47,27 @@ async function searchTursoDB(title, page, existingIds, env) {
     'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
     'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
     'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
-    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100'
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100',
+    // كلمات الإكسسوارات التي تفسد البحث:
+    'cable', 'adapter', 'charger', 'cover', 'protector', 'glass', 'case', 'iphone', 
+    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
   ]);
   
-  // 2. تنظيف العنوان
+  // تقسيم العنوان إلى كلمات
   const allWords = title.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/);
+  
+  // استخراج الكلمات المهمة فقط (أطول من 3 أحرف، وليست في قائمة الحظر)
   const meaningfulWords = allWords.filter(w => w.length > 3 && !stopWords.has(w) && !/^\d+$/.test(w));
 
   if (meaningfulWords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // 3. الخوارزمية الذكية: أخذ أول كلمة (الماركة) + آخر كلمتين (نوع المنتج)
-  let keywords = [];
-  if (meaningfulWords.length >= 3) {
-    keywords = [meaningfulWords[0], ...meaningfulWords.slice(-2)];
-  } else {
-    keywords = meaningfulWords; 
-  }
-  
-  keywords = [...new Set(keywords)]; // إزالة التكرار
+  // 🔥 الحل الجذري: نأخذ أول 3 كلمات مهمة فقط (لأنها الماركة ونوع المنتج الرئيسي)
+  const keywords = meaningfulWords.slice(0, 3);
 
-  // 4. بناء الاستعلام: يجب أن يحتوي على الكلمات الأساسية
-  // نستخدم OR لضمان إيجاد أي منتج يطابق ولو كلمة واحدة
+  // بناء شروط البحث (OR)
   const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
   
-  // 5. نظام النقاط (Ranking) لترتيب الأكثر دقة أولاً
-  // المنتج الذي يحتوي على كلمة "motorcycle" سيحصل على نقاط أعلى من المنتج الذي يحتوي على "sinski" فقط
+  // نظام النقاط: الكلمات التي تتطابق تعطي نقاطاً أعلى
   let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
 
   const queryArgs = [];
@@ -91,7 +87,6 @@ async function searchTursoDB(title, page, existingIds, env) {
   queryArgs.push({ type: 'float', value: LIMIT });
   queryArgs.push({ type: 'float', value: OFFSET });
 
-  // 6. الاستعلام النهائي
   const sql = `
     SELECT product_id as id, title, image_url as img, 
            current_price_usd as price, original_price_usd as oldPrice, 
