@@ -1,74 +1,8 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   (No-Cache Edition)
-   ============================================ */
+-- 1. فهرس البحث النصي الشامل (FTS) على العنوان (للبحث عن الكلمات)
+CREATE INDEX IF NOT EXISTS idx_products_fts ON products USING fts (title);
 
-const WORKER_URL = 'https://shopper.smailsuit11.workers.dev';
+-- 2. فهرس السعر (لتسريع الفرز حسب الأرخص)
+CREATE INDEX IF NOT EXISTS idx_products_price ON products(current_price_usd);
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  const extractPid = (url) => {
-    if (!url) return '';
-    const match = url.match(/(?:\/item\/|\/i\/|productId=)(\d{8,})/i);
-    return match ? match[1] : '';
-  };
-
-  if (msg.type === 'SMART_SEARCH') {
-    const pid = extractPid(sender.tab?.url);
-    handleSearch(msg, pid, sendResponse);
-    return true;
-  }
-
-  if (msg.type === 'SMART_LOAD_MORE') {
-    const pid = extractPid(sender.tab?.url);
-    handleLoadMore(msg, pid, sendResponse);
-    return true;
-  }
-
-  return true;
-});
-
-async function handleSearch(msg, pid, sendResponse) {
-  const t = Date.now();
-  const url = `${WORKER_URL}/search-db?q=${encodeURIComponent(msg.title || '')}&pid=${pid}&page=1&t=${t}`;
-
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-    const data = await res.json();
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: 1,
-      hasMore: data.hasMore || false,
-      totalItems: data.items ? data.items.length : 0
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e) });
-  }
-}
-
-async function handleLoadMore(msg, pid, sendResponse) {
-  const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
-  const existingIds = (msg.existingIds || []).join(',');
-  const t = Date.now();
-  
-  const url = `${WORKER_URL}/search-db?q=${encodeURIComponent(msg.title || '')}&pid=${pid}&page=${nextPage}&existingIds=${existingIds}&t=${t}`;
-
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-    const data = await res.json();
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: nextPage,
-      hasMore: data.hasMore || false
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e), hasMore: false });
-  }
-}
+-- 3. فهرس تاريخ التحديث (لتسريع ترتيب المنتجات الأحدث)
+CREATE INDEX IF NOT EXISTS idx_products_updated ON products(last_updated_at DESC);
