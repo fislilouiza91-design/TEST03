@@ -22,7 +22,7 @@ export default {
         
         let englishTitle = title;
         
-        // 1. جلب العنوان الحقيقي من القاعدة (لضمان الدقة)
+        // 1. جلب العنوان الأصلي من القاعدة (لضمان الدقة)
         if (pid) {
           try {
             const dbTitle = await getDbTitle(pid, env);
@@ -30,14 +30,12 @@ export default {
           } catch (e) {}
         }
 
-        // 2. البحث في قاعدة البيانات باستخدام FTS (سريع جداً ويجد الكلمات في أي مكان)
         const dbResult = await searchTursoDB(englishTitle, page, existingIds, env);
         
-        // 3. الإنقاذ: إذا كانت النتائج صفر (المنتج غير موجود في القاعدة)، نجلبه من علي إكسبرس مباشرة!
+        // 2. الإنقاذ: إذا كانت القاعدة فارغة، نجلبه من علي إكسبرس
         if (dbResult.items.length === 0 && page === 1) {
-          console.log("⚠️ DB empty for this product, fetching live...");
+          console.log("⚠️ DB empty, fetching live...");
           const liveResult = await fetchLiveFromAliExpress(englishTitle);
-          
           if (liveResult.length > 0) {
             return new Response(JSON.stringify({ ok: true, items: liveResult.slice(0, 60), hasMore: false }), {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -55,13 +53,10 @@ export default {
       }
     }
 
-    return new Response('Smart-Turso FTS API is running.', { status: 200, headers: corsHeaders });
+    return new Response('Smart-Turso API is running.', { status: 200, headers: corsHeaders });
   }
 }
 
-// ═══════════════════════════════════════════
-// جلب العنوان من قاعدة البيانات
-// ═══════════════════════════════════════════
 async function getDbTitle(pid, env) {
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
   const res = await fetch(`${httpUrl}/v2/pipeline`, {
@@ -77,9 +72,6 @@ async function getDbTitle(pid, env) {
   return rows.length > 0 ? rows[0][0].value : null;
 }
 
-// ═══════════════════════════════════════════
-// البحث باستخدام FTS (البحث الشامل والسريع)
-// ═══════════════════════════════════════════
 async function searchTursoDB(title, page, existingIds, env) {
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
@@ -97,20 +89,19 @@ async function searchTursoDB(title, page, existingIds, env) {
   
   const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
   let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
-  const modelNumbers = allWords.filter(w => /\d+/.test(w));
-
-  // نأخذ أول 4 كلمات مهمة + رقم الموديل إن وجد
-  let keywords = meaningfulWords.slice(0, 4);
-  if (modelNumbers.length > 0) keywords.push(modelNumbers[0]);
+  
+  // نأخذ أطول 3 كلمات (لضمان الدقة)
+  meaningfulWords.sort((a, b) => b.length - a.length);
+  let keywords = meaningfulWords.slice(0, 3);
   keywords = [...new Set(keywords)];
 
   if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // 🔥 بناء استعلام FTS: 
-  // نضع كل كلمة بين علامتي تنصيص ونضيف * للبحث بالبادئة، ونربطها بـ OR
-  const ftsQuery = keywords.map(k => `"${k}"*`).join(' OR ');
-
-  const queryArgs = [{ type: 'text', value: ftsQuery }];
+  const queryArgs = [];
+  
+  // 1. البحث باستخدام الفهرس (LIKE 'kw%') - سريع جداً
+  const prefixConditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `${k}%` }));
 
   let excludeCondition = '';
   if (existingIds && existingIds.trim() !== '') {
@@ -122,36 +113,62 @@ async function searchTursoDB(title, page, existingIds, env) {
   const LIMIT = 60;
   const OFFSET = (page - 1) * LIMIT;
 
-  // استخدام fts_match للبحث الشامل
-  const sql = `
+  let sql = `
     SELECT product_id as id, title, 
            image_url as img,
            current_price_usd as price, original_price_usd as oldPrice, 
            rating, orders_count as sold
     FROM products
-    WHERE fts_match(title, ?)
+    WHERE (${prefixConditions})
       ${excludeCondition}
     ORDER BY rowid DESC
     LIMIT ${LIMIT} OFFSET ${OFFSET}
   `;
 
-  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
-  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+  let httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  let tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }]
-    })
+    body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }] })
   });
+  let data = await tursoRes.json();
+  let result = data.results[0];
+  
+  let rows = (result.type === 'error') ? [] : result.response.result.rows;
 
-  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
-  
-  const data = await tursoRes.json();
-  const result = data.results[0];
-  if (result.type === 'error') throw new Error(result.error.message);
-  
+  // 2. الخطة البديلة: إذا لم نجد نتائج في البداية، نبحث في كل مكان (أبطأ قليلاً لكنه يضمن النتائج)
+  if (rows.length === 0) {
+    const fallbackConditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+    const fallbackArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
+    
+    if (existingIds && existingIds.trim() !== '') {
+      existingIds.split(',').forEach(id => fallbackArgs.push({ type: 'text', value: id }));
+    }
+
+    sql = `
+      SELECT product_id as id, title, 
+             image_url as img,
+             current_price_usd as price, original_price_usd as oldPrice, 
+             rating, orders_count as sold
+      FROM products
+      WHERE (${fallbackConditions})
+        ${excludeCondition}
+      ORDER BY rowid DESC
+      LIMIT ${LIMIT} OFFSET ${OFFSET}
+    `;
+
+    tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: sql, args: fallbackArgs } }, { type: 'close' }] })
+    });
+    data = await tursoRes.json();
+    result = data.results[0];
+    if (result.type === 'error') return { ok: true, items: [], hasMore: false };
+    rows = result.response.result.rows;
+  }
+
   const cols = result.response.result.cols.map(c => c.name);
-  const rows = result.response.result.rows;
   
   const items = rows.map(row => {
     const obj = {};
@@ -172,27 +189,20 @@ async function searchTursoDB(title, page, existingIds, env) {
   return { ok: true, items: items, hasMore: items.length === LIMIT };
 }
 
-// ═══════════════════════════════════════════
-// جلب المنتجات مباشرة من علي إكسبرس (Live Scraping)
-// ═══════════════════════════════════════════
 async function fetchLiveFromAliExpress(title) {
   try {
     const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + encodeURIComponent(title.slice(0, 90)) + '&catId=0';
     const workerEndpoint = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=${encodeURIComponent(baseUrl)}`;
-    
     const res = await fetch(workerEndpoint);
     if (!res.ok) return [];
-    
     const html = await res.text();
     if (html.length < 5000) return [];
-
     return parseAliExpressHtml(html);
   } catch (e) {
     return [];
   }
 }
 
-// دالة استخراج البيانات من HTML (نسخة Cloudflare)
 function parseAliExpressHtml(html) {
   const extractJsonArray = (html, marker) => {
     const i = html.indexOf(marker);
