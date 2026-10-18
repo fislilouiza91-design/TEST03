@@ -1,12 +1,10 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Fast Geo-Routing)
-   D1 + KV Cache + ScrapingAnt/ScraperAPI (Speed Optimized)
+   Smart Shopper - Cloudflare Worker (Bulk Geo-Routing)
+   D1 (All items) + KV Cache (Relevant only)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
 const CACHE_TTL = 432000; // 5 أيام
-
-// قائمة الدول المدعومة في الخطط المجانية (للسرعة)
 const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
 
 export default {
@@ -24,7 +22,7 @@ export default {
       const url = new URL(request.url);
       const productId = url.searchParams.get('productId');
 
-      // 1. GET: جلب البيانات من (KV أو D1)
+      // 1. GET: جلب البيانات
       if (request.method === 'GET' && url.pathname === '/api/competitors') {
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
         const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
@@ -44,37 +42,54 @@ export default {
         return json({ status: 'not_found' }, 404, corsHeaders);
       }
 
-      // 2. POST: حفظ البيانات
+      // 2. POST: حفظ البيانات (استقبال الدفعة الكاملة من الإضافة)
       if (request.method === 'POST' && url.pathname === '/api/competitors') {
         const body = await request.json();
-        if (!body.base_product_id || !body.competitors || !Array.isArray(body.competitors)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
+        // body يحتوي على: base_product_id, all_items, relevant_items
+        
+        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
+          return json({ error: 'Invalid data format' }, 400, corsHeaders);
         }
+
         const monthIndex = new Date().getUTCMonth(); 
         const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
         const now = Math.floor(Date.now() / 1000);
-        const statements = body.competitors.map(c => {
+        
+        // استخراج معرفات المنتجات المتشابهة لتمييزها في D1
+        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
+
+        // 1. حفظ كل شيء في D1
+        const statements = body.all_items.map(c => {
+          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
           return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET price = excluded.price, seller_rating = excluded.seller_rating, coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, scraped_at = excluded.scraped_at
-          `).bind(body.base_product_id, c.competitor_id, c.title, c.price, c.currency || 'USD', c.seller_rating || 0, c.product_url, c.coupon_code || null, c.coupon_discount || null, now);
+            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
+              price = excluded.price, seller_rating = excluded.seller_rating, 
+              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
+              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
+          `).bind(
+            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
+            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
+            isRelevant, now
+          );
         });
+
         if (statements.length > 0) await env.DB.batch(statements);
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.competitors), { expirationTtl: CACHE_TTL });
-        return json({ success: true, count: body.competitors.length }, 201, corsHeaders);
+        
+        // 2. حفظ المتشابهة فقط في الكاش KV
+        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
+
+        return json({ success: true, all_count: body.all_items.length, relevant_count: body.relevant_items.length }, 201, corsHeaders);
       }
 
-      // 3. Fallback Scrape (توجيه ذكي للبلد)
+      // 3. Fallback Scrape
       if (request.method === 'GET' && url.pathname === '/api/fallback-scrape') {
         const requestUrl = url.searchParams.get('url');
         const userCountry = (url.searchParams.get('country') || 'US').toLowerCase();
         const targetUrl = requestUrl ? requestUrl : `https://www.aliexpress.com/item/${productId}.html`;
         
-        // تحديد البروكسي: إذا كانت الدولة مدعومة نستخدمها، وإلا نستخدم أمريكا فوراً لتجنب البطء
         const proxyCountry = SUPPORTED_COUNTRIES.includes(userCountry) ? userCountry : 'us';
-        
-        // ترويسة اللغة: نخبر AliExpress ببلد المستخدم الحقيقي حتى لو استخدمنا بروكسي أمريكي
         const acceptLanguage = `${userCountry}-${userCountry.toUpperCase()},${userCountry};q=0.9,en;q=0.8`;
 
         const { html, provider } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
@@ -121,23 +136,14 @@ async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
     const status = await getProviderStatus(provider.name, env);
     if (status.disabled) continue;
 
-    for (let attempt = 1; attempt <= 2; attempt++) { // تقليل المحاولات للسرعة
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
-        
-        if (html && (html.includes('punish') || html.includes('captcha'))) {
-          throw new Error('CAPTCHA_DETECTED');
-        }
-        
-        if (html && html.length > 5000) {
-          return { html, provider: provider.name };
-        }
+        if (html && (html.includes('punish') || html.includes('captcha'))) throw new Error('CAPTCHA_DETECTED');
+        if (html && html.length > 5000) return { html, provider: provider.name };
       } catch (e) {
         const errType = classifyError(e);
-        if (errType === 'QUOTA') {
-          await disableProvider(provider.name, e.message, status, env);
-          break;
-        }
+        if (errType === 'QUOTA') { await disableProvider(provider.name, e.message, status, env); break; }
         if (errType === 'CONCURRENCY' || errType === 'RATE' || e.message === 'CAPTCHA_DETECTED') {
           if (attempt < 2) { await sleep(1500); continue; } else { break; }
         }
@@ -159,17 +165,13 @@ function classifyError(error) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/* ============================================
-   Fetch Functions (Fast, No Browser, Language Headers)
-   ============================================ */
 async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
   const url = new URL('https://api.scrapingant.com/v2/general');
   url.searchParams.set('x-api-key', apiKey);
   url.searchParams.set('url', targetUrl);
   url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', 'false'); // ⚡ إيقاف المتصفح للسرعة القصوى
+  url.searchParams.set('browser', 'false'); 
   url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-
   const res = await fetch(url.toString());
   if (!res.ok) {
     const errBody = await res.text();
@@ -188,10 +190,9 @@ async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
   url.searchParams.set('api_key', apiKey);
   url.searchParams.set('url', targetUrl);
   url.searchParams.set('country_code', country);
-  url.searchParams.set('render', 'false'); // ⚡ إيقاف التصيير للسرعة القصوى
+  url.searchParams.set('render', 'false'); 
   url.searchParams.set('keep_headers', 'true'); 
   url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-
   const res = await fetch(url.toString());
   if (!res.ok) {
     const errBody = await res.text();
@@ -205,9 +206,6 @@ async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
   return await res.text();
 }
 
-/* ============================================
-   Provider Status Management
-   ============================================ */
 async function getProviderStatus(providerName, env) {
   try {
     const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
@@ -217,7 +215,7 @@ async function getProviderStatus(providerName, env) {
 
 async function disableProvider(providerName, reason, currentStatus, env) {
   const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason: reason, consecutiveFailures: consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
+  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
   await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
 }
 
@@ -225,16 +223,11 @@ async function clearProviderStatus(providerName, env) {
   await env.COMPETITOR_CACHE.delete(`provider:${providerName}`);
 }
 
-function formatStatus(name, status, configured) {
-  return { configured, disabled: status?.disabled || false, permanent: status?.permanent || false, consecutiveFailures: status?.consecutiveFailures || 0, reason: status?.reason || null };
-}
-
 async function healthCheckAllProviders(env) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_KEY },
     { name: 'scraperapi', key: env.SCRAPERAPI_KEY }
   ].filter(p => p.key);
-
   for (const provider of providers) {
     const status = await getProviderStatus(provider.name, env);
     if (!status.disabled || status.permanent) continue;
@@ -246,7 +239,7 @@ async function healthCheckAllProviders(env) {
 async function testProvider(providerName, apiKey) {
   try {
     const testUrl = 'https://httpbin.org/ip';
-    const html = providerName === 'scrapingant' ? await fetchFromScrapingAnt(testUrl, apiKey, 'us', 'en-US,en;q=0.9') : await fetchFromScraperAPI(testUrl, apiKey, 'us', 'en-US,en;q=0.9');
+    const html = providerName === 'scrapingant' ? await fetchFromScrapingAnt(testUrl, apiKey, 'us', 'en-US') : await fetchFromScraperAPI(testUrl, apiKey, 'us', 'en-US');
     return html && html.length > 20;
   } catch (e) { return false; }
 }
