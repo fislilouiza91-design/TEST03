@@ -1,13 +1,9 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   (Safe Lock Edition - No Infinite Tabs)
+   (Clean & Fast Edition)
    ============================================ */
 
 const WORKER_URL = 'https://shopper.smailsuit11.workers.dev';
-
-// متغيرات لمنع فتح تبويبات متعددة
-let activeHiddenTabId = null;
-let activeFetchPid = null;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
@@ -35,94 +31,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-// دالة التبويب المخفي الآمنة (تمنع التكرار)
-function getEnglishTitleInBackground(pid) {
-  return new Promise((resolve) => {
-    if (!pid) return resolve(null);
-    
-    // إذا كان هناك تبويب مفتوح لنفس المنتج، انتظر ولا تفتح آخر
-    if (activeFetchPid === pid && activeHiddenTabId !== null) {
-       console.log('[Smart Shopper] Fetch already in progress for', pid);
-       // نعيد null لكي نستخدم العنوان الحالي كخطة بديلة بدلاً من التعليق
-       return resolve(null); 
-    }
-
-    // إغلاق أي تبويب سابق فوراً
-    if (activeHiddenTabId !== null) {
-      chrome.tabs.remove(activeHiddenTabId, () => { chrome.runtime.lastError; });
-      activeHiddenTabId = null;
-    }
-    
-    activeFetchPid = pid;
-
-    // فتح التبويب في الخلفية
-    chrome.tabs.create({ url: `https://www.aliexpress.us/item/${pid}.html`, active: false }, (tab) => {
-      if (!tab || !tab.id) {
-        activeFetchPid = null;
-        return resolve(null);
-      }
-      
-      const tabId = tab.id;
-      activeHiddenTabId = tabId;
-      let finished = false;
-      
-      const finish = (title) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        
-        // إغلاق التبويب بأمان
-        if (activeHiddenTabId === tabId) {
-          chrome.tabs.remove(tabId, () => { chrome.runtime.lastError; });
-          activeHiddenTabId = null;
-          activeFetchPid = null;
-        }
-        resolve(title);
-      };
-
-      // مهلة قصوى 10 ثواني
-      const timeout = setTimeout(() => finish(null), 10000);
-
-      const listener = (updatedTabId, changeInfo) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          
-          setTimeout(() => {
-            chrome.scripting.executeScript({
-              target: { tabId: tabId },
-              func: () => {
-                const meta = document.querySelector('meta[property="og:title"]');
-                return meta ? meta.content : document.title;
-              }
-            }, (results) => {
-              if (chrome.runtime.lastError || !results || !results[0] || !results[0].result) {
-                finish(null);
-              } else {
-                let title = results[0].result;
-                title = title.replace(/ - AliExpress.*$/i, '').trim();
-                console.log('[Smart Shopper] Hidden Tab Success:', title);
-                finish(title);
-              }
-            });
-          }, 1500);
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
-  });
-}
-
 async function handleSearch(msg, pid, sendResponse) {
-  let searchTitle = msg.title || '';
-
-  if (pid) {
-    // محاولة جلب العنوان الإنجليزي
-    const englishTitle = await getEnglishTitleInBackground(pid);
-    if (englishTitle) {
-      searchTitle = englishTitle;
-    }
-  }
-
+  const searchTitle = msg.title || '';
   const url = `${WORKER_URL}/search-db?q=${encodeURIComponent(searchTitle)}&pid=${pid}&page=1`;
 
   try {
