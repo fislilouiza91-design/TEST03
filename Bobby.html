@@ -1,76 +1,195 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   (Clean & Fast Edition)
-   ============================================ */
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Cache-Control": "no-store"
+    };
 
-const WORKER_URL = 'https://shopper.smailsuit11.workers.dev';
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
+    const url = new URL(request.url);
 
-  const extractPid = (url) => {
-    if (!url) return '';
-    const objectIdMatch = url.match(/x_object_id(?:%3A|:)(\d+)/i);
-    if (objectIdMatch) return objectIdMatch[1];
-    const match = url.match(/(?:\/item\/|\/i\/|productId=)(\d{8,})/i);
-    return match ? match[1] : '';
-  };
+    if (url.pathname === '/search-db') {
+      let title = url.searchParams.get('q') || '';
+      const pid = url.searchParams.get('pid') || '';
+      const page = parseInt(url.searchParams.get('page')) || 1;
+      const existingIds = url.searchParams.get('existingIds') || '';
+      
+      try {
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) throw new Error("Missing Turso config");
+        
+        let finalSearchTitle = title;
 
-  if (msg.type === 'SMART_SEARCH') {
-    const pid = extractPid(sender.tab?.url);
-    handleSearch(msg, pid, sendResponse);
-    return true;
-  }
+        // 1. إذا كان المنتج في قاعدة البيانات، نأخذ عنوانه الإنجليزي فوراً
+        if (pid) {
+          try {
+            const dbTitle = await getDbTitle(pid, env);
+            if (dbTitle) {
+              finalSearchTitle = dbTitle;
+              console.log("✅ Found English Title in DB:", finalSearchTitle);
+            }
+          } catch (e) {}
+        }
 
-  if (msg.type === 'SMART_LOAD_MORE') {
-    const pid = extractPid(sender.tab?.url);
-    handleLoadMore(msg, pid, sendResponse);
-    return true;
-  }
+        // 2. إذا لم نجده، نترجم (مع حماية الكلمات التقنية)
+        if (finalSearchTitle === title && /[^\x00-\x7F]/.test(title)) {
+          finalSearchTitle = await smartTranslateToEnglish(title);
+          console.log("🌐 Smart Translated Title:", finalSearchTitle);
+        }
+        
+        const dbResult = await searchTursoDB(finalSearchTitle, page, existingIds, env);
+        
+        return new Response(JSON.stringify(dbResult), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
 
-  return true;
-});
-
-async function handleSearch(msg, pid, sendResponse) {
-  const searchTitle = msg.title || '';
-  const url = `${WORKER_URL}/search-db?q=${encodeURIComponent(searchTitle)}&pid=${pid}&page=1`;
-
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: 1,
-      hasMore: data.hasMore || false,
-      totalItems: data.items ? data.items.length : 0
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e) });
+    return new Response('Smart-Turso API is running.', { status: 200, headers: corsHeaders });
   }
 }
 
-async function handleLoadMore(msg, pid, sendResponse) {
-  const title = encodeURIComponent(msg.title || '');
-  const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
-  const existingIds = (msg.existingIds || []).join(',');
+async function getDbTitle(pid, env) {
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const res = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } }, { type: 'close' }]
+    })
+  });
+  const data = await res.json();
+  if (data.results[0].type === 'error') return null;
+  const rows = data.results[0].response.result.rows;
+  return rows.length > 0 ? rows[0][0].value : null;
+}
+
+// حماية الكلمات التقنية أثناء الترجمة (حتى لا تترجم NYXI إلى شيء غريب)
+async function smartTranslateToEnglish(text) {
+  if (!text) return text;
+  const technicalTerms = ['ssd', 'nvme', 'hdd', 'ram', 'usb', 'type-c', 'type c', 'tb', 'gb', 'mb', 'mah', '4k', '8k', 'hdmi', 'wifi', 'bt', 'led', 'rgb', 'nyxi', 'controller'];
   
-  const url = `${WORKER_URL}/search-db?q=${title}&pid=${pid}&page=${nextPage}&existingIds=${existingIds}`;
+  let safeText = text;
+  technicalTerms.forEach((term, index) => {
+    const regex = new RegExp(`\\b${term}\\b`, 'gi');
+    safeText = safeText.replace(regex, `__TERM${index}__`);
+  });
 
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: nextPage,
-      hasMore: data.hasMore || false
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e), hasMore: false });
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(safeText)}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data[0] && data[0][0]) {
+        let translated = data[0].map(item => item[0]).join('');
+        technicalTerms.forEach((term, index) => {
+          translated = translated.replace(new RegExp(`__TERM${index}__`, 'gi'), term);
+        });
+        return translated;
+      }
+    }
+  } catch (e) {}
+  
+  return text;
+}
+
+async function searchTursoDB(title, page, existingIds, env) {
+  const stopWords = new Set([
+    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
+    'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
+    'good', 'quality', 'smart', 'portable', 'wireless', 'digital', 'type', 'model', 
+    'color', 'size', 'men', 'women', 'kids', 'baby', 'home', 'car', 'phone', 'case', 
+    'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
+    'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
+    'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mah',
+    'large', 'capacity', 'charging', 'charger', 'external', 'device', 'storage', 'capsule',
+    'cable', 'adapter', 'cover', 'protector', 'glass', 'iphone', 
+    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
+  ]);
+  
+  const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
+  let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
+  
+  // نأخذ أول 4 كلمات مهمة
+  let keywords = meaningfulWords.slice(0, 4);
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
+  keywords = [...new Set(keywords)];
+
+  if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
+
+  // 🔥 العودة للبحث المرن (OR) الذي كان يعمل بشكل ممتاز
+  let conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+  
+  // نظام النقاط: المنتج الذي يطابق كلمتين سيظهر قبل الذي يطابق كلمة واحدة
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+
+  const queryArgs = [];
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+
+  let excludeCondition = '';
+  if (existingIds && existingIds.trim() !== '') {
+    const ids = existingIds.split(',');
+    excludeCondition = `AND product_id NOT IN (${ids.map(() => '?').join(',')})`;
+    ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
   }
+
+  const LIMIT = 60;
+  const OFFSET = (page - 1) * LIMIT;
+
+  const sql = `
+    SELECT product_id as id, title, 
+           image_url as img,
+           current_price_usd as price, original_price_usd as oldPrice, 
+           rating, orders_count as sold,
+           (${scoreSql}) AS score
+    FROM products
+    WHERE (${conditions})
+      ${excludeCondition}
+    ORDER BY score DESC, rowid DESC
+    LIMIT ${LIMIT} OFFSET ${OFFSET}
+  `;
+
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }]
+    })
+  });
+
+  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
+  
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  if (result.type === 'error') throw new Error(result.error.message);
+  
+  const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows;
+  
+  const items = rows.map(row => {
+    const obj = {};
+    cols.forEach((col, i) => { obj[col] = row[i].value; });
+    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
+    
+    return {
+      id: obj.id, title: obj.title, img: obj.img || '',
+      price: obj.price ? String(obj.price) : '',
+      oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
+      discount: discount > 0 ? String(discount) : '',
+      rating: obj.rating ? String(obj.rating) : '',
+      sold: obj.sold ? String(obj.sold) : '',
+      link: `https://www.aliexpress.com/item/${obj.id}.html`
+    };
+  });
+
+  return { ok: true, items: items, hasMore: items.length === LIMIT };
 }
