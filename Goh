@@ -1,10 +1,10 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Fixed Grid Search)
+   Smart Shopper - Cloudflare Worker (Fixed Search Grid)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
 const CACHE_TTL = 432000; // 5 أيام
-const MAX_PAGES_TO_FETCH = 2; // 🔥 للتجربة: صفحتين فقط
+const MAX_PAGES_TO_FETCH = 2; // للتجربة: صفحتين فقط
 const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
 
 export default {
@@ -22,7 +22,7 @@ export default {
       const url = new URL(request.url);
       const productId = url.searchParams.get('productId');
 
-      // 1. جلب المنتجات المتشابهة المحفوظة
+      // 1. جلب المنتجات المتشابهة
       if (request.method === 'GET' && url.pathname === '/api/competitors') {
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
         const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
@@ -42,7 +42,7 @@ export default {
         return json({ status: 'not_found' }, 404, corsHeaders);
       }
 
-      // 2. حفظ المنتجات المتشابهة
+      // 2. حفظ المنتجات
       if (request.method === 'POST' && url.pathname === '/api/competitors') {
         const body = await request.json();
         if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
@@ -74,17 +74,14 @@ export default {
         return json({ success: true }, 201, corsHeaders);
       }
 
-      // 3. جلب صفحة بحث (API)
+      // 3. جلب صفحة البحث
       if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
         const q = url.searchParams.get('q');
         const page = parseInt(url.searchParams.get('page') || '1');
         const country = (url.searchParams.get('country') || 'US').toUpperCase();
         
         if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
-        
-        if (page > MAX_PAGES_TO_FETCH) {
-            return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
-        }
+        if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
         const hash = await hashUrl(q);
         const cacheKey = `search:${hash}:${page}`;
@@ -95,10 +92,8 @@ export default {
         const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
         const acceptLanguage = `${country.toLowerCase()}-${country},${country.toLowerCase()};q=0.9,en;q=0.8`;
         
-        // 🔥 التعديل الجوهري: إجبار AliExpress على عرض صفحة البحث وليس صفحة منتج واحد
-        // تنظيف النص ليكون صالحاً للرابط (حذف الرموز الغريبة واستبدال المسافات بشرطات)
-        const searchSlug = q.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '').toLowerCase();
-        const targetUrl = `https://www.aliexpress.com/w/wholesale-${searchSlug}.html?page=${page}`;
+        // 🔥 استخدام رابط البحث العادي (SearchText) الذي يعرض شبكة منتجات ولا يحول لصفحة منتج واحد
+        const targetUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(q)}&page=${page}`;
         
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
         if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
@@ -127,13 +122,10 @@ async function hashUrl(url) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
 }
 
-// دالة استخراج المصوفة (مستقرة كما كانت في الأصل)
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
-  
-  let arr; 
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
   if (!Array.isArray(arr)) return [];
 
   const out = [];
@@ -172,21 +164,13 @@ function extractText(v) {
   return String(v);
 }
 
-// استعادة الدالة الأصلية المستقرة
 function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
+  const i = html.indexOf(marker); if (i < 0) return null;
+  const j = html.indexOf('[', i); if (j < 0) return null;
   let depth = 0, inStr = false, esc = false;
   for (let k = j; k < html.length; k++) {
     const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
     if (c === '"') { inStr = true; continue; }
     if (c === '[') depth++;
     else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
