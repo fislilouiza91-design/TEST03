@@ -1,1 +1,261 @@
-CREATE INDEX IF NOT EXISTS idx_products_fts ON products USING fts (title);
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Cache-Control": "no-store"
+    };
+
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+    const url = new URL(request.url);
+
+    if (url.pathname === '/search-db') {
+      let title = url.searchParams.get('q') || '';
+      const pid = url.searchParams.get('pid') || '';
+      const page = parseInt(url.searchParams.get('page')) || 1;
+      const existingIds = url.searchParams.get('existingIds') || '';
+      
+      try {
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) throw new Error("Missing Turso config");
+        
+        let englishTitle = title;
+        
+        // 1. جلب العنوان الحقيقي من القاعدة (لضمان الدقة)
+        if (pid) {
+          try {
+            const dbTitle = await getDbTitle(pid, env);
+            if (dbTitle) englishTitle = dbTitle;
+          } catch (e) {}
+        }
+
+        // 2. البحث في قاعدة البيانات باستخدام FTS (سريع جداً ويجد الكلمات في أي مكان)
+        const dbResult = await searchTursoDB(englishTitle, page, existingIds, env);
+        
+        // 3. الإنقاذ: إذا كانت النتائج صفر (المنتج غير موجود في القاعدة)، نجلبه من علي إكسبرس مباشرة!
+        if (dbResult.items.length === 0 && page === 1) {
+          console.log("⚠️ DB empty for this product, fetching live...");
+          const liveResult = await fetchLiveFromAliExpress(englishTitle);
+          
+          if (liveResult.length > 0) {
+            return new Response(JSON.stringify({ ok: true, items: liveResult.slice(0, 60), hasMore: false }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            });
+          }
+        }
+        
+        return new Response(JSON.stringify(dbResult), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    return new Response('Smart-Turso FTS API is running.', { status: 200, headers: corsHeaders });
+  }
+}
+
+// ═══════════════════════════════════════════
+// جلب العنوان من قاعدة البيانات
+// ═══════════════════════════════════════════
+async function getDbTitle(pid, env) {
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const res = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } }, { type: 'close' }]
+    })
+  });
+  const data = await res.json();
+  if (data.results[0].type === 'error') return null;
+  const rows = data.results[0].response.result.rows;
+  return rows.length > 0 ? rows[0][0].value : null;
+}
+
+// ═══════════════════════════════════════════
+// البحث باستخدام FTS (البحث الشامل والسريع)
+// ═══════════════════════════════════════════
+async function searchTursoDB(title, page, existingIds, env) {
+  const stopWords = new Set([
+    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
+    'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
+    'good', 'quality', 'smart', 'portable', 'wireless', 'digital', 'type', 'model', 
+    'color', 'size', 'men', 'women', 'kids', 'baby', 'home', 'car', 'phone', 'case', 
+    'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
+    'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
+    'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mah',
+    'large', 'capacity', 'charging', 'charger', 'external', 'device', 'storage', 'capsule',
+    'cable', 'adapter', 'cover', 'protector', 'glass', 'iphone', 
+    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
+  ]);
+  
+  const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
+  let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
+  const modelNumbers = allWords.filter(w => /\d+/.test(w));
+
+  // نأخذ أول 4 كلمات مهمة + رقم الموديل إن وجد
+  let keywords = meaningfulWords.slice(0, 4);
+  if (modelNumbers.length > 0) keywords.push(modelNumbers[0]);
+  keywords = [...new Set(keywords)];
+
+  if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
+
+  // 🔥 بناء استعلام FTS: 
+  // نضع كل كلمة بين علامتي تنصيص ونضيف * للبحث بالبادئة، ونربطها بـ OR
+  const ftsQuery = keywords.map(k => `"${k}"*`).join(' OR ');
+
+  const queryArgs = [{ type: 'text', value: ftsQuery }];
+
+  let excludeCondition = '';
+  if (existingIds && existingIds.trim() !== '') {
+    const ids = existingIds.split(',');
+    excludeCondition = `AND product_id NOT IN (${ids.map(() => '?').join(',')})`;
+    ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
+  }
+
+  const LIMIT = 60;
+  const OFFSET = (page - 1) * LIMIT;
+
+  // استخدام fts_match للبحث الشامل
+  const sql = `
+    SELECT product_id as id, title, 
+           image_url as img,
+           current_price_usd as price, original_price_usd as oldPrice, 
+           rating, orders_count as sold
+    FROM products
+    WHERE fts_match(title, ?)
+      ${excludeCondition}
+    ORDER BY rowid DESC
+    LIMIT ${LIMIT} OFFSET ${OFFSET}
+  `;
+
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }]
+    })
+  });
+
+  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
+  
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  if (result.type === 'error') throw new Error(result.error.message);
+  
+  const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows;
+  
+  const items = rows.map(row => {
+    const obj = {};
+    cols.forEach((col, i) => { obj[col] = row[i].value; });
+    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
+    
+    return {
+      id: obj.id, title: obj.title, img: obj.img || '',
+      price: obj.price ? String(obj.price) : '',
+      oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
+      discount: discount > 0 ? String(discount) : '',
+      rating: obj.rating ? String(obj.rating) : '',
+      sold: obj.sold ? String(obj.sold) : '',
+      link: `https://www.aliexpress.com/item/${obj.id}.html`
+    };
+  });
+
+  return { ok: true, items: items, hasMore: items.length === LIMIT };
+}
+
+// ═══════════════════════════════════════════
+// جلب المنتجات مباشرة من علي إكسبرس (Live Scraping)
+// ═══════════════════════════════════════════
+async function fetchLiveFromAliExpress(title) {
+  try {
+    const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + encodeURIComponent(title.slice(0, 90)) + '&catId=0';
+    const workerEndpoint = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=${encodeURIComponent(baseUrl)}`;
+    
+    const res = await fetch(workerEndpoint);
+    if (!res.ok) return [];
+    
+    const html = await res.text();
+    if (html.length < 5000) return [];
+
+    return parseAliExpressHtml(html);
+  } catch (e) {
+    return [];
+  }
+}
+
+// دالة استخراج البيانات من HTML (نسخة Cloudflare)
+function parseAliExpressHtml(html) {
+  const extractJsonArray = (html, marker) => {
+    const i = html.indexOf(marker);
+    if (i < 0) return null;
+    const j = html.indexOf('[', i);
+    if (j < 0) return null;
+    let depth = 0, inStr = false, esc = false;
+    for (let k = j; k < html.length; k++) {
+      const c = html[k];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '[') depth++;
+      else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+    }
+    return null;
+  };
+
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(rawTitle).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '';
+      const oldPrice = orig.formatedPrice || orig.minPrice || '';
+      const rating = (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '';
+      const sold = o.tradeDesc || o.sold || o.soldCount || '';
+
+      out.push({ 
+        id: String(id), 
+        title: title || 'Produit', 
+        img, 
+        price: price ? String(price) : '', 
+        oldPrice: oldPrice ? String(oldPrice) : '', 
+        discount: '', 
+        rating: rating ? String(rating) : '', 
+        sold: sold ? String(sold) : '', 
+        link: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
+  }
+  return out;
+}
