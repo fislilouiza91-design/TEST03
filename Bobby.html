@@ -1,343 +1,230 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Monthly D1 Rotation)
-   D1 (30-60 Days) + KV Cache (5 Days) + Circuit Breaker
+   Smart Shopper - Background Service Worker
+   Fetching via Cloudflare Worker (D1 + KV Cache)
    ============================================ */
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; // 5 أيام (5 * 24 * 60 * 60)
+const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
-    };
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
 
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
-
-    try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-
-      // ========================================
-      // 1. GET: جلب البيانات (من KV ثم D1)
-      // ========================================
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-
-        // البحث في الكاش السريع (5 أيام)
-        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) {
-          return json({ source: 'kv', data: cached }, 200, corsHeaders);
-        }
-
-        // البحث في قاعدة البيانات D1 (شهرية)
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-
-          if (results && results.length > 0) {
-            // إذا وُجدت في D1، نضعها في الكاش لمدة 5 أيام ونرجعها
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) {
-          return json({ error: e.message }, 500, corsHeaders);
-        }
-
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      // ========================================
-      // 2. POST: حفظ البيانات (من الإضافة)
-      // ========================================
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        if (!body.base_product_id || !body.competitors || !Array.isArray(body.competitors)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
-        }
-
-        // تحديد الجدول بناءً على الشهر الحالي (فردي أو زوجي)
-        const monthIndex = new Date().getUTCMonth(); 
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-
-        const statements = body.competitors.map(c => {
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} 
-            (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET
-            price = excluded.price, seller_rating = excluded.seller_rating,
-            coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount,
-            scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url, c.coupon_code || null, c.coupon_discount || null, now
-          );
-        });
-
-        if (statements.length > 0) await env.DB.batch(statements);
-        
-        // تحديث الكاش لمدة 5 أيام
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.competitors), { expirationTtl: CACHE_TTL });
-
-        return json({ success: true, count: body.competitors.length }, 201, corsHeaders);
-      }
-
-      // ========================================
-      // 3. Fallback Scrape (Circuit Breaker + Fallback)
-      // ========================================
-      if (request.method === 'GET' && url.pathname === '/api/fallback-scrape') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-        
-        const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
-        
-        const { html, provider } = await fetchWithFallback(targetUrl, env);
-
-        if (!html) {
-          return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
-        }
-
-        return json({ provider, html }, 200, corsHeaders);
-      }
-
-      // ========================================
-      // 4. Health & Providers Status
-      // ========================================
-      if (url.pathname === '/health') {
-        const statuses = await getProviderStatuses(env);
-        return json({
-          status: 'ok',
-          providers: {
-            scrapingant: formatStatus('scrapingant', statuses.scrapingant, !!env.SCRAPINGANT_KEY),
-            scraperapi: formatStatus('scraperapi', statuses.scraperapi, !!env.SCRAPERAPI_KEY)
-          }
-        }, 200, corsHeaders);
-      }
-
-      if (url.pathname === '/reset-provider') {
-        const provider = url.searchParams.get('provider');
-        if (provider) await clearProviderStatus(provider, env);
-        return json({ success: true, reset: provider }, 200, corsHeaders);
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
-  },
-
-  // ========================================
-  // Cron: التنظيف التلقائي الشهري + فحص المزودين
-  // ========================================
-  async scheduled(event, env, ctx) {
-    const now = new Date();
-    
-    // 1. فحص المزودين (يعمل حسب الجدولة)
-    ctx.waitUntil(healthCheckAllProviders(env));
-
-    // 2. تدوير الجداول (في أول يوم من كل شهر)
-    if (now.getUTCDate() === 1) {
-      const monthIndex = now.getUTCMonth();
-      // الجدول الذي سنمسحه هو الذي لن نستخدمه هذا الشهر
-      const tableToClear = monthIndex % 2 === 0 ? 'scraped_products_odd' : 'scraped_products_even';
-      
-      try {
-        await env.DB.batch([
-          env.DB.prepare(`DROP TABLE IF EXISTS ${tableToClear}`),
-          env.DB.prepare(`
-            CREATE TABLE ${tableToClear} (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              base_product_id TEXT NOT NULL,
-              competitor_id TEXT NOT NULL,
-              title TEXT,
-              price REAL,
-              currency TEXT DEFAULT 'USD',
-              seller_rating REAL,
-              product_url TEXT,
-              coupon_code TEXT,
-              coupon_discount TEXT,
-              is_relevant INTEGER DEFAULT 1,
-              scraped_at INTEGER NOT NULL,
-              UNIQUE(base_product_id, competitor_id)
-            )
-          `),
-          env.DB.prepare(`CREATE INDEX idx_${tableToClear}_base ON ${tableToClear}(base_product_id, is_relevant)`)
-        ]);
-        console.log(`[Cron] Table ${tableToClear} rotated successfully for the new month.`);
-      } catch(e) {
-        console.error('[Cron] Cleanup failed:', e);
-      }
-    }
+  // 1. التحقق من الكاش (D1 + KV)
+  if (msg.type === 'CHECK_CACHE') {
+    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}`)
+      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
+      .then(data => sendResponse({ ok: true, data: data.data }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
   }
-};
+
+  // 2. حفظ البيانات في Cloudflare
+  if (msg.type === 'SAVE_DATA') {
+    fetch(`${WORKER_URL}/api/competitors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(msg.payload)
+    })
+      .then(res => res.json())
+      .then(data => sendResponse({ ok: true, data }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  // 3. البحث العادي
+  if (msg.type === 'SMART_SEARCH') {
+    handleSearch(msg, sender, sendResponse);
+    return true;
+  }
+
+  // 4. تحميل المزيد
+  if (msg.type === 'SMART_LOAD_MORE') {
+    handleLoadMore(msg, sender, sendResponse);
+    return true;
+  }
+});
+
+async function handleSearch(msg, sender, sendResponse) {
+  const tabId = sender.tab && sender.tab.id;
+  const q = encodeURIComponent((msg.title || '').slice(0, 90));
+  const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+
+  try {
+    const items = await fetchPage(baseUrl, 1);
+    const seenIds = new Set();
+    const newItems = items.filter(it => { if (!it || !it.id || seenIds.has(it.id)) return false; seenIds.add(it.id); return true; });
+
+    sendResponse({ ok: true, items: newItems, lastPage: 1, hasMore: newItems.length > 0, totalItems: newItems.length, searchUrl: baseUrl });
+
+    if (tabId) {
+      try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', totalItems: newItems.length, lastPage: 1, hasMore: newItems.length > 0 }); } catch (e) {}
+    }
+  } catch (e) {
+    sendResponse({ ok: false, error: String(e) });
+  }
+}
+
+async function handleLoadMore(msg, sender, sendResponse) {
+  const q = encodeURIComponent((msg.title || '').slice(0, 90));
+  const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+  const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
+  const existingIds = msg.existingIds || [];
+
+  try {
+    const items = await fetchPage(baseUrl, nextPage);
+    const seenIds = new Set(existingIds);
+    const newItems = items.filter(it => { if (!it || !it.id || seenIds.has(it.id)) return false; seenIds.add(it.id); return true; });
+    sendResponse({ ok: true, items: newItems, lastPage: nextPage, hasMore: newItems.length > 0 });
+  } catch (e) {
+    sendResponse({ ok: false, error: String(e), hasMore: false, lastPage: nextPage - 1 });
+  }
+}
+
+// 🔥 Fetch via Cloudflare Worker (Fallback Scrape)
+async function fetchPage(baseUrl, page) {
+  try {
+    const aliexpressUrl = baseUrl + '&page=' + page;
+    // نرسل الرابط كاملاً لخادم Cloudflare ليتخطى الحظر باستخدام ScrapingAnt
+    const workerEndpoint = `${WORKER_URL}/api/fallback-scrape?url=${encodeURIComponent(aliexpressUrl)}`;
+
+    console.log('[Smart Shopper BG] → Worker (page', page, ')');
+
+    const res = await fetch(workerEndpoint);
+    if (!res.ok) {
+      console.warn('[Smart Shopper BG] Worker HTTP error:', res.status);
+      return [];
+    }
+
+    const data = await res.json();
+    const html = data.html; 
+    console.log(`[Smart Shopper BG] ✅ Provider: ${data.provider} | HTML size: ${html.length}`);
+
+    if (!html || html.length < 5000) {
+      console.warn('[Smart Shopper BG] ⚠️ Small response (likely blocked)');
+      return [];
+    }
+
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    console.warn('[Smart Shopper BG] Fetch error:', e.message);
+    return [];
+  }
+}
 
 /* ============================================
-   Circuit Breaker + Fallback Logic
+   Parse items from HTML
    ============================================ */
-async function fetchWithFallback(targetUrl, env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : '';
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
+      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
+      'price', 'desc', 'label'];
+    for (const k of keys) {
+      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    }
+    for (const k in v) {
+      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    }
+    return '';
+  }
+  return String(v);
+}
 
-  if (!providers.length) return { html: null, provider: null };
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
 
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
 
-    if (status.disabled) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const html = await provider.fn(targetUrl, provider.key);
-        if (html && html.length > 5000) {
-          return { html, provider: provider.name };
-        }
-      } catch (e) {
-        const errType = classifyError(e);
-
-        if (errType === 'QUOTA') {
-          await disableProvider(provider.name, e.message, status, env);
-          break;
-        }
-
-        if (errType === 'CONCURRENCY' || errType === 'RATE') {
-          if (attempt < 3) {
-            await sleep(2000 * attempt);
-            continue;
-          } else {
-            break;
-          }
-        }
-        break;
+      let img = '';
+      if (o.image) {
+        if (typeof o.image === 'string') img = o.image;
+        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
       }
+      if (!img && o.picUrl) {
+        if (typeof o.picUrl === 'string') img = o.picUrl;
+        else img = o.picUrl.imgUrl || o.picUrl.url || '';
+      }
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const orig = p.originalPrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
+                    sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
+      const discount = extractText(o.discount || sale.discount || '');
+
+      const rating = extractText(
+        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
+        o.averageStarRate || o.starRating || ''
+      );
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+      out.push({
+        id: String(id),
+        title: title || 'Produit similaire',
+        img, price, oldPrice, discount, rating, sold,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '',
+      discount: '', rating: '', sold: '',
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
+  }
+  return out;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
     }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
   }
-  return { html: null, provider: null };
+  return null;
 }
 
-function classifyError(error) {
-  const msg = String(error.message || '').toLowerCase();
-  if (msg.includes('concurrency') || msg.includes('too many') || msg.includes('simultaneous') || msg.includes('busy')) return 'CONCURRENCY';
-  if (msg.includes('429') || msg.includes('rate limit')) return 'RATE';
-  if (msg.includes('credits exhausted') || msg.includes('quota exceeded') || msg.includes('out of credits') || msg.includes('no more credits') || msg.includes('insufficient credits') || msg.includes('credit balance') || msg.includes('subscription required') || msg.includes('payment required')) return 'QUOTA';
-  return 'OTHER';
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function fetchFromScrapingAnt(targetUrl, apiKey) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('browser', 'false');
-
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    if (errBody.toLowerCase().includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (errBody.toLowerCase().includes('credits exhausted') || errBody.toLowerCase().includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function fetchFromScraperAPI(targetUrl, apiKey) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('render', 'false');
-
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    if (errBody.toLowerCase().includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (errBody.toLowerCase().includes('credits exhausted') || errBody.toLowerCase().includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function getProviderStatus(providerName, env) {
-  try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
-}
-
-async function getProviderStatuses(env) {
-  return {
-    scrapingant: await getProviderStatus('scrapingant', env),
-    scraperapi: await getProviderStatus('scraperapi', env)
-  };
-}
-
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = {
-    disabled: true,
-    permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES,
-    reason: reason,
-    consecutiveFailures: consecutiveFailures,
-    disabledAt: currentStatus.disabledAt || new Date().toISOString(),
-    lastHealthCheck: new Date().toISOString()
-  };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
-}
-
-async function clearProviderStatus(providerName, env) {
-  await env.COMPETITOR_CACHE.delete(`provider:${providerName}`);
-}
-
-function formatStatus(name, status, configured) {
-  return {
-    configured: configured,
-    disabled: status?.disabled || false,
-    permanent: status?.permanent || false,
-    consecutiveFailures: status?.consecutiveFailures || 0,
-    reason: status?.reason || null
-  };
-}
-
-async function healthCheckAllProviders(env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY }
-  ].filter(p => p.key);
-
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (!status.disabled || status.permanent) continue;
-
-    const recovered = await testProvider(provider.name, provider.key);
-    if (recovered) {
-      await clearProviderStatus(provider.name, env);
-    }
-  }
-}
-
-async function testProvider(providerName, apiKey) {
-  try {
-    const testUrl = 'https://httpbin.org/ip';
-    const html = providerName === 'scrapingant' 
-      ? await fetchFromScrapingAnt(testUrl, apiKey) 
-      : await fetchFromScraperAPI(testUrl, apiKey);
-    return html && html.length > 20;
-  } catch (e) { return false; }
-}
-
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
