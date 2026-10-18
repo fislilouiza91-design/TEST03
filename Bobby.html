@@ -1,8 +1,1 @@
--- 1. فهرس البحث النصي الشامل (FTS) على العنوان (للبحث عن الكلمات)
-CREATE INDEX IF NOT EXISTS idx_products_fts ON products USING fts (title);
-
--- 2. فهرس السعر (لتسريع الفرز حسب الأرخص)
-CREATE INDEX IF NOT EXISTS idx_products_price ON products(current_price_usd);
-
--- 3. فهرس تاريخ التحديث (لتسريع ترتيب المنتجات الأحدث)
-CREATE INDEX IF NOT EXISTS idx_products_updated ON products(last_updated_at DESC);
+PRAGMA index_list('products');
