@@ -70,15 +70,11 @@ async function getDbTitle(pid, env) {
   return rows.length > 0 ? rows[0][0].value : null;
 }
 
-// دالة الترجمة الذكية التي تحمي الكلمات التقنية
 async function smartTranslateToEnglish(text) {
   if (!text) return text;
-  
-  // قائمة بالكلمات التقنية التي لا يجب ترجمتها
-  const technicalTerms = ['ssd', 'nvme', 'hdd', 'ram', 'usb', 'type-c', 'type c', 'tb', 'gb', 'mb', 'mah', '4k', '8k', 'hdmi', 'wifi', 'bt', 'led', 'rgb'];
+  const technicalTerms = ['ssd', 'nvme', 'hdd', 'ram', 'usb', 'type-c', 'type c', 'tb', 'gb', 'mb', 'mah', '4k', '8k', 'hdmi', 'wifi', 'bt', 'led', 'rgb', 'nyxi'];
   
   let safeText = text;
-  // استبدال الكلمات التقنية برموز مؤقتة
   technicalTerms.forEach((term, index) => {
     const regex = new RegExp(`\\b${term}\\b`, 'gi');
     safeText = safeText.replace(regex, `__TERM${index}__`);
@@ -91,8 +87,6 @@ async function smartTranslateToEnglish(text) {
       const data = await res.json();
       if (data && data[0] && data[0][0]) {
         let translated = data[0].map(item => item[0]).join('');
-        
-        // إعادة الكلمات التقنية كما كانت
         technicalTerms.forEach((term, index) => {
           translated = translated.replace(new RegExp(`__TERM${index}__`, 'gi'), term);
         });
@@ -129,9 +123,15 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
 
-  // بحث بسيط ومباشر (OR)
-  const conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
-  const queryArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
+  // 🔥 السر هنا: استخدام AND لضمان تطابق الكلمات معاً (يمنع النتائج العشوائية)
+  let conditions = keywords.map(() => `title LIKE ?`).join(' AND ');
+  
+  // نظام النقاط: إذا تطابقت كلمة "NYXI" مثلاً، يأخذ نقاطاً أعلى
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+
+  const queryArgs = [];
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
   if (existingIds && existingIds.trim() !== '') {
@@ -142,17 +142,21 @@ async function searchTursoDB(title, page, existingIds, env) {
 
   const LIMIT = 60;
   const OFFSET = (page - 1) * LIMIT;
+  
+  queryArgs.push({ type: 'integer', value: LIMIT });
+  queryArgs.push({ type: 'integer', value: OFFSET });
 
   const sql = `
     SELECT product_id as id, title, 
            image_url as img,
            current_price_usd as price, original_price_usd as oldPrice, 
-           rating, orders_count as sold
+           rating, orders_count as sold,
+           (${scoreSql}) AS score
     FROM products
     WHERE (${conditions})
       ${excludeCondition}
-    ORDER BY rowid DESC
-    LIMIT ${LIMIT} OFFSET ${OFFSET}
+    ORDER BY score DESC, rowid DESC
+    LIMIT ? OFFSET ?
   `;
 
   const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
@@ -173,6 +177,38 @@ async function searchTursoDB(title, page, existingIds, env) {
   const cols = result.response.result.cols.map(c => c.name);
   const rows = result.response.result.rows;
   
+  // إذا لم يجد المنتجات بـ AND، نستخدم OR كخطة بديلة ولكن نأخذ الكلمات الأطول فقط
+  if (rows.length === 0 && keywords.length > 1) {
+    const fallbackKw = keywords[0]; // نأخذ أطول كلمة فقط
+    const fallbackSql = `
+      SELECT product_id as id, title, image_url as img, current_price_usd as price, original_price_usd as oldPrice, rating, orders_count as sold
+      FROM products WHERE title LIKE ? ${excludeCondition.replace('AND product_id', 'AND product_id')} 
+      ORDER BY rowid DESC LIMIT ${LIMIT} OFFSET ${OFFSET}
+    `;
+    const fallbackArgs = [{ type: 'text', value: `%${fallbackKw}%` }];
+    if (existingIds && existingIds.trim() !== '') {
+       existingIds.split(',').forEach(id => fallbackArgs.push({ type: 'text', value: id }));
+    }
+
+    const fbRes = await fetch(`${httpUrl}/v2/pipeline`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: fallbackSql, args: fallbackArgs } }, { type: 'close' }] })
+    });
+    const fbData = await fbRes.json();
+    if (fbData.results[0].type !== 'error') {
+       const fbRows = fbData.results[0].response.result.rows;
+       if (fbRows.length > 0) {
+         // تحديث المتغيرات للاستخدام في الأسفل
+         return formatItems(fbRows, fbData.results[0].response.result.cols.map(c => c.name), LIMIT);
+       }
+    }
+  }
+
+  return formatItems(rows, cols, LIMIT);
+}
+
+function formatItems(rows, cols, LIMIT) {
   const items = rows.map(row => {
     const obj = {};
     cols.forEach((col, i) => { obj[col] = row[i].value; });
@@ -188,6 +224,5 @@ async function searchTursoDB(title, page, existingIds, env) {
       link: `https://www.aliexpress.com/item/${obj.id}.html`
     };
   });
-
   return { ok: true, items: items, hasMore: items.length === LIMIT };
 }
