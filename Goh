@@ -1,17 +1,18 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   Filter Base Product + True Smart Grid
+   Strict Filtering (No Helmets! Only Audio)
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
-const MAX_PAGES_TO_FETCH = 3; // زيادة العدد قليلاً لضمان وجود منتجات كافية
+const MAX_PAGES_TO_FETCH = 3; 
 
 const STOP_WORDS = new Set([
   'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
   'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
   'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
   'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
-  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack'
+  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
 ]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -27,13 +28,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'SMART_SEARCH') {
     const searchQuery = buildSearchQuery(msg.title);
+    console.log('🔍 Strict Search Query:', searchQuery);
     const q = encodeURIComponent(searchQuery);
     
     fetch(`${WORKER_URL}/api/fetch-page?q=${q}&page=1&country=${msg.country}`)
       .then(res => res.json())
       .then(data => {
          if (data.ok) {
-            // 🔥 تمرير productId لاستبعاد المنتج الأساسي
             let processedItems = processSmartGrid(msg.title, msg.productId, data.items);
             sendResponse({ ok: true, items: processedItems, hasMore: data.items.length > 0 });
             
@@ -80,34 +81,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ============================================
-   دوال الشبكة الذكية
+   Smart Grid Core Logic
    ============================================ */
 
+// 1. بناء استعلام بحث دقيق جداً
 function buildSearchQuery(title) {
   if (!title) return '';
   const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
 
-  const models = words.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
-  const brand = words.length > 0 ? words[0] : '';
+  // استخراج الموديل الحقيقي (يحتوي على حروف وأرقام، وليس مجرد إصدار مثل 5.4)
+  const models = words.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w) && !w.includes('.') && w.length > 2);
   
-  // البحث بالماركة والموديل فقط (أو أول كلمتين)
-  if (models.length > 0 && brand) return `${brand} ${models[0]}`;
-  return words.slice(0, 2).join(' '); // بحث أوسع قليلاً
+  // الماركة عادة تكون أول كلمة (مثل hoco)
+  const brand = words.length > 0 ? words[0] : '';
+
+  if (models.length > 0 && brand) {
+      // إذا وجدنا موديلاً حقيقياً (مثل w68)
+      return `${brand} ${models[0]}`;
+  } else {
+      // إذا لم نجد موديلاً، نبحث بالماركة + أول كلمتين وصفيتين (لتجنب كلمة casque وحدها)
+      return words.slice(0, 3).join(' ');
+  }
 }
 
-// 🔥 الشبكة الذكية المحدثة (مع استبعاد المنتج الأساسي)
+// 2. فلترة صارمة جداً (لا خوذات، لا منتجات عشوائية)
 function processSmartGrid(originalTitle, currentProductId, items) {
   if (!originalTitle || !items.length) return [];
   
-  // 1. استبعاد المنتج الأساسي الذي نتصفحه حالياً
+  // استبعاد المنتج الأساسي
   const filteredBase = items.filter(it => String(it.id) !== String(currentProductId));
 
   const cleanOriginal = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   const baseWords = [...new Set(cleanOriginal.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w)))];
   if (baseWords.length === 0) return filteredBase; 
 
-  const modelTokens = baseWords.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
+  const modelTokens = baseWords.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w) && !w.includes('.'));
   const brandToken = baseWords[0];
 
   const scoredItems = filteredBase.map(it => {
@@ -124,21 +133,22 @@ function processSmartGrid(originalTitle, currentProductId, items) {
     if (hasModel) score += 50;
     if (hasBrand) score += 30;
 
-    // المنتج الدقيق هو الذي يحتوي على الموديل (إن وجد) أو تطابق عالي جداً
+    // المنتج الدقيق
     const isExactMatch = (modelTokens.length > 0) ? hasModel : (ratio >= 0.6);
     
-    return { ...it, matchScore: score, isExactMatch };
+    return { ...it, matchScore: score, isExactMatch, ratio };
   });
 
   const exactMatches = scoredItems.filter(i => i.isExactMatch);
-  // 🔥 المنتجات المشابهة: نأخذ أي منتج لم يتم استبعاده (حتى لو كان مشابهاً بنسبة قليلة)
-  const similarMatches = scoredItems.filter(i => !i.isExactMatch); 
+  
+  // 🔥 الفلتر الصارم للمنتجات المشابهة: يجب أن يشارك 25% من الكلمات أو يحمل نفس الماركة
+  const similarMatches = scoredItems.filter(i => 
+      !i.isExactMatch && (i.ratio >= 0.25 || i.title.toLowerCase().includes(brandToken))
+  );
 
   exactMatches.sort((a, b) => b.matchScore - a.matchScore);
   similarMatches.sort((a, b) => b.matchScore - a.matchScore);
 
-  // إذا كان لدينا 10 منتجات دقيقة أو أكثر، نعرضها فقط
-  // وإلا، نعرض المنتجات الدقيقة أولاً، ثم نملأ الباقي بأي منتجات أخرى
   if (exactMatches.length >= 10) {
       return exactMatches;
   } else {
