@@ -1,1 +1,2 @@
-CREATE INDEX IF NOT EXISTS idx_products_fts ON products USING fts (title);
+EXPLAIN QUERY PLAN 
+SELECT * FROM products WHERE title LIKE 'Samsung%';
