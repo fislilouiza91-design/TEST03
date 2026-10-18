@@ -1,10 +1,13 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Geo-Targeted)
-   D1 + KV Cache + ScrapingAnt & ScraperAPI (Country Tracking)
+   Smart Shopper - Cloudflare Worker (Fast Geo-Routing)
+   D1 + KV Cache + ScrapingAnt/ScraperAPI (Speed Optimized)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
 const CACHE_TTL = 432000; // 5 أيام
+
+// قائمة الدول المدعومة في الخطط المجانية (للسرعة)
+const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
 
 export default {
   async fetch(request, env, ctx) {
@@ -62,25 +65,22 @@ export default {
         return json({ success: true, count: body.competitors.length }, 201, corsHeaders);
       }
 
-      // 3. Fallback Scrape (تتبع البلد)
+      // 3. Fallback Scrape (توجيه ذكي للبلد)
       if (request.method === 'GET' && url.pathname === '/api/fallback-scrape') {
         const requestUrl = url.searchParams.get('url');
-        const country = url.searchParams.get('country') || 'US';
+        const userCountry = (url.searchParams.get('country') || 'US').toLowerCase();
         const targetUrl = requestUrl ? requestUrl : `https://www.aliexpress.com/item/${productId}.html`;
         
-        // المحاولة بالبلد الأصلي أولاً
-        let { html, provider } = await fetchWithFallback(targetUrl, country, env);
+        // تحديد البروكسي: إذا كانت الدولة مدعومة نستخدمها، وإلا نستخدم أمريكا فوراً لتجنب البطء
+        const proxyCountry = SUPPORTED_COUNTRIES.includes(userCountry) ? userCountry : 'us';
         
-        // إذا فشل بسبب عدم دعم البلد، نعيد المحاولة بأمريكا
-        if (!html && country !== 'US') {
-          console.log(`[Fallback] Failed with ${country}, retrying with US...`);
-          const fallbackResult = await fetchWithFallback(targetUrl, 'US', env);
-          html = fallbackResult.html;
-          provider = fallbackResult.provider + ' (US Fallback)';
-        }
+        // ترويسة اللغة: نخبر AliExpress ببلد المستخدم الحقيقي حتى لو استخدمنا بروكسي أمريكي
+        const acceptLanguage = `${userCountry}-${userCountry.toUpperCase()},${userCountry};q=0.9,en;q=0.8`;
+
+        const { html, provider } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
 
         if (!html) return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
-        return json({ provider, html }, 200, corsHeaders);
+        return json({ provider: `${provider} (${proxyCountry.toUpperCase()})`, html }, 200, corsHeaders);
       }
 
       return json({ error: 'Not found' }, 404, corsHeaders);
@@ -109,7 +109,7 @@ export default {
 /* ============================================
    Circuit Breaker + Smart Retry
    ============================================ */
-async function fetchWithFallback(targetUrl, country, env) {
+async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
     { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
@@ -121,16 +121,16 @@ async function fetchWithFallback(targetUrl, country, env) {
     const status = await getProviderStatus(provider.name, env);
     if (status.disabled) continue;
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) { // تقليل المحاولات للسرعة
       try {
-        const html = await provider.fn(targetUrl, provider.key, country);
+        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
         
         if (html && (html.includes('punish') || html.includes('captcha'))) {
           throw new Error('CAPTCHA_DETECTED');
         }
         
         if (html && html.length > 5000) {
-          return { html, provider: `${provider.name} (${country})` };
+          return { html, provider: provider.name };
         }
       } catch (e) {
         const errType = classifyError(e);
@@ -138,13 +138,8 @@ async function fetchWithFallback(targetUrl, country, env) {
           await disableProvider(provider.name, e.message, status, env);
           break;
         }
-        // إذا رفضت الخدمة البلد، نخرج ونترك دالة الـ fallback تجرب أمريكا
-        if (errType === 'UNSUPPORTED_COUNTRY') {
-          console.warn(`[Geo-Routing] ${provider.name} does not support ${country}`);
-          break; 
-        }
         if (errType === 'CONCURRENCY' || errType === 'RATE' || e.message === 'CAPTCHA_DETECTED') {
-          if (attempt < 3) { await sleep(2000 * attempt); continue; } else { break; }
+          if (attempt < 2) { await sleep(1500); continue; } else { break; }
         }
         break;
       }
@@ -156,7 +151,6 @@ async function fetchWithFallback(targetUrl, country, env) {
 function classifyError(error) {
   const msg = String(error.message || '').toLowerCase();
   if (msg.includes('captcha') || msg.includes('punish')) return 'CAPTCHA';
-  if (msg.includes('country') || msg.includes('proxy') || msg.includes('geo')) return 'UNSUPPORTED_COUNTRY';
   if (msg.includes('concurrency') || msg.includes('too many') || msg.includes('simultaneous') || msg.includes('busy')) return 'CONCURRENCY';
   if (msg.includes('429') || msg.includes('rate limit')) return 'RATE';
   if (msg.includes('credits exhausted') || msg.includes('quota exceeded')) return 'QUOTA';
@@ -166,21 +160,20 @@ function classifyError(error) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /* ============================================
-   Fetch Functions (Explicit Country Targeting)
+   Fetch Functions (Fast, No Browser, Language Headers)
    ============================================ */
-async function fetchFromScrapingAnt(targetUrl, apiKey, country) {
+async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
   const url = new URL('https://api.scrapingant.com/v2/general');
   url.searchParams.set('x-api-key', apiKey);
   url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country.toLowerCase()); // تتبع البلد
-  url.searchParams.set('browser', 'true'); 
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': `${country.toLowerCase()}-${country.toUpperCase()},${country.toLowerCase()};q=0.9` }));
+  url.searchParams.set('proxy_country', country);
+  url.searchParams.set('browser', 'false'); // ⚡ إيقاف المتصفح للسرعة القصوى
+  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
 
   const res = await fetch(url.toString());
   if (!res.ok) {
     const errBody = await res.text();
     const lowerBody = errBody.toLowerCase();
-    if (lowerBody.includes('proxy') || lowerBody.includes('country')) throw new Error(`UNSUPPORTED_COUNTRY`);
     if (lowerBody.includes('captcha') || lowerBody.includes('punish')) throw new Error(`CAPTCHA_DETECTED`);
     if (lowerBody.includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
     if (res.status === 429) throw new Error(`429 rate limit`);
@@ -190,23 +183,19 @@ async function fetchFromScrapingAnt(targetUrl, apiKey, country) {
   return await res.text();
 }
 
-async function fetchFromScraperAPI(targetUrl, apiKey, country) {
+async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
   const url = new URL('https://api.scraperapi.com/');
   url.searchParams.set('api_key', apiKey);
   url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country.toLowerCase()); // تتبع البلد
-  url.searchParams.set('render', 'true'); 
+  url.searchParams.set('country_code', country);
+  url.searchParams.set('render', 'false'); // ⚡ إيقاف التصيير للسرعة القصوى
   url.searchParams.set('keep_headers', 'true'); 
-  
-  // إضافة ترويسات اللغة لضمان عرض المنتجات المناسبة للبلد
-  const langHeader = { 'Accept-Language': `${country.toLowerCase()}-${country.toUpperCase()},${country.toLowerCase()};q=0.9` };
-  url.searchParams.set('custom_headers', JSON.stringify(langHeader));
+  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
 
   const res = await fetch(url.toString());
   if (!res.ok) {
     const errBody = await res.text();
     const lowerBody = errBody.toLowerCase();
-    if (lowerBody.includes('proxy') || lowerBody.includes('country')) throw new Error(`UNSUPPORTED_COUNTRY`);
     if (lowerBody.includes('captcha') || lowerBody.includes('punish')) throw new Error(`CAPTCHA_DETECTED`);
     if (lowerBody.includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
     if (res.status === 429) throw new Error(`429 rate limit`);
@@ -224,13 +213,6 @@ async function getProviderStatus(providerName, env) {
     const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
     return raw ? JSON.parse(raw) : { disabled: false };
   } catch (e) { return { disabled: false }; }
-}
-
-async function getProviderStatuses(env) {
-  return {
-    scrapingant: await getProviderStatus('scrapingant', env),
-    scraperapi: await getProviderStatus('scraperapi', env)
-  };
 }
 
 async function disableProvider(providerName, reason, currentStatus, env) {
@@ -264,7 +246,7 @@ async function healthCheckAllProviders(env) {
 async function testProvider(providerName, apiKey) {
   try {
     const testUrl = 'https://httpbin.org/ip';
-    const html = providerName === 'scrapingant' ? await fetchFromScrapingAnt(testUrl, apiKey, 'US') : await fetchFromScraperAPI(testUrl, apiKey, 'US');
+    const html = providerName === 'scrapingant' ? await fetchFromScrapingAnt(testUrl, apiKey, 'us', 'en-US,en;q=0.9') : await fetchFromScraperAPI(testUrl, apiKey, 'us', 'en-US,en;q=0.9');
     return html && html.length > 20;
   } catch (e) { return false; }
 }
