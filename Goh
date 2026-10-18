@@ -1,10 +1,10 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   Smart Grid Logic (Exact Matches first -> Fill with Similar)
+   Filter Base Product + True Smart Grid
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
-const MAX_PAGES_TO_FETCH = 2; 
+const MAX_PAGES_TO_FETCH = 3; // زيادة العدد قليلاً لضمان وجود منتجات كافية
 
 const STOP_WORDS = new Set([
   'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
@@ -33,11 +33,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(res => res.json())
       .then(data => {
          if (data.ok) {
-            // 🔥 تطبيق منطق الشبكة الذكية
-            let processedItems = processSmartGrid(msg.title, data.items);
+            // 🔥 تمرير productId لاستبعاد المنتج الأساسي
+            let processedItems = processSmartGrid(msg.title, msg.productId, data.items);
             sendResponse({ ok: true, items: processedItems, hasMore: data.items.length > 0 });
             
-            // حفظ المنتجات الدقيقة فقط في قاعدة البيانات لتوفير المساحة
             let exactMatches = processedItems.filter(i => i.isExactMatch);
             if (msg.productId && exactMatches.length > 0) {
                 saveToCloudflare(msg.productId, exactMatches, exactMatches);
@@ -63,7 +62,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             let existingIds = new Set(msg.existingIds);
             let unique = data.items.filter(i => !existingIds.has(i.id));
             
-            let processedItems = processSmartGrid(msg.title, unique);
+            let processedItems = processSmartGrid(msg.title, msg.productId, unique);
             const hasMore = processedItems.length > 0 && nextPage < MAX_PAGES_TO_FETCH;
             
             sendResponse({ ok: true, items: processedItems, hasMore: hasMore });
@@ -81,10 +80,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ============================================
-   دوال الشبكة الذكية (Smart Grid)
+   دوال الشبكة الذكية
    ============================================ */
 
-// 1. بناء استعلام بحث يعتمد على الماركة والموديل
 function buildSearchQuery(title) {
   if (!title) return '';
   const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
@@ -93,54 +91,54 @@ function buildSearchQuery(title) {
   const models = words.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
   const brand = words.length > 0 ? words[0] : '';
   
+  // البحث بالماركة والموديل فقط (أو أول كلمتين)
   if (models.length > 0 && brand) return `${brand} ${models[0]}`;
-  return words.slice(0, 3).join(' ');
+  return words.slice(0, 2).join(' '); // بحث أوسع قليلاً
 }
 
-// 2. معالجة المنتجات وترتيبها (دقيق أولاً، ثم مشابه)
-function processSmartGrid(originalTitle, items) {
+// 🔥 الشبكة الذكية المحدثة (مع استبعاد المنتج الأساسي)
+function processSmartGrid(originalTitle, currentProductId, items) {
   if (!originalTitle || !items.length) return [];
   
+  // 1. استبعاد المنتج الأساسي الذي نتصفحه حالياً
+  const filteredBase = items.filter(it => String(it.id) !== String(currentProductId));
+
   const cleanOriginal = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   const baseWords = [...new Set(cleanOriginal.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w)))];
-  if (baseWords.length === 0) return items; 
+  if (baseWords.length === 0) return filteredBase; 
 
   const modelTokens = baseWords.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
   const brandToken = baseWords[0];
 
-  const scoredItems = items.map(it => {
+  const scoredItems = filteredBase.map(it => {
     const itemTitle = (it.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
     
-    // حساب عدد الكلمات المتطابقة
     let matchCount = 0;
     for (const word of baseWords) { if (itemTitle.includes(word)) matchCount++; }
     const ratio = matchCount / baseWords.length;
 
-    // هل يحتوي على الموديل والماركة؟
     const hasModel = modelTokens.length > 0 ? modelTokens.some(m => itemTitle.includes(m)) : true;
     const hasBrand = itemTitle.includes(brandToken);
 
-    // تقييم المنتج
     let score = ratio * 100;
     if (hasModel) score += 50;
     if (hasBrand) score += 30;
 
-    // تحديد ما إذا كان المنتج "دقيقاً" أم "مشابهاً"
-    const isExactMatch = hasModel && ratio >= 0.4; 
+    // المنتج الدقيق هو الذي يحتوي على الموديل (إن وجد) أو تطابق عالي جداً
+    const isExactMatch = (modelTokens.length > 0) ? hasModel : (ratio >= 0.6);
     
     return { ...it, matchScore: score, isExactMatch };
   });
 
-  // فصل المنتجات الدقيقة عن المشابهة
   const exactMatches = scoredItems.filter(i => i.isExactMatch);
-  const similarMatches = scoredItems.filter(i => !i.isExactMatch && i.matchScore > 10); // مشابه بدرجة معقولة
+  // 🔥 المنتجات المشابهة: نأخذ أي منتج لم يتم استبعاده (حتى لو كان مشابهاً بنسبة قليلة)
+  const similarMatches = scoredItems.filter(i => !i.isExactMatch); 
 
-  // ترتيب كل مجموعة حسب التقييم
   exactMatches.sort((a, b) => b.matchScore - a.matchScore);
   similarMatches.sort((a, b) => b.matchScore - a.matchScore);
 
-  // إذا كان لدينا ما يكفي من المنتجات الدقيقة (10 أو أكثر)، نعرضها فقط
-  // وإلا، نعرض الدقيقة أولاً ثم نكمل بالمنتجات المشابهة
+  // إذا كان لدينا 10 منتجات دقيقة أو أكثر، نعرضها فقط
+  // وإلا، نعرض المنتجات الدقيقة أولاً، ثم نملأ الباقي بأي منتجات أخرى
   if (exactMatches.length >= 10) {
       return exactMatches;
   } else {
