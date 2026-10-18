@@ -1,6 +1,6 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   Smart Search Query Builder + Exact Model Matcher
+   Smart Grid Logic (Exact Matches first -> Fill with Similar)
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
@@ -27,20 +27,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'SMART_SEARCH') {
     const searchQuery = buildSearchQuery(msg.title);
-    console.log('🔍 Search Query:', searchQuery); // لمراقبة الكلمات التي سيتم البحث بها
-    
     const q = encodeURIComponent(searchQuery);
     
     fetch(`${WORKER_URL}/api/fetch-page?q=${q}&page=1&country=${msg.country}`)
       .then(res => res.json())
       .then(data => {
          if (data.ok) {
-            console.log(`📦 Found ${data.items.length} raw items from AliExpress.`);
-            let relevant = filterByExactRelevance(msg.title, data.items);
-            console.log(`✅ Kept ${relevant.length} exact matches after filtering.`);
+            // 🔥 تطبيق منطق الشبكة الذكية
+            let processedItems = processSmartGrid(msg.title, data.items);
+            sendResponse({ ok: true, items: processedItems, hasMore: data.items.length > 0 });
             
-            sendResponse({ ok: true, items: relevant, hasMore: data.items.length > 0 });
-            if (msg.productId && relevant.length > 0) saveToCloudflare(msg.productId, data.items, relevant);
+            // حفظ المنتجات الدقيقة فقط في قاعدة البيانات لتوفير المساحة
+            let exactMatches = processedItems.filter(i => i.isExactMatch);
+            if (msg.productId && exactMatches.length > 0) {
+                saveToCloudflare(msg.productId, exactMatches, exactMatches);
+            }
          } else {
             sendResponse({ ok: false, error: data.error });
          }
@@ -61,11 +62,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
          if (data.ok) {
             let existingIds = new Set(msg.existingIds);
             let unique = data.items.filter(i => !existingIds.has(i.id));
-            let relevant = filterByExactRelevance(msg.title, unique);
-            const hasMore = relevant.length > 0 && nextPage < MAX_PAGES_TO_FETCH;
             
-            sendResponse({ ok: true, items: relevant, hasMore: hasMore });
-            if (msg.productId && relevant.length > 0) saveToCloudflare(msg.productId, unique, relevant);
+            let processedItems = processSmartGrid(msg.title, unique);
+            const hasMore = processedItems.length > 0 && nextPage < MAX_PAGES_TO_FETCH;
+            
+            sendResponse({ ok: true, items: processedItems, hasMore: hasMore });
+            
+            let exactMatches = processedItems.filter(i => i.isExactMatch);
+            if (msg.productId && exactMatches.length > 0) {
+                saveToCloudflare(msg.productId, exactMatches, exactMatches);
+            }
          } else {
             sendResponse({ ok: false, error: data.error, hasMore: false });
          }
@@ -75,70 +81,71 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ============================================
-   دوال المعالجة الأساسية
+   دوال الشبكة الذكية (Smart Grid)
    ============================================ */
 
-// 1. بناء استعلام بحث ذكي (يعطي الأولوية للموديل)
+// 1. بناء استعلام بحث يعتمد على الماركة والموديل
 function buildSearchQuery(title) {
   if (!title) return '';
   const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const words = cleanTitle.split(/\s+/).filter(w => 
-    w.length > 1 && !STOP_WORDS.has(w) && !/^\d{4}$/.test(w)
-  );
-  
-  // استخراج الكلمات التي تحتوي على أرقام وحروف (مثل w68)
+  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
+
   const models = words.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
+  const brand = words.length > 0 ? words[0] : '';
   
-  // استخراج باقي الكلمات الوصفية (أول 4 كلمات)
-  const descriptors = words.filter(w => !models.includes(w)).slice(0, 4);
-  
-  // دمج الموديل مع الوصف لضمان دقة البحث
-  let finalQuery = [...models, ...descriptors].join(' ');
-  if (!finalQuery) finalQuery = words.slice(0, 5).join(' ');
-  
-  return finalQuery;
+  if (models.length > 0 && brand) return `${brand} ${models[0]}`;
+  return words.slice(0, 3).join(' ');
 }
 
-// 2. فلتر الدقة العالية (صياد الموديلات)
-function filterByExactRelevance(originalTitle, items) {
+// 2. معالجة المنتجات وترتيبها (دقيق أولاً، ثم مشابه)
+function processSmartGrid(originalTitle, items) {
   if (!originalTitle || !items.length) return [];
   
   const cleanOriginal = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const rawWords = cleanOriginal.split(/\s+/).filter(w => 
-    w.length > 1 && !STOP_WORDS.has(w) && !/^\d{4}$/.test(w)
-  );
-  
-  const baseWords = [...new Set(rawWords)];
+  const baseWords = [...new Set(cleanOriginal.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w)))];
   if (baseWords.length === 0) return items; 
 
   const modelTokens = baseWords.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w));
-  const MIN_MATCH_RATIO = modelTokens.length > 0 ? 0.40 : 0.65; 
+  const brandToken = baseWords[0];
 
   const scoredItems = items.map(it => {
     const itemTitle = (it.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
     
+    // حساب عدد الكلمات المتطابقة
     let matchCount = 0;
-    for (const word of baseWords) { 
-      if (itemTitle.includes(word)) matchCount++; 
-    }
+    for (const word of baseWords) { if (itemTitle.includes(word)) matchCount++; }
     const ratio = matchCount / baseWords.length;
 
-    let hasModelMatch = true;
-    if (modelTokens.length > 0) {
-       hasModelMatch = modelTokens.some(mt => itemTitle.includes(mt));
-    }
+    // هل يحتوي على الموديل والماركة؟
+    const hasModel = modelTokens.length > 0 ? modelTokens.some(m => itemTitle.includes(m)) : true;
+    const hasBrand = itemTitle.includes(brandToken);
 
-    return { ...it, matchScore: ratio, matchCount: matchCount, hasModelMatch: hasModelMatch };
+    // تقييم المنتج
+    let score = ratio * 100;
+    if (hasModel) score += 50;
+    if (hasBrand) score += 30;
+
+    // تحديد ما إذا كان المنتج "دقيقاً" أم "مشابهاً"
+    const isExactMatch = hasModel && ratio >= 0.4; 
+    
+    return { ...it, matchScore: score, isExactMatch };
   });
 
-  const filtered = scoredItems.filter(it => {
-     if (!it.hasModelMatch) return false;
-     if (it.matchScore < MIN_MATCH_RATIO) return false;
-     return true;
-  });
+  // فصل المنتجات الدقيقة عن المشابهة
+  const exactMatches = scoredItems.filter(i => i.isExactMatch);
+  const similarMatches = scoredItems.filter(i => !i.isExactMatch && i.matchScore > 10); // مشابه بدرجة معقولة
 
-  filtered.sort((a, b) => b.matchScore - a.matchScore);
-  return filtered;
+  // ترتيب كل مجموعة حسب التقييم
+  exactMatches.sort((a, b) => b.matchScore - a.matchScore);
+  similarMatches.sort((a, b) => b.matchScore - a.matchScore);
+
+  // إذا كان لدينا ما يكفي من المنتجات الدقيقة (10 أو أكثر)، نعرضها فقط
+  // وإلا، نعرض الدقيقة أولاً ثم نكمل بالمنتجات المشابهة
+  if (exactMatches.length >= 10) {
+      return exactMatches;
+  } else {
+      return [...exactMatches, ...similarMatches];
+  }
 }
 
 function saveToCloudflare(productId, allRawItems, relevantNewItems) {
