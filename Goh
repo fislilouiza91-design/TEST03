@@ -22,12 +22,12 @@
 
   let currentProductPrice = 0;
   
-  // 🔥 متغيرات التحكم في الجلب الخفي
-  let prefetchedBatches = [];       // يحفظ الدفعات (كل دفعة = 60 منتج) التي تم جلبها في الخفاء
-  let isBackgroundFetching = false; // هل يقوم الخادم بالجلب الآن؟
-  let nextPageToFetch = 2;          // الصفحة التالية التي سيتم طلبها
-  let waitingForPage = false;       // هل ضغط المستخدم على "مزيد" وينتظر؟
-  let serverHasMore = true;         // هل يوجد المزيد في الخادم؟
+  // 🔥 متغيرات الجلب الخفي
+  let prefetchedBatches = [];       // يحفظ الدفعات التي تم جلبها
+  let isBackgroundFetching = false; // هل يجلب الخادم الآن؟
+  let nextPageToFetch = 2;          // الصفحة التالية المطلوبة
+  let waitingForPage = false;       // هل المستخدم ضغط وينتظر؟
+  let hasMoreResults = true;        // هل يوجد المزيد؟
 
   let searchState = { running: false, complete: false, startTime: 0, totalItems: 0 };
 
@@ -161,7 +161,7 @@
     const panel = document.getElementById(PANEL_ID);
     if (panel) panel.style.display = 'none';
     window.SS_Fullscreen.open({
-      items: cachedItems, activeTab: activeTab, hasMore: serverHasMore || prefetchedBatches.length > 0, fetching: isBackgroundFetching || waitingForPage, currentProductPrice: currentProductPrice,
+      items: cachedItems, activeTab: activeTab, hasMore: hasMoreResults || prefetchedBatches.length > 0, fetching: isBackgroundFetching || waitingForPage, currentProductPrice: currentProductPrice,
       onLoadMore: () => onLoadMoreClick(),
       onTabChange: (newTab) => { activeTab = newTab; cachedSortedItems = []; renderedCount = 0; document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', +x.dataset.i === newTab)); },
       onRefresh: () => { currentKey = ''; if (window.SS_Fullscreen) window.SS_Fullscreen.close(); const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; scan(); },
@@ -257,24 +257,23 @@
     updateFooter();
   }
 
-  // 🔥 تحديث الفوتر لضمان بقاء الزر
+  // 🔥 تحديث الفوتر
   function updateFooter() {
     const f = document.getElementById('ss-footer'); if (!f) return;
     let html = '';
     
     if (!searchState.running) {
-      if (prefetchedBatches.length > 0) {
-          // هناك دفعات جاهزة في الذاكرة
-          html += `<button class="ss-load-more-btn" id="ss-load-more">${SVG_ICONS.plus}<span>${esc(T('loadMore'))}</span></button>`;
-      } else if (isBackgroundFetching || waitingForPage) {
-          // الخادم يجلب، أو المستخدم ضغط وينتظر
-          html += `<button class="ss-load-more-btn ss-load-more-loading" disabled><span class="ss-spinner"></span><span>${esc(T('loading'))}</span></button>`;
-      } else if (!serverHasMore) {
-          // نفدت المنتجات فعلياً
-          if (cachedItems.length > 0) { html += `<div class="ss-no-more">${esc(T('noMoreResults'))}</div>`; }
+      if (hasMoreResults || prefetchedBatches.length > 0) {
+          if (waitingForPage || (isBackgroundFetching && prefetchedBatches.length === 0)) {
+              // في حالة الانتظار
+              html += `<button class="ss-load-more-btn ss-load-more-loading" disabled><span class="ss-spinner"></span><span>${esc(T('loading'))}</span></button>`;
+          } else {
+              // الزر جاهز للضغط
+              html += `<button class="ss-load-more-btn" id="ss-load-more">${SVG_ICONS.plus}<span>${esc(T('loadMore'))}</span></button>`;
+          }
       } else {
-          // حالة احتياطية: الخادم لديه المزيد ولكن لا يوجد جلب ولا ذاكرة (بسبب خطأ سابق)
-          html += `<button class="ss-load-more-btn" id="ss-load-more">${SVG_ICONS.plus}<span>${esc(T('loadMore'))}</span></button>`;
+          // نفدت النتائج
+          if (cachedItems.length > 0) { html += `<div class="ss-no-more">${esc(T('noMoreResults'))}</div>`; }
       }
     }
     
@@ -283,20 +282,15 @@
     if (btn) btn.onclick = onLoadMoreClick;
   }
 
-  // 🔥 1. الجلب التلقائي في الخفاء
+  // 🔥 الجلب في الخفاء
   function startBackgroundFetch() {
-    if (isBackgroundFetching || !serverHasMore || nextPageToFetch > 5) {
-        isBackgroundFetching = false;
-        updateFooter();
-        return;
-    }
+    if (isBackgroundFetching || !hasMoreResults || nextPageToFetch > 5) return;
     
     isBackgroundFetching = true;
-    // لا نغير الزر إلى تحميل إذا كان هناك دفعات جاهزة
-    if (prefetchedBatches.length === 0) updateFooter();
-    
+    if (!waitingForPage) updateFooter();
+
     const existingIds = cachedItems.map(x => x.id);
-    prefetchedBatches.forEach(batch => batch.forEach(x => existingIds.push(x.id)));
+    prefetchedBatches.forEach(b => b.items.forEach(x => existingIds.push(x.id)));
 
     chrome.runtime.sendMessage({ 
         type: 'SMART_LOAD_MORE', 
@@ -309,22 +303,18 @@
         isBackgroundFetching = false;
         
         if (resp && resp.ok && resp.items && resp.items.length > 0) {
-            prefetchedBatches.push(resp.items);
+            prefetchedBatches.push({ page: nextPageToFetch, items: resp.items });
             nextPageToFetch++;
             
             if (resp.hasMore && nextPageToFetch <= 5) {
-                startBackgroundFetch(); // اجلب الصفحة التالية فوراً
+                startBackgroundFetch();
             } else {
-                serverHasMore = false; // انتهت المنتجات
+                hasMoreResults = false;
             }
-        } else if (resp && resp.ok && resp.items && resp.items.length === 0) {
-             serverHasMore = false; // صفحة فارغة
         } else {
-            // خطأ في الشبكة أو الخادم، لا نجعل serverHasMore = false لكي يستطيع المستخدم المحاولة
-            console.error("Background fetch failed, user can retry manually.");
+            hasMoreResults = false;
         }
-        
-        // إذا كان المستخدم يضغط على الزر وينتظر، اعرض له ما تم جلبه الآن
+
         if (waitingForPage) {
             waitingForPage = false;
             if (prefetchedBatches.length > 0) {
@@ -338,12 +328,14 @@
     });
   }
 
-  // 🔥 2. زر المزيد: يعرض فقط ما تم استخراجه في الخلفية
+  // 🔥 زر المزيد (يعرض من الذاكرة)
   function onLoadMoreClick() {
+    if (searchState.running) return;
+    
     if (prefetchedBatches.length > 0) {
-        // عرض الصفحة الجاهزة
+        console.log('⚡ Displaying prefetched batch.');
         const nextBatch = prefetchedBatches.shift();
-        cachedItems = cachedItems.concat(nextBatch);
+        cachedItems = cachedItems.concat(nextBatch.items);
         
         applySort();
         const list = document.getElementById('ss-list'); 
@@ -359,14 +351,8 @@
             window.SS_Fullscreen.updateItems(cachedItems);
         }
         updateFooter();
-        
     } else if (isBackgroundFetching) {
-        // المستخدم ضغط، ولكن الخادم لا يزال يجلب
-        waitingForPage = true;
-        updateFooter(); // سيظهر زر التحميل
-    } else if (serverHasMore) {
-        // إذا فشل الجلب الخفي سابقاً، نتيح للمستخدم إعادة المحاولة
-        startBackgroundFetch();
+        console.log('⏳ Waiting for background fetch...');
         waitingForPage = true;
         updateFooter();
     }
@@ -393,7 +379,7 @@
     isBackgroundFetching = false;
     nextPageToFetch = 2;
     waitingForPage = false;
-    serverHasMore = true;
+    hasMoreResults = true;
     
     cachedItems = [];
     cachedSortedItems = [];
@@ -413,7 +399,7 @@
       if (!resp.ok) { message(T('errorContact')); updateFooter(); return; }
 
       cachedItems = resp.items || [];
-      serverHasMore = resp.hasMore !== false;
+      hasMoreResults = resp.hasMore !== false;
       searchState.totalItems = cachedItems.length;
 
       renderList(true);
@@ -422,10 +408,7 @@
 
       if (cachedItems.length === 0) message(T('noResults'));
       
-      // 🔥 بدء الجلب التلقائي في الخفاء فوراً
-      if (serverHasMore) {
-          startBackgroundFetch();
-      }
+      if (hasMoreResults) startBackgroundFetch();
     });
   }
 
@@ -466,7 +449,7 @@
           }));
           searchState.complete = true;
           searchState.totalItems = cachedItems.length;
-          serverHasMore = false; // الكاش لا يحتوي على المزيد
+          hasMoreResults = false;
           renderList(true);
           updateProgress();
           updateFooter();
