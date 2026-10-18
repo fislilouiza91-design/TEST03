@@ -1,6 +1,6 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   Strict Filtering (No Helmets! Only Audio)
+   Ultra-Strict Filter (NO Helmets, NO Caps!)
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
@@ -12,8 +12,12 @@ const STOP_WORDS = new Set([
   'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
   'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
   '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
+  'casque', 'casquette', 'moto', 'cyclisme', 'baseball', 'plat', 'respirante', 'lumineux'
 ]);
+
+// كلمات مفتاحية تدل على أن المنتج هو سماعة/إلكترونيات وليس خوذة
+const AUDIO_KEYWORDS = ['bluetooth', 'wireless', 'earphone', 'headphone', 'audio', 'ecouteur', 'bass', 'anc', 'microphone'];
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
@@ -84,28 +88,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
    Smart Grid Core Logic
    ============================================ */
 
-// 1. بناء استعلام بحث دقيق جداً
+// 1. بناء استعلام بحث دقيق جداً (يستبدل كلمة casque)
 function buildSearchQuery(title) {
   if (!title) return '';
-  const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
-
-  // استخراج الموديل الحقيقي (يحتوي على حروف وأرقام، وليس مجرد إصدار مثل 5.4)
-  const models = words.filter(w => /[a-z]/.test(w) && /[0-9]/.test(w) && !w.includes('.') && w.length > 2);
+  let cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   
-  // الماركة عادة تكون أول كلمة (مثل hoco)
-  const brand = words.length > 0 ? words[0] : '';
-
+  // استخراج الموديل (مثل w68)
+  const models = cleanTitle.split(/\s+/).filter(w => /[a-z]/.test(w) && /[0-9]/.test(w) && !w.includes('.') && w.length > 2);
+  
+  // استخراج الماركة (hoco)
+  const brand = cleanTitle.split(/\s+/)[0];
+  
+  // البحث عن الماركة والموديل فقط لتجنب كلمة casque
   if (models.length > 0 && brand) {
-      // إذا وجدنا موديلاً حقيقياً (مثل w68)
       return `${brand} ${models[0]}`;
-  } else {
-      // إذا لم نجد موديلاً، نبحث بالماركة + أول كلمتين وصفيتين (لتجنب كلمة casque وحدها)
-      return words.slice(0, 3).join(' ');
   }
+  
+  // إذا لم يوجد موديل، نبحث عن الماركة + كلمة تدل على الإلكترونيات
+  const audioWord = AUDIO_KEYWORDS.find(k => cleanTitle.includes(k)) || 'bluetooth';
+  return `${brand} ${audioWord}`;
 }
 
-// 2. فلترة صارمة جداً (لا خوذات، لا منتجات عشوائية)
+// 2. فلترة صارمة جداً (لا خوذات، لا قبعات)
 function processSmartGrid(originalTitle, currentProductId, items) {
   if (!originalTitle || !items.length) return [];
   
@@ -122,28 +126,33 @@ function processSmartGrid(originalTitle, currentProductId, items) {
   const scoredItems = filteredBase.map(it => {
     const itemTitle = (it.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
     
+    // 🔥 فلتر صارم: المنتج يجب أن يحتوي على كلمة من كلمات الصوت أو الماركة
+    const hasAudioKeyword = AUDIO_KEYWORDS.some(k => itemTitle.includes(k));
+    const hasBrand = itemTitle.includes(brandToken);
+    const hasModel = modelTokens.length > 0 ? modelTokens.some(m => itemTitle.includes(m)) : true;
+
     let matchCount = 0;
     for (const word of baseWords) { if (itemTitle.includes(word)) matchCount++; }
     const ratio = matchCount / baseWords.length;
-
-    const hasModel = modelTokens.length > 0 ? modelTokens.some(m => itemTitle.includes(m)) : true;
-    const hasBrand = itemTitle.includes(brandToken);
 
     let score = ratio * 100;
     if (hasModel) score += 50;
     if (hasBrand) score += 30;
 
-    // المنتج الدقيق
-    const isExactMatch = (modelTokens.length > 0) ? hasModel : (ratio >= 0.6);
+    // المنتج مقبول فقط إذا كان يحمل الماركة أو الموديل أو كلمة صوتية
+    const isValidProduct = (hasBrand || hasModel || hasAudioKeyword);
+
+    // المنتج الدقيق (يحتوي على الموديل أو تطابق عالي جداً)
+    const isExactMatch = hasModel || (hasBrand && hasAudioKeyword && ratio >= 0.4);
     
-    return { ...it, matchScore: score, isExactMatch, ratio };
+    return { ...it, matchScore: score, isExactMatch, isValidProduct, ratio };
   });
 
   const exactMatches = scoredItems.filter(i => i.isExactMatch);
   
-  // 🔥 الفلتر الصارم للمنتجات المشابهة: يجب أن يشارك 25% من الكلمات أو يحمل نفس الماركة
+  // المنتجات المشابهة (يجب أن تكون صالحة ولا تحتوي على كلمات الخوذات)
   const similarMatches = scoredItems.filter(i => 
-      !i.isExactMatch && (i.ratio >= 0.25 || i.title.toLowerCase().includes(brandToken))
+      !i.isExactMatch && i.isValidProduct && i.ratio >= 0.2
   );
 
   exactMatches.sort((a, b) => b.matchScore - a.matchScore);
