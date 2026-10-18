@@ -1,80 +1,199 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   (Universal ID & English Fetch Edition)
-   ============================================ */
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Cache-Control": "no-store"
+    };
 
-const WORKER_URL = 'https://shopper.smailsuit11.workers.dev';
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
+    const url = new URL(request.url);
 
-  // 🔥 استخراج المعرف الحقيقي من أي رابط في العالم (حتى لو كان مخفياً)
-  const extractPid = (url) => {
-    if (!url) return '';
-    
-    // 1. البحث عن المعرف الحقيقي المخفي في الروابط الأمريكية
-    const objectIdMatch = url.match(/x_object_id(?:%3A|:)(\d+)/i);
-    if (objectIdMatch) return objectIdMatch[1];
+    if (url.pathname === '/search-db') {
+      let title = url.searchParams.get('q') || '';
+      const pid = url.searchParams.get('pid') || '';
+      const page = parseInt(url.searchParams.get('page')) || 1;
+      const existingIds = url.searchParams.get('existingIds') || '';
+      
+      try {
+        if (!env.TURSO_URL || !env.TURSO_TOKEN) throw new Error("Missing Turso config");
+        
+        let finalSearchTitle = title;
 
-    // 2. البحث عن المعرف العادي في المسار (الروابط العربية والأوروبية)
-    const match = url.match(/(?:\/item\/|\/i\/|productId=)(\d{8,})/i);
-    return match ? match[1] : '';
-  };
+        // 🔥 جلب العنوان الإنجليزي باستخدام المعرف (PID)
+        if (pid) {
+          try {
+            // 1. محاولة جلب العنوان من الموقع الأمريكي
+            const liveTitle = await fetchLiveTitle(pid);
+            if (liveTitle) {
+              finalSearchTitle = liveTitle;
+              console.log("✅ Fetched English Title:", finalSearchTitle);
+            } else {
+              // 2. إذا فشل السحب، نبحث عنه في القاعدة
+              const dbTitle = await getDbTitle(pid, env);
+              if (dbTitle) {
+                finalSearchTitle = dbTitle;
+                console.log("✅ Found in DB:", finalSearchTitle);
+              }
+            }
+          } catch (e) {
+            console.warn("Failed to fetch English title:", e.message);
+          }
+        }
 
-  if (msg.type === 'SMART_SEARCH') {
-    const pid = extractPid(sender.tab?.url);
-    handleSearch(msg, pid, sendResponse);
-    return true;
-  }
+        // في حال عدم وجود PID أو فشل كل شيء، نستخدم الترجمة كخطة أخيرة
+        if (!finalSearchTitle || finalSearchTitle === title) {
+           finalSearchTitle = await translateToEnglish(title);
+        }
 
-  if (msg.type === 'SMART_LOAD_MORE') {
-    const pid = extractPid(sender.tab?.url);
-    handleLoadMore(msg, pid, sendResponse);
-    return true;
-  }
+        // البحث في القاعدة
+        const dbResult = await searchTursoDB(finalSearchTitle, page, existingIds, env);
+        
+        return new Response(JSON.stringify(dbResult), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
 
-  return true;
-});
-
-async function handleSearch(msg, pid, sendResponse) {
-  // 🔥 لا نرسل العنوان المترجم! نرسل مسافة فارغة لكي يجبر الـ Cloudflare على جلب العنوان الإنجليزي بالـ PID
-  const url = `${WORKER_URL}/search-db?q=&pid=${pid}&page=1`;
-
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-    const data = await res.json();
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: 1,
-      hasMore: data.hasMore || false,
-      totalItems: data.items ? data.items.length : 0
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e) });
+    return new Response('Smart-Turso API is running.', { status: 200, headers: corsHeaders });
   }
 }
 
-async function handleLoadMore(msg, pid, sendResponse) {
-  const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
-  const existingIds = (msg.existingIds || []).join(',');
-  
-  const url = `${WORKER_URL}/search-db?q=&pid=${pid}&page=${nextPage}&existingIds=${existingIds}`;
-
+// دالة جلب العنوان من صفحة المنتج الأمريكية
+async function fetchLiveTitle(pid) {
   try {
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-    const data = await res.json();
-    
-    sendResponse({
-      ok: true,
-      items: data.items || [],
-      lastPage: nextPage,
-      hasMore: data.hasMore || false
-    });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e), hasMore: false });
+    const scraperUrl = `https://smart-shopper.smailsuit11.workers.dev/fetch?url=https://www.aliexpress.us/item/${pid}.html`;
+    const res = await fetch(scraperUrl);
+    if (res.ok) {
+      const html = await res.text();
+      const match = html.match(/<meta property="og:title" content="([^"]+)"/i);
+      if (match && match[1]) return match[1];
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function getDbTitle(pid, env) {
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const res = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: 'SELECT title FROM products WHERE product_id = ? LIMIT 1', args: [{ type: 'text', value: pid }] } }, { type: 'close' }]
+    })
+  });
+  const data = await res.json();
+  if (data.results[0].type === 'error') return null;
+  const rows = data.results[0].response.result.rows;
+  return rows.length > 0 ? rows[0][0].value : null;
+}
+
+async function translateToEnglish(text) {
+  if (!text) return text;
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data[0] && data[0][0]) return data[0].map(item => item[0]).join('');
+    }
+  } catch (e) {}
+  return text;
+}
+
+async function searchTursoDB(title, page, existingIds, env) {
+  const stopWords = new Set([
+    'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
+    'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
+    'good', 'quality', 'smart', 'portable', 'wireless', 'digital', 'type', 'model', 
+    'color', 'size', 'men', 'women', 'kids', 'baby', 'home', 'car', 'phone', 'case', 
+    'made', 'material', 'style', 'fashion', 'design', 'item', 'top', 'super', 'ultra', 
+    'mini', 'max', 'premium', 'fast', 'pack', 'box', 'quick', 'release', 'replacement', 
+    'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
+    'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mah',
+    'large', 'capacity', 'charging', 'charger', 'external', 'device', 'storage', 'capsule',
+    'cable', 'adapter', 'cover', 'protector', 'glass', 'iphone', 
+    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
+  ]);
+  
+  const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
+  let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
+  
+  let keywords = meaningfulWords.slice(0, 4);
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
+  keywords = [...new Set(keywords)];
+
+  if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
+
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+  let conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+
+  const queryArgs = [];
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+
+  let excludeCondition = '';
+  if (existingIds && existingIds.trim() !== '') {
+    const ids = existingIds.split(',');
+    excludeCondition = `AND product_id NOT IN (${ids.map(() => '?').join(',')})`;
+    ids.forEach(id => queryArgs.push({ type: 'text', value: id }));
   }
+
+  const LIMIT = 60;
+  const OFFSET = (page - 1) * LIMIT;
+
+  const sql = `
+    SELECT product_id as id, title, 
+           image_url as img,
+           current_price_usd as price, original_price_usd as oldPrice, 
+           rating, orders_count as sold,
+           (${scoreSql}) AS score
+    FROM products
+    WHERE (${conditions})
+      ${excludeCondition}
+    ORDER BY score DESC, rowid DESC
+    LIMIT ${LIMIT} OFFSET ${OFFSET}
+  `;
+
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }]
+    })
+  });
+
+  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
+  
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  if (result.type === 'error') throw new Error(result.error.message);
+  
+  const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows;
+  
+  const items = rows.map(row => {
+    const obj = {};
+    cols.forEach((col, i) => { obj[col] = row[i].value; });
+    const discount = obj.oldPrice && obj.price ? Math.round(((obj.oldPrice - obj.price) / obj.oldPrice) * 100) : 0;
+    
+    return {
+      id: obj.id, title: obj.title, img: obj.img || '',
+      price: obj.price ? String(obj.price) : '',
+      oldPrice: obj.oldPrice ? String(obj.oldPrice) : '',
+      discount: discount > 0 ? String(discount) : '',
+      rating: obj.rating ? String(obj.rating) : '',
+      sold: obj.sold ? String(obj.sold) : '',
+      link: `https://www.aliexpress.com/item/${obj.id}.html`
+    };
+  });
+
+  return { ok: true, items: items, hasMore: items.length === LIMIT };
 }
