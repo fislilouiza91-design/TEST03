@@ -1,192 +1,251 @@
 /* ============================================
-   Smart Shopper - Fullscreen Page Module (Auto Append)
+   Smart Shopper - Cloudflare Worker (Page by Page API)
    ============================================ */
-(function () {
-  'use strict';
 
-  const FS_ID = 'ss-fullscreen';
-  let isOpen = false;
-  let items = [];
-  let activeTab = 0;
-  let fetching = false;
-  let currentProductPrice = 0;
-  let callbacks = {};
+const MAX_CONSECUTIVE_FAILURES = 10;
+const CACHE_TTL = 432000; // 5 أيام
+const MAX_PAGES_TO_FETCH = 2; // 🔥 للتجربة: صفحتين فقط
+const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
 
-  const SVG = {
-    back: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
-    close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
-    all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
-    cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
-    rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
-    discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
-    selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>'
-  };
-
-  const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
-  const U = () => window.SS_Utils || {};
-
-  const esc = (s) => U().esc ? U().esc(s) : String(s || '');
-  const num = (s) => U().num ? U().num(s) : 0;
-  const stars = (r) => U().stars ? U().stars(r) : '';
-
-  function buildDOM() {
-    let el = document.getElementById(FS_ID);
-    if (el) el.remove();
-
-    el = document.createElement('div');
-    el.id = FS_ID;
-    el.innerHTML = `
-      <div class="ss-fs-header">
-        <div class="ss-fs-header-left">
-          <div class="ss-fs-logo">S</div>
-          <div class="ss-fs-titles">
-            <div class="ss-fs-title">${esc(T('panelTitle'))}</div>
-            <div class="ss-fs-sub">${esc(T('panelSubtitle'))}</div>
-          </div>
-        </div>
-        <div class="ss-fs-header-btns">
-          <button class="ss-fs-btn ss-fs-back" id="ss-fs-back" title="${esc(T('back') || 'Back')}">
-            ${SVG.back} <span>${esc(T('back') || 'Retour')}</span>
-          </button>
-          <button class="ss-fs-btn ss-fs-close" id="ss-fs-close" title="${esc(T('close'))}">${SVG.close}</button>
-        </div>
-      </div>
-      <div class="ss-fs-tabs" id="ss-fs-tabs">
-        <span class="ss-fs-tab" data-i="0">${SVG.all}<span>${esc(T('tabAll'))}</span></span>
-        <span class="ss-fs-tab" data-i="1">${SVG.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
-        <span class="ss-fs-tab" data-i="2">${SVG.rated}<span>${esc(T('tabBestRated'))}</span></span>
-        <span class="ss-fs-tab" data-i="3">${SVG.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
-        <span class="ss-fs-tab" data-i="4">${SVG.selling}<span>${esc(T('tabBestSelling'))}</span></span>
-      </div>
-      <div class="ss-fs-list" id="ss-fs-list"></div>
-      <div class="ss-fs-footer" id="ss-fs-footer"></div>
-    `;
-    document.documentElement.appendChild(el);
-
-    document.getElementById('ss-fs-back').onclick = () => close();
-    document.getElementById('ss-fs-close').onclick = () => close();
-    document.getElementById('ss-fs-tabs').addEventListener('click', (e) => {
-      const tab = e.target.closest('.ss-fs-tab');
-      if (!tab) return;
-      const newTab = +tab.dataset.i;
-      if (newTab === activeTab) return;
-      activeTab = newTab;
-      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => x.classList.toggle('active', x === tab));
-      if (callbacks.onTabChange) callbacks.onTabChange(newTab);
-    });
-
-    document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => {
-      x.classList.toggle('active', +x.dataset.i === activeTab);
-    });
-  }
-
-  function buildCard(it) {
-    const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
-    const itemPrice = num(it.price);
-    const hasComparison = currentProductPrice > 0 && itemPrice > 0;
-    const isHigher = hasComparison && itemPrice > currentProductPrice;
-    const boxClass = isHigher ? 'ss-fs-price-box ss-fs-higher' : 'ss-fs-price-box';
-
-    const priceBox = `
-      <div class="${boxClass}">
-        <div class="ss-fs-price">${it.price ? esc(it.price) + ' ' + (U().getCurrencySymbol ? U().getCurrencySymbol() : '$') : '—'}</div>
-        ${discountValue ? `<div class="ss-fs-discount">-${esc(discountValue)}%</div>` : ''}
-      </div>`;
-
-    let metaHtml = '';
-    if (it.rating) metaHtml += `<span class="ss-fs-stars">${stars(it.rating)}</span><span class="ss-fs-rating">${esc(it.rating)}</span>`;
-    if (it.sold) metaHtml += `<span class="ss-fs-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
-    if (!metaHtml) metaHtml = `<span class="ss-fs-no-info">${esc(T('noReviews'))}</span>`;
-
-    return `
-      <a class="ss-fs-card" href="${esc(it.link)}" target="_blank" rel="noopener">
-        <div class="ss-fs-thumb-wrapper">
-          ${it.img ? `<img class="ss-fs-thumb" src="${esc(it.img)}" alt="">` : `<div class="ss-fs-thumb ss-fs-thumb-empty">🛍</div>`}
-        </div>
-        <div class="ss-fs-card-content">
-          <div class="ss-fs-card-title">${esc(it.title || 'Produit similaire')}</div>
-          <div class="ss-fs-card-meta">${metaHtml}</div>
-        </div>
-        ${priceBox}
-      </a>`;
-  }
-
-  function renderList() {
-    const l = document.getElementById('ss-fs-list'); if (!l) return;
-
-    if (items.length === 0) {
-      l.innerHTML = `<div class="ss-fs-msg">${esc(T('noResults'))}</div>`;
-      updateFooter();
-      return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    const temp = document.createElement('div');
-    temp.innerHTML = items.map(it => buildCard(it)).join('');
-    while (temp.firstChild) fragment.appendChild(temp.firstChild);
-    
-    l.innerHTML = '';
-    l.appendChild(fragment);
-    updateFooter();
-  }
-
-  function updateFooter() {
-    const f = document.getElementById('ss-fs-footer'); if (!f) return;
-    let html = '';
-
-    if (fetching) {
-      html += `<div class="ss-fs-loading" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:13px; padding:15px;">
-        <span class="ss-fs-spinner"></span>
-        <span>جاري جلب المزيد تلقائياً...</span>
-      </div>`;
-    } else if (items.length > 0) {
-      html += `<div class="ss-fs-counter">${items.length} ${esc(T('soldSuffix')) === 'vendus' ? 'produits' : 'items'}</div>`;
-    }
-
-    f.innerHTML = html;
-  }
-
-  function open(opts) {
-    opts = opts || {};
-    items = opts.items || [];
-    activeTab = opts.activeTab || 0;
-    fetching = !!opts.fetching;
-    currentProductPrice = opts.currentProductPrice || 0;
-    callbacks = {
-      onTabChange: opts.onTabChange || null,
-      onRefresh: opts.onRefresh || null,
-      onClose: opts.onClose || null
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400'
     };
 
-    buildDOM();
-    renderList();
-    isOpen = true;
-    document.documentElement.style.overflow = 'hidden';
-  }
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
 
-  function close() {
-    const el = document.getElementById(FS_ID);
-    if (el) el.remove();
-    isOpen = false;
-    document.documentElement.style.overflow = '';
-    if (callbacks.onClose) callbacks.onClose();
-  }
+    try {
+      const url = new URL(request.url);
+      const productId = url.searchParams.get('productId');
 
-  function updateItems(newItems) {
-    items = newItems || [];
-    if (isOpen) renderList();
-  }
+      // 1. جلب المنتجات المتشابهة المحفوظة (للصفحة المنتج الأساسي)
+      if (request.method === 'GET' && url.pathname === '/api/competitors') {
+        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
+        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
+        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
 
-  function setState(state) {
-    if (state.fetching !== undefined) fetching = state.fetching;
-    if (state.activeTab !== undefined) {
-      activeTab = state.activeTab;
-      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x =>
-        x.classList.toggle('active', +x.dataset.i === activeTab)
-      );
+        try {
+          const { results } = await env.DB.prepare(`
+            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
+            UNION ALL
+            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
+          `).bind(productId, productId).all();
+          if (results && results.length > 0) {
+            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
+            return json({ source: 'd1', data: results }, 200, corsHeaders);
+          }
+        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
+        return json({ status: 'not_found' }, 404, corsHeaders);
+      }
+
+      // 2. حفظ المنتجات المتشابهة (من الإضافة إلى D1 و KV)
+      if (request.method === 'POST' && url.pathname === '/api/competitors') {
+        const body = await request.json();
+        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
+          return json({ error: 'Invalid data' }, 400, corsHeaders);
+        }
+        const monthIndex = new Date().getUTCMonth(); 
+        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
+        const now = Math.floor(Date.now() / 1000);
+        
+        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
+
+        const statements = body.all_items.map(c => {
+          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
+          return env.DB.prepare(`
+            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
+              price = excluded.price, seller_rating = excluded.seller_rating, 
+              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
+              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
+          `).bind(
+            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
+            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
+            isRelevant, now
+          );
+        });
+        if (statements.length > 0) await env.DB.batch(statements);
+        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
+        return json({ success: true }, 201, corsHeaders);
+      }
+
+      // 3. جلب صفحة بحث (الواجهة البرمجية التي تطلبها الإضافة صفحة بصفحة)
+      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
+        const q = url.searchParams.get('q');
+        const page = parseInt(url.searchParams.get('page') || '1');
+        const country = (url.searchParams.get('country') || 'US').toUpperCase();
+        
+        if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
+        
+        // منع جلب أي صفحة أكبر من الحد المسموح (للتوفير)
+        if (page > MAX_PAGES_TO_FETCH) {
+            return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
+        }
+
+        const hash = await hashUrl(q);
+        const cacheKey = `search:${hash}:${page}`;
+        
+        // أ. البحث في الكاش
+        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
+        if (cached) return json({ ok: true, items: cached, source: 'kv' }, 200, corsHeaders);
+
+        // ب. جلب من مزود الخدمة (ScrapingAnt/ScraperAPI)
+        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
+        const acceptLanguage = `${country.toLowerCase()}-${country},${country.toLowerCase()};q=0.9,en;q=0.8`;
+        const targetUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(q)}&page=${page}`;
+        
+        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
+        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
+
+        const items = parseItems(html);
+        
+        // ج. حفظ في الكاش لبقية المستخدمين
+        if (items.length > 0) {
+            await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
+        }
+
+        return json({ ok: true, items, source: 'network' }, 200, corsHeaders);
+      }
+
+      return json({ error: 'Not found' }, 404, corsHeaders);
+    } catch (e) {
+      return json({ error: e.message }, 500, corsHeaders);
     }
-    if (isOpen) updateFooter();
   }
+};
 
-  window.SS_Fullscreen = { open, close, updateItems, setState, isOpen: () => isOpen };
-})();
+/* ============================================
+   Parse & Fetch Helpers
+   ============================================ */
+async function hashUrl(url) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
+      let img = '';
+      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
+      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {}; const sale = p.salePrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
+    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
+    return '';
+  }
+  return String(v);
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker); if (i < 0) return null;
+  const j = html.indexOf('[', i); if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
+  const providers = [
+    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
+    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
+  ].filter(p => p.key);
+
+  for (const provider of providers) {
+    const status = await getProviderStatus(provider.name, env);
+    if (status.disabled) continue;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
+        if (html && html.length > 5000) return { html, provider: provider.name };
+      } catch (e) {
+        if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); break; }
+        if (attempt < 3) { await new Promise(r => setTimeout(r, 2000)); continue; } else { break; }
+      }
+    }
+  }
+  return { html: null, provider: null };
+}
+
+async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
+  const url = new URL('https://api.scrapingant.com/v2/general');
+  url.searchParams.set('x-api-key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('proxy_country', country);
+  url.searchParams.set('browser', 'false');
+  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
+}
+
+async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
+  const url = new URL('https://api.scraperapi.com/');
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('url', targetUrl);
+  url.searchParams.set('country_code', country);
+  url.searchParams.set('render', 'false');
+  url.searchParams.set('keep_headers', 'true');
+  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
+}
+
+async function getProviderStatus(providerName, env) {
+  try {
+    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
+    return raw ? JSON.parse(raw) : { disabled: false };
+  } catch (e) { return { disabled: false }; }
+}
+
+async function disableProvider(providerName, reason, currentStatus, env) {
+  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
+  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
+  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
+}
+
+function json(data, status, corsHeaders) {
+  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+}
