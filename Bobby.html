@@ -22,7 +22,7 @@ export default {
         
         let englishTitle = title;
         
-        // 1. جلب العنوان الأصلي من القاعدة (لضمان الدقة)
+        // 1. جلب العنوان الأصلي من القاعدة
         if (pid) {
           try {
             const dbTitle = await getDbTitle(pid, env);
@@ -32,9 +32,8 @@ export default {
 
         const dbResult = await searchTursoDB(englishTitle, page, existingIds, env);
         
-        // 2. الإنقاذ: إذا كانت القاعدة فارغة، نجلبه من علي إكسبرس
+        // 2. الإنقاذ إذا كانت القاعدة فارغة
         if (dbResult.items.length === 0 && page === 1) {
-          console.log("⚠️ DB empty, fetching live...");
           const liveResult = await fetchLiveFromAliExpress(englishTitle);
           if (liveResult.length > 0) {
             return new Response(JSON.stringify({ ok: true, items: liveResult.slice(0, 60), hasMore: false }), {
@@ -73,6 +72,7 @@ async function getDbTitle(pid, env) {
 }
 
 async function searchTursoDB(title, page, existingIds, env) {
+  // تم إزالة أسماء الماركات من هذه القائمة لأنها كلمات أساسية للبحث!
   const stopWords = new Set([
     'for', 'the', 'and', 'with', 'from', 'new', 'hot', 'best', 'free', 'high', 'pro',
     'sale', 'sales', 'shipping', 'pcs', 'piece', 'set', 'plus', 'original', 'official', 
@@ -83,25 +83,31 @@ async function searchTursoDB(title, page, existingIds, env) {
     'gift', 'drop', 'ship', 'factory', 'direct', 'wholesale', 'dropshipping', 
     'performance', 'sports', 'racing', 'gas', 'cc', '4x', '10x', '100', 'mah',
     'large', 'capacity', 'charging', 'charger', 'external', 'device', 'storage', 'capsule',
-    'cable', 'adapter', 'cover', 'protector', 'glass', 'iphone', 
-    'samsung', 'xiaomi', 'huawei', 'redmi', 'poco', 'oppo', 'vivo', 'realme'
+    'cable', 'adapter', 'cover', 'protector', 'glass', 'integrity', 'data'
   ]);
   
   const allWords = title.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/);
   let meaningfulWords = allWords.filter(w => w.length >= 3 && !stopWords.has(w) && !/^\d+$/.test(w));
   
-  // نأخذ أطول 3 كلمات (لضمان الدقة)
-  meaningfulWords.sort((a, b) => b.length - a.length);
-  let keywords = meaningfulWords.slice(0, 3);
+  // 🔥 الحل: لا نقوم بترتيب الكلمات حسب الطول! نأخذ أول 4 كلمات كما هي في العنوان.
+  let keywords = meaningfulWords.slice(0, 4);
+  
+  // إزالة الجمع (s)
+  keywords = keywords.map(k => k.endsWith('s') && k.length > 4 ? k.slice(0, -1) : k);
   keywords = [...new Set(keywords)];
 
   if (keywords.length === 0) return { ok: true, items: [], hasMore: false };
 
+  // 🔥 نظام النقاط: كل كلمة يتطابق معها المنتج تعطي 10 نقاط
+  let scoreSql = keywords.map(() => `(CASE WHEN title LIKE ? THEN 10 ELSE 0 END)`).join(' + ');
+  let conditions = keywords.map(() => `title LIKE ?`).join(' OR ');
+
   const queryArgs = [];
   
-  // 1. البحث باستخدام الفهرس (LIKE 'kw%') - سريع جداً
-  const prefixConditions = keywords.map(() => `title LIKE ?`).join(' OR ');
-  keywords.forEach(k => queryArgs.push({ type: 'text', value: `${k}%` }));
+  // إضافة المتغيرات للـ SELECT (النقاط)
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
+  // إضافة المتغيرات للـ WHERE (البحث)
+  keywords.forEach(k => queryArgs.push({ type: 'text', value: `%${k}%` }));
 
   let excludeCondition = '';
   if (existingIds && existingIds.trim() !== '') {
@@ -113,62 +119,37 @@ async function searchTursoDB(title, page, existingIds, env) {
   const LIMIT = 60;
   const OFFSET = (page - 1) * LIMIT;
 
-  let sql = `
+  // ترتيب النتائج حسب الأعلى نقاطاً (الأكثر تطابقاً)
+  const sql = `
     SELECT product_id as id, title, 
            image_url as img,
            current_price_usd as price, original_price_usd as oldPrice, 
-           rating, orders_count as sold
+           rating, orders_count as sold,
+           (${scoreSql}) AS score
     FROM products
-    WHERE (${prefixConditions})
+    WHERE (${conditions})
       ${excludeCondition}
-    ORDER BY rowid DESC
+    ORDER BY score DESC, rowid DESC
     LIMIT ${LIMIT} OFFSET ${OFFSET}
   `;
 
-  let httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
-  let tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
+  const httpUrl = env.TURSO_URL.replace(/^libsql:\/\//, 'https://');
+  const tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }] })
+    body: JSON.stringify({
+      requests: [{ type: 'execute', stmt: { sql: sql, args: queryArgs } }, { type: 'close' }]
+    })
   });
-  let data = await tursoRes.json();
-  let result = data.results[0];
+
+  if (!tursoRes.ok) throw new Error(`Turso HTTP Error: ${tursoRes.status}`);
   
-  let rows = (result.type === 'error') ? [] : result.response.result.rows;
-
-  // 2. الخطة البديلة: إذا لم نجد نتائج في البداية، نبحث في كل مكان (أبطأ قليلاً لكنه يضمن النتائج)
-  if (rows.length === 0) {
-    const fallbackConditions = keywords.map(() => `title LIKE ?`).join(' OR ');
-    const fallbackArgs = keywords.map(k => ({ type: 'text', value: `%${k}%` }));
-    
-    if (existingIds && existingIds.trim() !== '') {
-      existingIds.split(',').forEach(id => fallbackArgs.push({ type: 'text', value: id }));
-    }
-
-    sql = `
-      SELECT product_id as id, title, 
-             image_url as img,
-             current_price_usd as price, original_price_usd as oldPrice, 
-             rating, orders_count as sold
-      FROM products
-      WHERE (${fallbackConditions})
-        ${excludeCondition}
-      ORDER BY rowid DESC
-      LIMIT ${LIMIT} OFFSET ${OFFSET}
-    `;
-
-    tursoRes = await fetch(`${httpUrl}/v2/pipeline`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${env.TURSO_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests: [{ type: 'execute', stmt: { sql: sql, args: fallbackArgs } }, { type: 'close' }] })
-    });
-    data = await tursoRes.json();
-    result = data.results[0];
-    if (result.type === 'error') return { ok: true, items: [], hasMore: false };
-    rows = result.response.result.rows;
-  }
-
+  const data = await tursoRes.json();
+  const result = data.results[0];
+  if (result.type === 'error') throw new Error(result.error.message);
+  
   const cols = result.response.result.cols.map(c => c.name);
+  const rows = result.response.result.rows;
   
   const items = rows.map(row => {
     const obj = {};
