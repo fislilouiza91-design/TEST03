@@ -1,249 +1,219 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Bulk Geo-Routing)
-   D1 (All items) + KV Cache (Relevant only)
+   Smart Shopper - Background Service Worker
+   Bulk Fetching (5 Pages) + Smart Geo-Routing
    ============================================ */
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; // 5 أيام
-const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
+const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
+const STOP_WORDS = new Set(['free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good']);
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
-    };
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
 
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
-
-    try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-
-      // 1. GET: جلب البيانات
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
-
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-          if (results && results.length > 0) {
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      // 2. POST: حفظ البيانات (استقبال الدفعة الكاملة من الإضافة)
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        // body يحتوي على: base_product_id, all_items, relevant_items
-        
-        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
-          return json({ error: 'Invalid data format' }, 400, corsHeaders);
-        }
-
-        const monthIndex = new Date().getUTCMonth(); 
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-        
-        // استخراج معرفات المنتجات المتشابهة لتمييزها في D1
-        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
-
-        // 1. حفظ كل شيء في D1
-        const statements = body.all_items.map(c => {
-          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
-              price = excluded.price, seller_rating = excluded.seller_rating, 
-              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
-              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
-            isRelevant, now
-          );
-        });
-
-        if (statements.length > 0) await env.DB.batch(statements);
-        
-        // 2. حفظ المتشابهة فقط في الكاش KV
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
-
-        return json({ success: true, all_count: body.all_items.length, relevant_count: body.relevant_items.length }, 201, corsHeaders);
-      }
-
-      // 3. Fallback Scrape
-      if (request.method === 'GET' && url.pathname === '/api/fallback-scrape') {
-        const requestUrl = url.searchParams.get('url');
-        const userCountry = (url.searchParams.get('country') || 'US').toLowerCase();
-        const targetUrl = requestUrl ? requestUrl : `https://www.aliexpress.com/item/${productId}.html`;
-        
-        const proxyCountry = SUPPORTED_COUNTRIES.includes(userCountry) ? userCountry : 'us';
-        const acceptLanguage = `${userCountry}-${userCountry.toUpperCase()},${userCountry};q=0.9,en;q=0.8`;
-
-        const { html, provider } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
-
-        if (!html) return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
-        return json({ provider: `${provider} (${proxyCountry.toUpperCase()})`, html }, 200, corsHeaders);
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
-  },
-
-  async scheduled(event, env, ctx) {
-    const now = new Date();
-    ctx.waitUntil(healthCheckAllProviders(env));
-    if (now.getUTCDate() === 1) {
-      const monthIndex = now.getUTCMonth();
-      const tableToClear = monthIndex % 2 === 0 ? 'scraped_products_odd' : 'scraped_products_even';
-      try {
-        await env.DB.batch([
-          env.DB.prepare(`DROP TABLE IF EXISTS ${tableToClear}`),
-          env.DB.prepare(`CREATE TABLE ${tableToClear} (id INTEGER PRIMARY KEY AUTOINCREMENT, base_product_id TEXT NOT NULL, competitor_id TEXT NOT NULL, title TEXT, price REAL, currency TEXT DEFAULT 'USD', seller_rating REAL, product_url TEXT, coupon_code TEXT, coupon_discount TEXT, is_relevant INTEGER DEFAULT 1, scraped_at INTEGER NOT NULL, UNIQUE(base_product_id, competitor_id))`),
-          env.DB.prepare(`CREATE INDEX idx_${tableToClear}_base ON ${tableToClear}(base_product_id, is_relevant)`)
-        ]);
-      } catch(e) {}
-    }
+  if (msg.type === 'CHECK_CACHE') {
+    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}`)
+      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
+      .then(data => sendResponse({ ok: true, data: data.data }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
   }
-};
+
+  if (msg.type === 'SMART_SEARCH') {
+    handleSearch(msg, sender, sendResponse);
+    return true;
+  }
+  return true;
+});
 
 /* ============================================
-   Circuit Breaker + Smart Retry
+   البحث الأولي - صفحة 1 + جلب 5 صفحات في الخلفية
    ============================================ */
-async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
+async function handleSearch(msg, sender, sendResponse) {
+  const tabId = sender.tab.id;
+  const originalTitle = msg.title;
+  const country = msg.country || 'US';
+  const productId = msg.productId;
+  const q = encodeURIComponent(originalTitle.slice(0, 90));
+  const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
 
-  if (!providers.length) return { html: null, provider: null };
+  try {
+    // 1. جلب الصفحة الأولى وعرضها فوراً
+    let allItemsRaw = await fetchPage(baseUrl, 1, country);
+    let seenIds = new Set(allItemsRaw.map(i => i.id));
+    let relevantPage1 = filterByRelevance(originalTitle, allItemsRaw);
 
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (status.disabled) continue;
+    sendResponse({
+      ok: true, items: relevantPage1, lastPage: 1, hasMore: true,
+      totalItems: relevantPage1.length, searchUrl: baseUrl
+    });
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
-        if (html && (html.includes('punish') || html.includes('captcha'))) throw new Error('CAPTCHA_DETECTED');
-        if (html && html.length > 5000) return { html, provider: provider.name };
-      } catch (e) {
-        const errType = classifyError(e);
-        if (errType === 'QUOTA') { await disableProvider(provider.name, e.message, status, env); break; }
-        if (errType === 'CONCURRENCY' || errType === 'RATE' || e.message === 'CAPTCHA_DETECTED') {
-          if (attempt < 2) { await sleep(1500); continue; } else { break; }
-        }
-        break;
+    // 2. بدء الجلب الخفي للصفحات من 2 إلى 5
+    if (tabId) {
+      chrome.tabs.sendMessage(tabId, { type: 'SMART_FETCH_START' }).catch(()=>{});
+    }
+
+    for (let page = 2; page <= 5; page++) {
+      let pageRaw = await fetchPage(baseUrl, page, country);
+      if (!pageRaw || pageRaw.length === 0) break; // نفدت المنتجات
+
+      let uniqueRaw = pageRaw.filter(it => !seenIds.has(it.id));
+      if (uniqueRaw.length === 0 && pageRaw.length < 5) break; // وصلنا للنهاية
+
+      uniqueRaw.forEach(it => seenIds.add(it.id));
+      allItemsRaw = allItemsRaw.concat(uniqueRaw);
+
+      // فلترة الصفحة الجديدة وإرسالها لواجهة المستخدم
+      let relevantNew = filterByRelevance(originalTitle, uniqueRaw);
+      if (relevantNew.length > 0 && tabId) {
+        chrome.tabs.sendMessage(tabId, { type: 'SMART_BACKGROUND_UPDATE', items: relevantNew }).catch(()=>{});
       }
     }
+
+    if (tabId) {
+      chrome.tabs.sendMessage(tabId, { type: 'SMART_FETCH_DONE' }).catch(()=>{});
+    }
+
+    // 3. حفظ كل شيء في D1، والمتشابه فقط في KV
+    let allRelevant = filterByRelevance(originalTitle, allItemsRaw);
+    if (productId && allItemsRaw.length > 0) {
+      saveToCloudflare(productId, allItemsRaw, allRelevant);
+    }
+
+  } catch (e) {
+    sendResponse({ ok: false, error: String(e) });
   }
-  return { html: null, provider: null };
 }
 
-function classifyError(error) {
-  const msg = String(error.message || '').toLowerCase();
-  if (msg.includes('captcha') || msg.includes('punish')) return 'CAPTCHA';
-  if (msg.includes('concurrency') || msg.includes('too many') || msg.includes('simultaneous') || msg.includes('busy')) return 'CONCURRENCY';
-  if (msg.includes('429') || msg.includes('rate limit')) return 'RATE';
-  if (msg.includes('credits exhausted') || msg.includes('quota exceeded')) return 'QUOTA';
-  return 'OTHER';
+function saveToCloudflare(productId, allRawItems, allRelevantItems) {
+  const payload = {
+    base_product_id: productId,
+    all_items: allRawItems.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    })),
+    relevant_items: allRelevantItems.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    }))
+  };
+
+  fetch(`${WORKER_URL}/api/competitors`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).then(res => res.json()).then(data => console.log('💾 Saved to Cloudflare:', data)).catch(console.error);
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', 'false'); 
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    const lowerBody = errBody.toLowerCase();
-    if (lowerBody.includes('captcha') || lowerBody.includes('punish')) throw new Error(`CAPTCHA_DETECTED`);
-    if (lowerBody.includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (lowerBody.includes('credits exhausted') || lowerBody.includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country);
-  url.searchParams.set('render', 'false'); 
-  url.searchParams.set('keep_headers', 'true'); 
-  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    const lowerBody = errBody.toLowerCase();
-    if (lowerBody.includes('captcha') || lowerBody.includes('punish')) throw new Error(`CAPTCHA_DETECTED`);
-    if (lowerBody.includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (lowerBody.includes('credits exhausted') || lowerBody.includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function getProviderStatus(providerName, env) {
+/* ============================================
+   Fetch & Filter Utilities
+   ============================================ */
+async function fetchPage(baseUrl, page, country) {
   try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
+    const aliexpressUrl = baseUrl + '&page=' + page;
+    const workerEndpoint = `${WORKER_URL}/api/fallback-scrape?url=${encodeURIComponent(aliexpressUrl)}&country=${country}`;
+    const res = await fetch(workerEndpoint);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.html || data.html.length < 5000) return [];
+
+    let items = parseItems(data.html);
+    if (!items.length) items = fallbackIds(data.html);
+    return items;
+  } catch (e) { return []; }
 }
 
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
+function filterByRelevance(originalTitle, items) {
+  if (!originalTitle || !items.length) return items;
+  const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const baseWords = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w) && !/^\d{4}$/.test(w));
+  if (baseWords.length === 0) return items; 
+
+  const scoredItems = items.map(it => {
+    const itemTitle = (it.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+    let matchCount = 0;
+    for (const word of baseWords) { if (itemTitle.includes(word)) matchCount++; }
+    return { ...it, matchScore: matchCount / baseWords.length };
+  });
+
+  const filtered = scoredItems.filter(it => it.matchScore >= 0.2);
+  filtered.sort((a, b) => b.matchScore - a.matchScore);
+  return filtered;
 }
 
-async function clearProviderStatus(providerName, env) {
-  await env.COMPETITOR_CACHE.delete(`provider:${providerName}`);
-}
-
-async function healthCheckAllProviders(env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY }
-  ].filter(p => p.key);
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (!status.disabled || status.permanent) continue;
-    const recovered = await testProvider(provider.name, provider.key);
-    if (recovered) await clearProviderStatus(provider.name, env);
+/* ============================================
+   Parse items from HTML
+   ============================================ */
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : '';
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
+    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
+    for (const k in v) { if (typeof v[k] === 'string' && v[k].length > 0) return v[k]; }
+    return '';
   }
+  return String(v);
 }
 
-async function testProvider(providerName, apiKey) {
-  try {
-    const testUrl = 'https://httpbin.org/ip';
-    const html = providerName === 'scrapingant' ? await fetchFromScrapingAnt(testUrl, apiKey, 'us', 'en-US') : await fetchFromScraperAPI(testUrl, apiKey, 'us', 'en-US');
-    return html && html.length > 20;
-  } catch (e) { return false; }
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
+      let img = '';
+      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
+      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch (e) {}
+  }
+  return out;
 }
 
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ id: m[1], title: 'Produit similaire', img: '', price: '', rating: '', sold: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
+  }
+  return out;
 }
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
