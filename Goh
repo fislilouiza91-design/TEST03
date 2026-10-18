@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Forced Grid Search)
+   Smart Shopper - Cloudflare Worker (Fixed Grid Search)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -96,7 +96,8 @@ export default {
         const acceptLanguage = `${country.toLowerCase()}-${country},${country.toLowerCase()};q=0.9,en;q=0.8`;
         
         // 🔥 التعديل الجوهري: إجبار AliExpress على عرض صفحة البحث وليس صفحة منتج واحد
-        const searchSlug = encodeURIComponent(q).replace(/%20/g, '-').toLowerCase();
+        // تنظيف النص ليكون صالحاً للرابط (حذف الرموز الغريبة واستبدال المسافات بشرطات)
+        const searchSlug = q.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '').toLowerCase();
         const targetUrl = `https://www.aliexpress.com/w/wholesale-${searchSlug}.html?page=${page}`;
         
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
@@ -126,19 +127,13 @@ async function hashUrl(url) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
 }
 
-// 🔥 دالة استخراج محسنة لتعمل مع الصفحة الجديدة
+// دالة استخراج المصوفة (مستقرة كما كانت في الأصل)
 function parseItems(html) {
-  let arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
   
   let arr; 
   try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  
-  // في بعض الأحيان يكون الهيكل عبارة عن كائن يحتوي على مصفوفة محتوى
-  if (!Array.isArray(arr) && arr.content && Array.isArray(arr.content)) {
-      arr = arr.content;
-  }
-  
   if (!Array.isArray(arr)) return [];
 
   const out = [];
@@ -177,23 +172,21 @@ function extractText(v) {
   return String(v);
 }
 
+// استعادة الدالة الأصلية المستقرة
 function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker); if (i < 0) return null;
-  const j = html.indexOf('[', i); if (j < 0) {
-      // قد يكون الماركر متبوعاً بكائن وليس مصفوفة مباشرة
-      const k = html.indexOf('{', i);
-      if (k < 0) return null;
-      // نحاول إيجاد المصفوفة داخل الكائن
-      const arrayStart = html.indexOf('[', k);
-      if (arrayStart < 0) return null;
-      // نعيد المحاولة من نقطة بداية المصفوفة
-      return extractJsonArray(html.substring(arrayStart - 1), marker); // مبسط للغاية، الأفضل استخدام المنطق الأصلي
-  }
-  
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
   let depth = 0, inStr = false, esc = false;
   for (let k = j; k < html.length; k++) {
     const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
     if (c === '"') { inStr = true; continue; }
     if (c === '[') depth++;
     else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
