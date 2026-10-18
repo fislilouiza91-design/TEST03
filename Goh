@@ -1,6 +1,6 @@
 /* ============================================
    Smart Shopper - Content Script
-   Full page display - Background Fetch (5 pages)
+   Display Page 1 -> Fetch Rest in Background -> Button shows them
    ============================================ */
 (function () {
   'use strict';
@@ -23,11 +23,11 @@
   let currentProductPrice = 0;
   
   // 🔥 متغيرات التحكم في الجلب الخفي
-  let prefetchedPages = [];       // يحفظ الصفحات التي تم جلبها في الخفاء
+  let prefetchedBatches = [];       // يحفظ الدفعات (كل دفعة = 60 منتج) التي تم جلبها في الخفاء
   let isBackgroundFetching = false; // هل يقوم الخادم بالجلب الآن؟
-  let nextPageToFetch = 2;        // الصفحة التالية التي سيتم طلبها
-  let waitingForPage = false;     // هل ضغط المستخدم على "مزيد" وينتظر؟
-  let serverHasMore = true;       // هل يوجد المزيد في الخادم؟
+  let nextPageToFetch = 2;          // الصفحة التالية التي سيتم طلبها
+  let waitingForPage = false;       // هل ضغط المستخدم على "مزيد" وينتظر؟
+  let serverHasMore = true;         // هل يوجد المزيد في الخادم؟
 
   let searchState = { running: false, complete: false, startTime: 0, totalItems: 0 };
 
@@ -161,7 +161,7 @@
     const panel = document.getElementById(PANEL_ID);
     if (panel) panel.style.display = 'none';
     window.SS_Fullscreen.open({
-      items: cachedItems, activeTab: activeTab, hasMore: serverHasMore || prefetchedPages.length > 0, fetching: isBackgroundFetching || waitingForPage, currentProductPrice: currentProductPrice,
+      items: cachedItems, activeTab: activeTab, hasMore: serverHasMore || prefetchedBatches.length > 0, fetching: isBackgroundFetching || waitingForPage, currentProductPrice: currentProductPrice,
       onLoadMore: () => onLoadMoreClick(),
       onTabChange: (newTab) => { activeTab = newTab; cachedSortedItems = []; renderedCount = 0; document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', +x.dataset.i === newTab)); },
       onRefresh: () => { currentKey = ''; if (window.SS_Fullscreen) window.SS_Fullscreen.close(); const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; scan(); },
@@ -257,21 +257,24 @@
     updateFooter();
   }
 
-  // 🔥 تحديث الفوتر ليعكس حالة الجلب في الخفاء
+  // 🔥 تحديث الفوتر لضمان بقاء الزر
   function updateFooter() {
     const f = document.getElementById('ss-footer'); if (!f) return;
     let html = '';
     
     if (!searchState.running) {
-      if (prefetchedPages.length > 0) {
-          // هناك صفحات جاهزة في الذاكرة -> اعرض زر المزيد
+      if (prefetchedBatches.length > 0) {
+          // هناك دفعات جاهزة في الذاكرة
           html += `<button class="ss-load-more-btn" id="ss-load-more">${SVG_ICONS.plus}<span>${esc(T('loadMore'))}</span></button>`;
       } else if (isBackgroundFetching || waitingForPage) {
-          // لا توجد صفحات جاهزة، ولكن الخادم يجلب الآن
+          // الخادم يجلب، أو المستخدم ضغط وينتظر
           html += `<button class="ss-load-more-btn ss-load-more-loading" disabled><span class="ss-spinner"></span><span>${esc(T('loading'))}</span></button>`;
       } else if (!serverHasMore) {
-          // نفدت المنتجات
+          // نفدت المنتجات فعلياً
           if (cachedItems.length > 0) { html += `<div class="ss-no-more">${esc(T('noMoreResults'))}</div>`; }
+      } else {
+          // حالة احتياطية: الخادم لديه المزيد ولكن لا يوجد جلب ولا ذاكرة (بسبب خطأ سابق)
+          html += `<button class="ss-load-more-btn" id="ss-load-more">${SVG_ICONS.plus}<span>${esc(T('loadMore'))}</span></button>`;
       }
     }
     
@@ -280,7 +283,7 @@
     if (btn) btn.onclick = onLoadMoreClick;
   }
 
-  // 🔥 1. دالة الجلب التلقائي في الخفاء (تستمر حتى تنتهي الصفحات أو تصل للحد)
+  // 🔥 1. الجلب التلقائي في الخفاء
   function startBackgroundFetch() {
     if (isBackgroundFetching || !serverHasMore || nextPageToFetch > 5) {
         isBackgroundFetching = false;
@@ -289,10 +292,11 @@
     }
     
     isBackgroundFetching = true;
-    console.log(`[Smart Shopper] 📥 Background fetching page ${nextPageToFetch}...`);
+    // لا نغير الزر إلى تحميل إذا كان هناك دفعات جاهزة
+    if (prefetchedBatches.length === 0) updateFooter();
     
     const existingIds = cachedItems.map(x => x.id);
-    prefetchedPages.forEach(page => page.forEach(x => existingIds.push(x.id)));
+    prefetchedBatches.forEach(batch => batch.forEach(x => existingIds.push(x.id)));
 
     chrome.runtime.sendMessage({ 
         type: 'SMART_LOAD_MORE', 
@@ -305,34 +309,40 @@
         isBackgroundFetching = false;
         
         if (resp && resp.ok && resp.items && resp.items.length > 0) {
-            prefetchedPages.push(resp.items);
+            prefetchedBatches.push(resp.items);
             nextPageToFetch++;
             
             if (resp.hasMore && nextPageToFetch <= 5) {
                 startBackgroundFetch(); // اجلب الصفحة التالية فوراً
             } else {
-                serverHasMore = false;
+                serverHasMore = false; // انتهت المنتجات
             }
+        } else if (resp && resp.ok && resp.items && resp.items.length === 0) {
+             serverHasMore = false; // صفحة فارغة
         } else {
-            serverHasMore = false;
+            // خطأ في الشبكة أو الخادم، لا نجعل serverHasMore = false لكي يستطيع المستخدم المحاولة
+            console.error("Background fetch failed, user can retry manually.");
         }
         
         // إذا كان المستخدم يضغط على الزر وينتظر، اعرض له ما تم جلبه الآن
         if (waitingForPage) {
             waitingForPage = false;
-            onLoadMoreClick(); 
+            if (prefetchedBatches.length > 0) {
+                onLoadMoreClick(); 
+            } else {
+                updateFooter();
+            }
         } else {
             updateFooter();
         }
     });
   }
 
-  // 🔥 2. زر المزيد: يعرض فقط ما تم استخراجه (لا يرسل أي طلب)
+  // 🔥 2. زر المزيد: يعرض فقط ما تم استخراجه في الخلفية
   function onLoadMoreClick() {
-    if (prefetchedPages.length > 0) {
+    if (prefetchedBatches.length > 0) {
         // عرض الصفحة الجاهزة
-        console.log('[Smart Shopper] ⚡ Displaying prefetched page instantly.');
-        const nextBatch = prefetchedPages.shift();
+        const nextBatch = prefetchedBatches.shift();
         cachedItems = cachedItems.concat(nextBatch);
         
         applySort();
@@ -349,12 +359,15 @@
             window.SS_Fullscreen.updateItems(cachedItems);
         }
         updateFooter();
+        
     } else if (isBackgroundFetching) {
         // المستخدم ضغط، ولكن الخادم لا يزال يجلب
         waitingForPage = true;
         updateFooter(); // سيظهر زر التحميل
-    } else {
-        // لا يوجد المزيد
+    } else if (serverHasMore) {
+        // إذا فشل الجلب الخفي سابقاً، نتيح للمستخدم إعادة المحاولة
+        startBackgroundFetch();
+        waitingForPage = true;
         updateFooter();
     }
   }
@@ -376,8 +389,7 @@
     currentSearchTitle = title;
     currentProductPrice = productPrice || 0;
     
-    // تصفير متغيرات الجلب
-    prefetchedPages = [];
+    prefetchedBatches = [];
     isBackgroundFetching = false;
     nextPageToFetch = 2;
     waitingForPage = false;
