@@ -1,2 +1,3 @@
-EXPLAIN QUERY PLAN 
-SELECT * FROM products WHERE title LIKE 'Samsung%';
+DROP INDEX IF EXISTS idx_products_title;
+
+CREATE INDEX IF NOT EXISTS idx_products_title_nocase ON products(title COLLATE NOCASE);
