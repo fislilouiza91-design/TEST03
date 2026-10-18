@@ -1,268 +1,32 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   Fetching via Cloudflare Worker (D1 + KV Cache)
-   + Dynamic Geo-Routing (Country Detection)
-   + Smart Relevance Filtering (Anti-Spam)
-   ============================================ */
-
-const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
-
-// كلمات يجب تجاهلها عند مقارنة المنتجات (كلمات حشو)
-const STOP_WORDS = new Set([
-  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
-  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
-  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
-  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good'
-]);
-
-/* ============================================
-   Listener
-   ============================================ */
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  if (msg.type === 'CHECK_CACHE') {
-    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}`)
-      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
-      .then(data => sendResponse({ ok: true, data: data.data }))
-      .catch(() => sendResponse({ ok: false }));
-    return true;
-  }
-
-  if (msg.type === 'SAVE_DATA') {
-    fetch(`${WORKER_URL}/api/competitors`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg.payload)
-    })
-      .then(res => res.json())
-      .then(data => sendResponse({ ok: true, data }))
-      .catch(err => sendResponse({ ok: false, error: err.message }));
-    return true;
-  }
-
-  if (msg.type === 'SMART_SEARCH') {
-    handleSearch(msg, sender, sendResponse);
-    return true;
-  }
-
-  if (msg.type === 'SMART_LOAD_MORE') {
-    handleLoadMore(msg, sender, sendResponse);
-    return true;
-  }
-  return true;
-});
-
-/* ============================================
-   البحث الأولي - صفحة واحدة
-   ============================================ */
-async function handleSearch(msg, sender, sendResponse) {
-  const tabId = sender.tab && sender.tab.id;
-  const originalTitle = msg.title || '';
-  const q = encodeURIComponent(originalTitle.slice(0, 90));
-  const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-
-  console.log('[Smart Shopper BG] === INITIAL SEARCH ===');
-
-  try {
-    const items = await fetchPage(baseUrl, 1);
-
-    // 1. إزالة التكرار
-    const seenIds = new Set();
-    let newItems = items.filter(it => { 
-      if (!it || !it.id || seenIds.has(it.id)) return false; 
-      seenIds.add(it.id); 
-      return true; 
-    });
-
-    // 2. تطبيق فلتر التطابق الذكي
-    newItems = filterByRelevance(originalTitle, newItems);
-
-    console.log(`[Smart Shopper BG] Page 1 → ${newItems.length} items (after filtering)`);
-
-    sendResponse({
-      ok: true, items: newItems, lastPage: 1, hasMore: newItems.length > 0,
-      totalItems: newItems.length, searchUrl: baseUrl
-    });
-
-    if (tabId) {
-      try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', totalItems: newItems.length, lastPage: 1, hasMore: newItems.length > 0 }); } catch (e) {}
-    }
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e) });
-  }
+// تعديل دالة التحقق من صفحة المنتج لتتجاهل صفحة الحظر
+function isProductPage() { 
+  // إذا كان الرابط يحتوي على punish أو captcha، فهذا ليس منتجاً
+  if (location.href.includes('/punish') || location.href.includes('captcha')) return false;
+  return /aliexpress\.(com|us)\/(item|i)\/\d+/i.test(location.href); 
 }
 
-/* ============================================
-   المزيد - الصفحة التالية
-   ============================================ */
-async function handleLoadMore(msg, sender, sendResponse) {
-  const originalTitle = msg.title || '';
-  const q = encodeURIComponent(originalTitle.slice(0, 90));
-  const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-  const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
-  const existingIds = msg.existingIds || [];
+// تعديل دالة الفحص (scan) لتتوقف فوراً عند رؤية صفحة الحظر
+function scan() {
+  if (closed) return;
 
-  try {
-    const items = await fetchPage(baseUrl, nextPage);
-
-    const seenIds = new Set(existingIds);
-    let newItems = items.filter(it => { 
-      if (!it || !it.id || seenIds.has(it.id)) return false; 
-      seenIds.add(it.id); 
-      return true; 
-    });
-
-    // تطبيق فلتر التطابق الذكي
-    newItems = filterByRelevance(originalTitle, newItems);
-
-    sendResponse({ ok: true, items: newItems, lastPage: nextPage, hasMore: newItems.length > 0 });
-  } catch (e) {
-    sendResponse({ ok: false, error: String(e), hasMore: false, lastPage: nextPage - 1 });
+  // 🛑 إذا كان المستخدم في صفحة الحظر، نخفي الإضافة ونوقف كل شيء
+  if (location.href.includes('/punish') || location.href.includes('captcha')) {
+    const existing = document.getElementById(PANEL_ID);
+    if (existing) existing.remove();
+    if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) window.SS_Fullscreen.close();
+    currentKey = ''; 
+    currentProductPrice = 0; 
+    searchState.running = false; 
+    searchState.complete = false;
+    return; // الخروج فوراً دون عمل أي طلبات
   }
-}
 
-/* ============================================
-   🧠 خوارزمية التطابق الذكي (Smart Filtering)
-   ============================================ */
-function filterByRelevance(originalTitle, items) {
-  if (!originalTitle || !items.length) return items;
-
-  // 1. استخراج الكلمات المفتاحية من العنوان الأصلي
-  const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const baseWords = cleanTitle.split(/\s+/).filter(w => 
-    w.length > 1 && !STOP_WORDS.has(w) && !/^\d{4}$/.test(w) // إزالة الحشو والسنوات (مثل 2024)
-  );
-
-  if (baseWords.length === 0) return items; // إذا لم يتبق كلمات، لا تفلتر
-
-  // 2. تقييم كل منتج بناءً على عدد الكلمات المتطابقة
-  const scoredItems = items.map(it => {
-    const itemTitle = (it.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-    let matchCount = 0;
-    for (const word of baseWords) {
-      if (itemTitle.includes(word)) matchCount++;
-    }
-    const score = matchCount / baseWords.length;
-    return { ...it, matchScore: score };
-  });
-
-  // 3. الفلترة (استبعاد المنتجات التي لا تتطابق بنسبة 20% على الأقل)
-  const threshold = 0.2;
-  const filtered = scoredItems.filter(it => it.matchScore >= threshold);
-
-  // 4. الترتيب (الأكثر تطابقاً أولاً)
-  filtered.sort((a, b) => b.matchScore - a.matchScore);
-
-  return filtered;
-}
-
-/* ============================================
-   Fetch via Cloudflare Worker (With Geo-Routing)
-   ============================================ */
-async function fetchPage(baseUrl, page) {
-  try {
-    const aliexpressUrl = baseUrl + '&page=' + page;
-    const userLang = navigator.language || 'en-US';
-    let countryCode = 'US';
-    if (userLang.includes('-')) { countryCode = userLang.split('-')[1].toUpperCase(); } 
-    else if (userLang.length === 2) { countryCode = userLang.toUpperCase(); }
-
-    const workerEndpoint = `${WORKER_URL}/api/fallback-scrape?url=${encodeURIComponent(aliexpressUrl)}&country=${countryCode}`;
-
-    const res = await fetch(workerEndpoint);
-    if (!res.ok) return [];
-
-    const data = await res.json();
-    const html = data.html; 
-    if (!html || html.length < 5000) return [];
-
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
-    return items;
-  } catch (e) {
-    return [];
+  if (!isProductPage()) {
+    const existing = document.getElementById(PANEL_ID);
+    if (existing) existing.remove();
+    if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) window.SS_Fullscreen.close();
+    currentKey = ''; currentProductPrice = 0; searchState.running = false; searchState.complete = false;
+    return;
   }
-}
-
-/* ============================================
-   Parse items from HTML
-   ============================================ */
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : '';
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
-    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
-    for (const k in v) { if (typeof v[k] === 'string' && v[k].length > 0) return v[k]; }
-    return '';
-  }
-  return String(v);
-}
-
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-      let img = '';
-      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
-      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
-      const discount = extractText(o.discount || sale.discount || '');
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      out.push({ id: String(id), title: title || 'Produit similaire', img, price, oldPrice, discount, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
-    } catch (e) {}
-  }
-  return out;
-}
-
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set(); const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({ id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '', discount: '', rating: '', sold: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
-  }
-  return out;
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+  
+  // ... باقي الكود (detectProduct وما إلى ذلك) يبقى كما هو ...
