@@ -1,7 +1,7 @@
 /* ============================================
    Smart Shopper - i18n Module
    Full multi-language (38 languages)
-   With loadMore + noMoreResults
+   With loadMore + noMoreResults + tabSimilar
    ============================================ */
 (function () {
   'use strict';
@@ -9,7 +9,7 @@
   const TRANSLATIONS = {
     en: { panelTitle: 'Smart Shopper', panelSubtitle: 'Same product - other sellers ✓',
       tabAll: 'All', tabCheapest: 'Cheapest', tabBestRated: 'Best rated',
-      tabBestDiscount: 'Best discount', tabBestSelling: 'Best selling',
+      tabBestDiscount: 'Best discount', tabBestSelling: 'Best selling', tabSimilar: 'Similar',
       noResults: 'No similar products found.', noReviews: 'No reviews',
       soldSuffix: 'sold', viewAll: 'View all on AliExpress ↗',
       scrollForMore: 'Scroll for more', errorContact: 'Cannot contact AliExpress. Try again.',
@@ -20,7 +20,7 @@
 
     fr: { panelTitle: 'Smart Shopper', panelSubtitle: 'Même produit - autres vendeurs ✓',
       tabAll: 'Tous', tabCheapest: 'Moins cher', tabBestRated: 'Mieux noté',
-      tabBestDiscount: 'Meilleure remise', tabBestSelling: 'Plus vendu',
+      tabBestDiscount: 'Meilleure remise', tabBestSelling: 'Plus vendu', tabSimilar: 'Similaires',
       noResults: 'Aucun produit similaire trouvé.', noReviews: 'Aucun avis',
       soldSuffix: 'vendus', viewAll: 'Voir tout sur AliExpress ↗',
       scrollForMore: 'Défilez pour plus', errorContact: 'Impossible de contacter AliExpress.',
@@ -31,7 +31,7 @@
 
     es: { panelTitle: 'Smart Shopper', panelSubtitle: 'Mismo producto - otros vendedores ✓',
       tabAll: 'Todos', tabCheapest: 'Más barato', tabBestRated: 'Mejor valorado',
-      tabBestDiscount: 'Mejor descuento', tabBestSelling: 'Más vendido',
+      tabBestDiscount: 'Mejor descuento', tabBestSelling: 'Más vendido', tabSimilar: 'Similares',
       noResults: 'No se encontraron productos similares.', noReviews: 'Sin reseñas',
       soldSuffix: 'vendidos', viewAll: 'Ver todo en AliExpress ↗',
       scrollForMore: 'Desplázate para más', errorContact: 'No se puede contactar con AliExpress.',
@@ -42,7 +42,7 @@
 
     de: { panelTitle: 'Smart Shopper', panelSubtitle: 'Gleiches Produkt - andere Verkäufer ✓',
       tabAll: 'Alle', tabCheapest: 'Günstigste', tabBestRated: 'Bestbewertet',
-      tabBestDiscount: 'Bester Rabatt', tabBestSelling: 'Meistverkauft',
+      tabBestDiscount: 'Bester Rabatt', tabBestSelling: 'Meistverkauft', tabSimilar: 'Ähnliche',
       noResults: 'Keine ähnlichen Produkte gefunden.', noReviews: 'Keine Bewertungen',
       soldSuffix: 'verkauft', viewAll: 'Alle auf AliExpress anzeigen ↗',
       scrollForMore: 'Für mehr scrollen', errorContact: 'AliExpress kann nicht kontaktiert werden.',
@@ -53,7 +53,7 @@
 
     it: { panelTitle: 'Smart Shopper', panelSubtitle: 'Stesso prodotto - altri venditori ✓',
       tabAll: 'Tutti', tabCheapest: 'Più economico', tabBestRated: 'Meglio valutato',
-      tabBestDiscount: 'Miglior sconto', tabBestSelling: 'Più venduto',
+      tabBestDiscount: 'Miglior sconto', tabBestSelling: 'Più venduto', tabSimilar: 'Simili',
       noResults: 'Nessun prodotto simile trovato.', noReviews: 'Nessuna recensione',
       soldSuffix: 'venduti', viewAll: 'Vedi tutto su AliExpress ↗',
       scrollForMore: 'Scorri per altro', errorContact: 'Impossibile contattare AliExpress.',
@@ -64,7 +64,7 @@
 
     pt: { panelTitle: 'Smart Shopper', panelSubtitle: 'Mesmo produto - outros vendedores ✓',
       tabAll: 'Todos', tabCheapest: 'Mais barato', tabBestRated: 'Melhor avaliado',
-      tabBestDiscount: 'Melhor desconto', tabBestSelling: 'Mais vendido',
+      tabBestDiscount: 'Melhor desconto', tabBestSelling: 'Mais vendido', tabSimilar: 'Similares',
       noResults: 'Nenhum produto similar encontrado.', noReviews: 'Sem avaliações',
       soldSuffix: 'vendidos', viewAll: 'Ver tudo no AliExpress ↗',
       scrollForMore: 'Role para mais', errorContact: 'Não é possível contatar o AliExpress.',
@@ -75,7 +75,7 @@
 
     ru: { panelTitle: 'Smart Shopper', panelSubtitle: 'Тот же товар - другие продавцы ✓',
       tabAll: 'Все', tabCheapest: 'Дешевле', tabBestRated: 'Лучший рейтинг',
-      tabBestDiscount: 'Лучшая скидка', tabBestSelling: 'Хит продаж',
+      tabBestDiscount: 'Лучшая скидка', tabBestSelling: 'Хит продаж', tabSimilar: 'Похожие',
       noResults: 'Похожие товары не найдены.', noReviews: 'Нет отзывов',
       soldSuffix: 'продано', viewAll: 'Показать все на AliExpress ↗',
       scrollForMore: 'Прокрутите', errorContact: 'Не удаётся связаться с AliExpress.',
@@ -86,7 +86,7 @@
 
     ar: { panelTitle: 'Smart Shopper', panelSubtitle: 'نفس المنتج - بائعون آخرون ✓',
       tabAll: 'الكل', tabCheapest: 'الأرخص', tabBestRated: 'الأعلى تقييماً',
-      tabBestDiscount: 'أفضل خصم', tabBestSelling: 'الأكثر مبيعاً',
+      tabBestDiscount: 'أفضل خصم', tabBestSelling: 'الأكثر مبيعاً', tabSimilar: 'مشابهة',
       noResults: 'لم يتم العثور على منتجات مشابهة.', noReviews: 'لا توجد مراجعات',
       soldSuffix: 'مبيعاً', viewAll: 'عرض الكل على AliExpress ↗',
       scrollForMore: 'اسحب للمزيد', errorContact: 'تعذّر الاتصال بـ AliExpress.',
@@ -97,7 +97,7 @@
 
     he: { panelTitle: 'Smart Shopper', panelSubtitle: 'אותו מוצר - מוכרים אחרים ✓',
       tabAll: 'הכל', tabCheapest: 'הזול ביותר', tabBestRated: 'המדורג ביותר',
-      tabBestDiscount: 'ההנחה הטובה ביותר', tabBestSelling: 'הנמכר ביותר',
+      tabBestDiscount: 'ההנחה הטובה ביותר', tabBestSelling: 'הנמכר ביותר', tabSimilar: 'דומים',
       noResults: 'לא נמצאו מוצרים דומים.', noReviews: 'אין ביקורות',
       soldSuffix: 'נמכרו', viewAll: 'הצג הכל ב-AliExpress ↗',
       scrollForMore: 'גלול לעוד', errorContact: 'לא ניתן ליצור קשר עם AliExpress.',
@@ -108,7 +108,7 @@
 
     ja: { panelTitle: 'Smart Shopper', panelSubtitle: '同じ商品 - 別の販売者 ✓',
       tabAll: 'すべて', tabCheapest: '最安値', tabBestRated: '最高評価',
-      tabBestDiscount: '最大割引', tabBestSelling: 'ベストセラー',
+      tabBestDiscount: '最大割引', tabBestSelling: 'ベストセラー', tabSimilar: '類似品',
       noResults: '類似商品が見つかりませんでした。', noReviews: 'レビューなし',
       soldSuffix: '販売済み', viewAll: 'AliExpressですべて表示 ↗',
       scrollForMore: 'スクロールして表示', errorContact: 'AliExpressに接続できません。',
@@ -119,7 +119,7 @@
 
     ko: { panelTitle: 'Smart Shopper', panelSubtitle: '같은 상품 - 다른 판매자 ✓',
       tabAll: '전체', tabCheapest: '최저가', tabBestRated: '최고 평점',
-      tabBestDiscount: '최대 할인', tabBestSelling: '베스트셀러',
+      tabBestDiscount: '최대 할인', tabBestSelling: '베스트셀러', tabSimilar: '유사 상품',
       noResults: '유사 상품을 찾을 수 없습니다.', noReviews: '리뷰 없음',
       soldSuffix: '판매됨', viewAll: 'AliExpress에서 모두 보기 ↗',
       scrollForMore: '더 보려면 스크롤', errorContact: 'AliExpress에 연결할 수 없습니다.',
@@ -130,7 +130,7 @@
 
     th: { panelTitle: 'Smart Shopper', panelSubtitle: 'สินค้าเดียวกัน - ผู้ขายรายอื่น ✓',
       tabAll: 'ทั้งหมด', tabCheapest: 'ถูกที่สุด', tabBestRated: 'คะแนนสูงสุด',
-      tabBestDiscount: 'ส่วนลดดีที่สุด', tabBestSelling: 'ขายดีที่สุด',
+      tabBestDiscount: 'ส่วนลดดีที่สุด', tabBestSelling: 'ขายดีที่สุด', tabSimilar: 'คล้ายกัน',
       noResults: 'ไม่พบสินค้าที่คล้ายกัน', noReviews: 'ไม่มีความคิดเห็น',
       soldSuffix: 'ขายแล้ว', viewAll: 'ดูทั้งหมดบน AliExpress ↗',
       scrollForMore: 'เลื่อนเพื่อดูเพิ่ม', errorContact: 'ไม่สามารถติดต่อ AliExpress',
@@ -141,7 +141,7 @@
 
     vi: { panelTitle: 'Smart Shopper', panelSubtitle: 'Cùng sản phẩm - người bán khác ✓',
       tabAll: 'Tất cả', tabCheapest: 'Rẻ nhất', tabBestRated: 'Đánh giá cao',
-      tabBestDiscount: 'Giảm giá tốt nhất', tabBestSelling: 'Bán chạy nhất',
+      tabBestDiscount: 'Giảm giá tốt nhất', tabBestSelling: 'Bán chạy nhất', tabSimilar: 'Tương tự',
       noResults: 'Không tìm thấy sản phẩm tương tự.', noReviews: 'Không có đánh giá',
       soldSuffix: 'đã bán', viewAll: 'Xem tất cả trên AliExpress ↗',
       scrollForMore: 'Cuộn để xem thêm', errorContact: 'Không thể liên hệ AliExpress.',
@@ -152,7 +152,7 @@
 
     tr: { panelTitle: 'Smart Shopper', panelSubtitle: 'Aynı ürün - diğer satıcılar ✓',
       tabAll: 'Tümü', tabCheapest: 'En ucuz', tabBestRated: 'En iyi puan',
-      tabBestDiscount: 'En iyi indirim', tabBestSelling: 'En çok satan',
+      tabBestDiscount: 'En iyi indirim', tabBestSelling: 'En çok satan', tabSimilar: 'Benzer',
       noResults: 'Benzer ürün bulunamadı.', noReviews: 'Yorum yok',
       soldSuffix: 'satıldı', viewAll: "AliExpress'te tümünü gör ↗",
       scrollForMore: 'Daha fazla için kaydırın', errorContact: 'AliExpress ile iletişim kurulamıyor.',
@@ -163,7 +163,7 @@
 
     pl: { panelTitle: 'Smart Shopper', panelSubtitle: 'Ten sam produkt - inni sprzedawcy ✓',
       tabAll: 'Wszystkie', tabCheapest: 'Najtańsze', tabBestRated: 'Najlepiej oceniane',
-      tabBestDiscount: 'Najlepsza zniżka', tabBestSelling: 'Najczęściej kupowane',
+      tabBestDiscount: 'Najlepsza zniżka', tabBestSelling: 'Najczęściej kupowane', tabSimilar: 'Podobne',
       noResults: 'Nie znaleziono podobnych produktów.', noReviews: 'Brak opinii',
       soldSuffix: 'sprzedanych', viewAll: 'Zobacz wszystko na AliExpress ↗',
       scrollForMore: 'Przewiń', errorContact: 'Nie można skontaktować się z AliExpress.',
@@ -174,7 +174,7 @@
 
     nl: { panelTitle: 'Smart Shopper', panelSubtitle: 'Hetzelfde product - andere verkopers ✓',
       tabAll: 'Alle', tabCheapest: 'Goedkoopste', tabBestRated: 'Best beoordeeld',
-      tabBestDiscount: 'Beste korting', tabBestSelling: 'Best verkocht',
+      tabBestDiscount: 'Beste korting', tabBestSelling: 'Best verkocht', tabSimilar: 'Vergelijkbaar',
       noResults: 'Geen vergelijkbare producten gevonden.', noReviews: 'Geen beoordelingen',
       soldSuffix: 'verkocht', viewAll: 'Alles bekijken op AliExpress ↗',
       scrollForMore: 'Scroll voor meer', errorContact: 'Kan geen contact maken met AliExpress.',
@@ -185,7 +185,7 @@
 
     id: { panelTitle: 'Smart Shopper', panelSubtitle: 'Produk sama - penjual lain ✓',
       tabAll: 'Semua', tabCheapest: 'Termurah', tabBestRated: 'Rating terbaik',
-      tabBestDiscount: 'Diskon terbaik', tabBestSelling: 'Terlaris',
+      tabBestDiscount: 'Diskon terbaik', tabBestSelling: 'Terlaris', tabSimilar: 'Serupa',
       noResults: 'Tidak ada produk serupa ditemukan.', noReviews: 'Tidak ada ulasan',
       soldSuffix: 'terjual', viewAll: 'Lihat semua di AliExpress ↗',
       scrollForMore: 'Gulir untuk lebih', errorContact: 'Tidak dapat menghubungi AliExpress.',
@@ -196,7 +196,7 @@
 
     ms: { panelTitle: 'Smart Shopper', panelSubtitle: 'Produk sama - penjual lain ✓',
       tabAll: 'Semua', tabCheapest: 'Termurah', tabBestRated: 'Penilaian terbaik',
-      tabBestDiscount: 'Diskaun terbaik', tabBestSelling: 'Paling laris',
+      tabBestDiscount: 'Diskaun terbaik', tabBestSelling: 'Paling laris', tabSimilar: 'Serupa',
       noResults: 'Tiada produk serupa ditemui.', noReviews: 'Tiada ulasan',
       soldSuffix: 'terjual', viewAll: 'Lihat semua di AliExpress ↗',
       scrollForMore: 'Tatal untuk lebih', errorContact: 'Tidak dapat menghubungi AliExpress.',
@@ -207,7 +207,7 @@
 
     hi: { panelTitle: 'Smart Shopper', panelSubtitle: 'एक ही उत्पाद - अन्य विक्रेता ✓',
       tabAll: 'सभी', tabCheapest: 'सबसे सस्ता', tabBestRated: 'सर्वाधिक रेटेड',
-      tabBestDiscount: 'सर्वश्रेष्ठ छूट', tabBestSelling: 'सर्वाधिक बिकने वाला',
+      tabBestDiscount: 'सर्वश्रेष्ठ छूट', tabBestSelling: 'सर्वाधिक बिकने वाला', tabSimilar: 'समान',
       noResults: 'कोई समान उत्पाद नहीं मिला।', noReviews: 'कोई समीक्षा नहीं',
       soldSuffix: 'बिके', viewAll: 'AliExpress पर सभी देखें ↗',
       scrollForMore: 'और देखने के लिए स्क्रॉल करें', errorContact: 'AliExpress से संपर्क नहीं हो पा रहा।',
@@ -218,7 +218,7 @@
 
     bn: { panelTitle: 'Smart Shopper', panelSubtitle: 'একই পণ্য - অন্যান্য বিক্রেতা ✓',
       tabAll: 'সব', tabCheapest: 'সবচেয়ে সস্তা', tabBestRated: 'সর্বোচ্চ রেটেড',
-      tabBestDiscount: 'সেরা ছাড়', tabBestSelling: 'সর্বাধিক বিক্রীত',
+      tabBestDiscount: 'সেরা ছাড়', tabBestSelling: 'সর্বাধিক বিক্রীত', tabSimilar: 'অনুরূপ',
       noResults: 'কোনো অনুরূপ পণ্য পাওয়া যায়নি।', noReviews: 'কোনো পর্যালোচনা নেই',
       soldSuffix: 'বিক্রি', viewAll: 'AliExpress-এ সব দেখুন ↗',
       scrollForMore: 'আরও দেখতে স্ক্রল করুন', errorContact: 'AliExpress-এ যোগাযোগ করা যাচ্ছে না।',
@@ -229,7 +229,7 @@
 
     ur: { panelTitle: 'Smart Shopper', panelSubtitle: 'ایک ہی پروڈکٹ - دوسرے بیچنے والے ✓',
       tabAll: 'تمام', tabCheapest: 'سب سے سستا', tabBestRated: 'بہترین درجہ',
-      tabBestDiscount: 'بہترین رعایت', tabBestSelling: 'سب سے زیادہ فروخت',
+      tabBestDiscount: 'بہترین رعایت', tabBestSelling: 'سب سے زیادہ فروخت', tabSimilar: 'مشابہ',
       noResults: 'کوئی مشابہ پروڈکٹ نہیں ملا۔', noReviews: 'کوئی جائزہ نہیں',
       soldSuffix: 'فروخت', viewAll: 'AliExpress پر سب دیکھیں ↗',
       scrollForMore: 'مزید کے لیے اسکرول کریں', errorContact: 'AliExpress سے رابطہ نہیں ہو سکتا۔',
@@ -240,7 +240,7 @@
 
     fa: { panelTitle: 'Smart Shopper', panelSubtitle: 'همان محصول - فروشندگان دیگر ✓',
       tabAll: 'همه', tabCheapest: 'ارزان‌ترین', tabBestRated: 'بهترین امتیاز',
-      tabBestDiscount: 'بهترین تخفیف', tabBestSelling: 'پرفروش‌ترین',
+      tabBestDiscount: 'بهترین تخفیف', tabBestSelling: 'پرفروش‌ترین', tabSimilar: 'مشابه',
       noResults: 'محصول مشابهی یافت نشد.', noReviews: 'بدون نظر',
       soldSuffix: 'فروخته شده', viewAll: 'مشاهده همه در AliExpress ↗',
       scrollForMore: 'برای بیشتر اسکرول کنید', errorContact: 'امکان ارتباط با AliExpress نیست.',
@@ -251,7 +251,7 @@
 
     uk: { panelTitle: 'Smart Shopper', panelSubtitle: 'Той самий товар - інші продавці ✓',
       tabAll: 'Усі', tabCheapest: 'Найдешевші', tabBestRated: 'Найкращий рейтинг',
-      tabBestDiscount: 'Найкраща знижка', tabBestSelling: 'Хіт продажів',
+      tabBestDiscount: 'Найкраща знижка', tabBestSelling: 'Хіт продажів', tabSimilar: 'Схожі',
       noResults: 'Схожих товарів не знайдено.', noReviews: 'Немає відгуків',
       soldSuffix: 'продано', viewAll: 'Показати все на AliExpress ↗',
       scrollForMore: 'Прокрутіть', errorContact: 'Не вдається зв\'язатися з AliExpress.',
@@ -262,7 +262,7 @@
 
     el: { panelTitle: 'Smart Shopper', panelSubtitle: 'Ίδιο προϊόν - άλλοι πωλητές ✓',
       tabAll: 'Όλα', tabCheapest: 'Φθηνότερα', tabBestRated: 'Καλύτερα αξιολογημένα',
-      tabBestDiscount: 'Καλύτερη έκπτωση', tabBestSelling: 'Περισσότερο πουλημένα',
+      tabBestDiscount: 'Καλύτερη έκπτωση', tabBestSelling: 'Περισσότερο πουλημένα', tabSimilar: 'Παρόμοια',
       noResults: 'Δεν βρέθηκαν παρόμοια προϊόντα.', noReviews: 'Χωρίς κριτικές',
       soldSuffix: 'πωλήθηκαν', viewAll: 'Δείτε όλα στο AliExpress ↗',
       scrollForMore: 'Κύλιση για περισσότερα', errorContact: 'Δεν είναι δυνατή η επικοινωνία με το AliExpress.',
@@ -273,7 +273,7 @@
 
     cs: { panelTitle: 'Smart Shopper', panelSubtitle: 'Stejný produkt - jiní prodejci ✓',
       tabAll: 'Vše', tabCheapest: 'Nejlevnější', tabBestRated: 'Nejlépe hodnocené',
-      tabBestDiscount: 'Nejlepší sleva', tabBestSelling: 'Nejprodávanější',
+      tabBestDiscount: 'Nejlepší sleva', tabBestSelling: 'Nejprodávanější', tabSimilar: 'Podobné',
       noResults: 'Nebyly nalezeny podobné produkty.', noReviews: 'Žádné recenze',
       soldSuffix: 'prodáno', viewAll: 'Zobrazit vše na AliExpress ↗',
       scrollForMore: 'Posuňte pro více', errorContact: 'Nelze kontaktovat AliExpress.',
@@ -284,7 +284,7 @@
 
     sv: { panelTitle: 'Smart Shopper', panelSubtitle: 'Samma produkt - andra säljare ✓',
       tabAll: 'Alla', tabCheapest: 'Billigaste', tabBestRated: 'Bäst betyg',
-      tabBestDiscount: 'Bästa rabatten', tabBestSelling: 'Bästsäljande',
+      tabBestDiscount: 'Bästa rabatten', tabBestSelling: 'Bästsäljande', tabSimilar: 'Liknande',
       noResults: 'Inga liknande produkter hittades.', noReviews: 'Inga recensioner',
       soldSuffix: 'sålda', viewAll: 'Visa alla på AliExpress ↗',
       scrollForMore: 'Rulla för mer', errorContact: 'Kan inte kontakta AliExpress.',
@@ -295,7 +295,7 @@
 
     da: { panelTitle: 'Smart Shopper', panelSubtitle: 'Samme produkt - andre sælgere ✓',
       tabAll: 'Alle', tabCheapest: 'Billigste', tabBestRated: 'Bedst bedømt',
-      tabBestDiscount: 'Bedste rabat', tabBestSelling: 'Bedst sælgende',
+      tabBestDiscount: 'Bedste rabat', tabBestSelling: 'Bedst sælgende', tabSimilar: 'Lignende',
       noResults: 'Ingen lignende produkter fundet.', noReviews: 'Ingen anmeldelser',
       soldSuffix: 'solgt', viewAll: 'Se alle på AliExpress ↗',
       scrollForMore: 'Rul for mere', errorContact: 'Kan ikke kontakte AliExpress.',
@@ -306,7 +306,7 @@
 
     no: { panelTitle: 'Smart Shopper', panelSubtitle: 'Samme produkt - andre selgere ✓',
       tabAll: 'Alle', tabCheapest: 'Billigste', tabBestRated: 'Best vurdert',
-      tabBestDiscount: 'Beste rabatt', tabBestSelling: 'Bestselgende',
+      tabBestDiscount: 'Beste rabatt', tabBestSelling: 'Bestselgende', tabSimilar: 'Lignende',
       noResults: 'Ingen lignende produkter funnet.', noReviews: 'Ingen anmeldelser',
       soldSuffix: 'solgt', viewAll: 'Se alle på AliExpress ↗',
       scrollForMore: 'Rull for mer', errorContact: 'Kan ikke kontakte AliExpress.',
@@ -317,7 +317,7 @@
 
     fi: { panelTitle: 'Smart Shopper', panelSubtitle: 'Sama tuote - muut myyjät ✓',
       tabAll: 'Kaikki', tabCheapest: 'Halvimmat', tabBestRated: 'Parhaiten arvioidut',
-      tabBestDiscount: 'Paras alennus', tabBestSelling: 'Myydyimmät',
+      tabBestDiscount: 'Paras alennus', tabBestSelling: 'Myydyimmät', tabSimilar: 'Samanlaiset',
       noResults: 'Vastaavia tuotteita ei löytynyt.', noReviews: 'Ei arvosteluja',
       soldSuffix: 'myyty', viewAll: 'Näytä kaikki AliExpressissä ↗',
       scrollForMore: 'Vieritä lisää', errorContact: 'AliExpressiin ei saada yhteyttä.',
@@ -328,7 +328,7 @@
 
     hu: { panelTitle: 'Smart Shopper', panelSubtitle: 'Ugyanaz a termék - más eladók ✓',
       tabAll: 'Összes', tabCheapest: 'Legolcsóbb', tabBestRated: 'Legjobbra értékelt',
-      tabBestDiscount: 'Legjobb kedvezmény', tabBestSelling: 'Legkelendőbb',
+      tabBestDiscount: 'Legjobb kedvezmény', tabBestSelling: 'Legkelendőbb', tabSimilar: 'Hasonló',
       noResults: 'Nem található hasonló termék.', noReviews: 'Nincs értékelés',
       soldSuffix: 'eladva', viewAll: 'Összes megtekintése az AliExpress-en ↗',
       scrollForMore: 'Görgessen tovább', errorContact: 'Nem sikerül kapcsolatba lépni az AliExpress-szel.',
@@ -339,7 +339,7 @@
 
     ro: { panelTitle: 'Smart Shopper', panelSubtitle: 'Același produs - alți vânzători ✓',
       tabAll: 'Toate', tabCheapest: 'Cele mai ieftine', tabBestRated: 'Cele mai bine evaluate',
-      tabBestDiscount: 'Cea mai bună reducere', tabBestSelling: 'Cele mai vândute',
+      tabBestDiscount: 'Cea mai bună reducere', tabBestSelling: 'Cele mai vândute', tabSimilar: 'Similare',
       noResults: 'Nu s-au găsit produse similare.', noReviews: 'Fără recenzii',
       soldSuffix: 'vândute', viewAll: 'Vezi tot pe AliExpress ↗',
       scrollForMore: 'Derulează pentru mai mult', errorContact: 'Nu se poate contacta AliExpress.',
@@ -350,7 +350,7 @@
 
     bg: { panelTitle: 'Smart Shopper', panelSubtitle: 'Същият продукт - други продавачи ✓',
       tabAll: 'Всички', tabCheapest: 'Най-евтини', tabBestRated: 'Най-добре оценени',
-      tabBestDiscount: 'Най-добра отстъпка', tabBestSelling: 'Най-продавани',
+      tabBestDiscount: 'Най-добра отстъпка', tabBestSelling: 'Най-продавани', tabSimilar: 'Подобни',
       noResults: 'Не са намерени подобни продукти.', noReviews: 'Няма отзиви',
       soldSuffix: 'продадени', viewAll: 'Вижте всички в AliExpress ↗',
       scrollForMore: 'Превъртете за повече', errorContact: 'Не може да се свърже с AliExpress.',
@@ -361,7 +361,7 @@
 
     hr: { panelTitle: 'Smart Shopper', panelSubtitle: 'Isti proizvod - drugi prodavači ✓',
       tabAll: 'Sve', tabCheapest: 'Najjeftinije', tabBestRated: 'Najbolje ocijenjeno',
-      tabBestDiscount: 'Najbolji popust', tabBestSelling: 'Najprodavanije',
+      tabBestDiscount: 'Najbolji popust', tabBestSelling: 'Najprodavanije', tabSimilar: 'Slično',
       noResults: 'Nisu pronađeni slični proizvodi.', noReviews: 'Nema recenzija',
       soldSuffix: 'prodano', viewAll: 'Pogledaj sve na AliExpressu ↗',
       scrollForMore: 'Pomaknite za više', errorContact: 'Ne može se kontaktirati AliExpress.',
@@ -372,7 +372,7 @@
 
     sk: { panelTitle: 'Smart Shopper', panelSubtitle: 'Rovnaký produkt - iní predajcovia ✓',
       tabAll: 'Všetko', tabCheapest: 'Najlacnejšie', tabBestRated: 'Najlepšie hodnotené',
-      tabBestDiscount: 'Najlepšia zľava', tabBestSelling: 'Najpredávanejšie',
+      tabBestDiscount: 'Najlepšia zľava', tabBestSelling: 'Najpredávanejšie', tabSimilar: 'Podobné',
       noResults: 'Nenašli sa podobné produkty.', noReviews: 'Žiadne recenzie',
       soldSuffix: 'predané', viewAll: 'Zobraziť všetko na AliExpress ↗',
       scrollForMore: 'Posuňte pre viac', errorContact: 'Nedá sa kontaktovať AliExpress.',
@@ -383,7 +383,7 @@
 
     sl: { panelTitle: 'Smart Shopper', panelSubtitle: 'Isti izdelek - drugi prodajalci ✓',
       tabAll: 'Vse', tabCheapest: 'Najcenejše', tabBestRated: 'Najbolje ocenjeno',
-      tabBestDiscount: 'Najboljši popust', tabBestSelling: 'Najbolje prodajano',
+      tabBestDiscount: 'Najboljši popust', tabBestSelling: 'Najbolje prodajano', tabSimilar: 'Podobno',
       noResults: 'Ni podobnih izdelkov.', noReviews: 'Ni ocen',
       soldSuffix: 'prodano', viewAll: 'Poglej vse na AliExpress ↗',
       scrollForMore: 'Pomaknite za več', errorContact: 'Ni mogoče kontaktirati AliExpress.',
@@ -394,7 +394,7 @@
 
     lt: { panelTitle: 'Smart Shopper', panelSubtitle: 'Tas pats produktas - kiti pardavėjai ✓',
       tabAll: 'Visi', tabCheapest: 'Pigiausi', tabBestRated: 'Geriausiai įvertinti',
-      tabBestDiscount: 'Geriausia nuolaida', tabBestSelling: 'Perkamiausi',
+      tabBestDiscount: 'Geriausia nuolaida', tabBestSelling: 'Perkamiausi', tabSimilar: 'Panašūs',
       noResults: 'Panašių produktų nerasta.', noReviews: 'Nėra atsiliepimų',
       soldSuffix: 'parduota', viewAll: 'Peržiūrėti viską „AliExpress“ ↗',
       scrollForMore: 'Slinkite daugiau', errorContact: 'Nepavyksta susisiekti su „AliExpress“.',
@@ -405,7 +405,7 @@
 
     lv: { panelTitle: 'Smart Shopper', panelSubtitle: 'Tas pats produkts - citi pārdevēji ✓',
       tabAll: 'Visi', tabCheapest: 'Lētākie', tabBestRated: 'Vislabāk novērtētie',
-      tabBestDiscount: 'Labākā atlaide', tabBestSelling: 'Pārdotākie',
+      tabBestDiscount: 'Labākā atlaide', tabBestSelling: 'Pārdotākie', tabSimilar: 'Līdzīgi',
       noResults: 'Līdzīgi produkti nav atrasti.', noReviews: 'Nav atsauksmju',
       soldSuffix: 'pārdots', viewAll: 'Skatīt visu AliExpress ↗',
       scrollForMore: 'Ritiniet vairāk', errorContact: 'Nevar sazināties ar AliExpress.',
@@ -416,7 +416,7 @@
 
     et: { panelTitle: 'Smart Shopper', panelSubtitle: 'Sama toode - teised müüjad ✓',
       tabAll: 'Kõik', tabCheapest: 'Odavaimad', tabBestRated: 'Parimalt hinnatud',
-      tabBestDiscount: 'Parim allahindlus', tabBestSelling: 'Enimmüüdud',
+      tabBestDiscount: 'Parim allahindlus', tabBestSelling: 'Enimmüüdud', tabSimilar: 'Sarnased',
       noResults: 'Sarnaseid tooteid ei leitud.', noReviews: 'Arvustusi pole',
       soldSuffix: 'müüdud', viewAll: 'Vaata kõiki AliExpressis ↗',
       scrollForMore: 'Keri rohkem', errorContact: 'Ei saa AliExpressiga ühendust.',
