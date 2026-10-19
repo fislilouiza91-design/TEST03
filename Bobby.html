@@ -1,311 +1,135 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Product Page + Search Fallback)
+   Smart Shopper - Background Service Worker
+   (Smart Search Query Builder)
    ============================================ */
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; 
-const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
+const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
+const MAX_PAGES_TO_FETCH = 3; 
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
-    };
+const STOP_WORDS = new Set([
+  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
+  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
+  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
+  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
+  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
+  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
+  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
+]);
 
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
 
-    try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
-
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-          if (results && results.length > 0) {
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
-        }
-        const monthIndex = new Date().getUTCMonth(); 
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-        
-        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
-
-        const statements = body.all_items.map(c => {
-          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
-              price = excluded.price, seller_rating = excluded.seller_rating, 
-              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
-              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
-            isRelevant, now
-          );
-        });
-        if (statements.length > 0) await env.DB.batch(statements);
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
-        return json({ success: true }, 201, corsHeaders);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
-        const originalTitle = decodeURIComponent(url.searchParams.get('originalTitle') || '');
-        const country = (url.searchParams.get('country') || 'US').toUpperCase();
-        
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-
-        const cacheKey = `product_page:v4:${productId}`; 
-        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
-        if (cached) return json({ ok: true, items: cached, hasMore: false, source: 'kv' }, 200, corsHeaders);
-
-        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `en-US,en;q=0.9`; 
-        
-        let items = [];
-        let success = false;
-
-        // 🔥 المحاولة 1: سحب صفحة المنتج (متجر AliExpress)
-        const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
-        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, true);
-        
-        if (html) {
-            items = parseSimilarProducts(html, productId, originalTitle);
-            if (items.length > 0) success = true;
-        }
-
-        // 🔥 المحاولة 2: إذا فشلت صفحة المنتج، نبحث بالعنوان (سريع جداً)
-        if (!success) {
-            console.log("Fallback to fast search...");
-            const cleanTitle = originalTitle.replace(/[^\w\s]/gi, ' ').trim();
-            const searchQ = cleanTitle.split(/\s+/).slice(0, 5).join(' ');
-            const searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(searchQ).replace(/%20/g, '-')}.html?page=1`;
-            
-            const { html: searchHtml } = await fetchWithFallback(searchUrl, proxyCountry, acceptLanguage, env, false);
-            if (searchHtml) {
-                items = parseSearchItems(searchHtml).filter(it => it.id !== productId);
-            }
-        }
-        
-        // فلترة القطع الغيار (مثل الأشرطة)
-        if (originalTitle && items.length > 0) {
-            items = fastFilter(originalTitle, items);
-        }
-
-        if (items.length > 0) {
-            await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
-        }
-
-        // نرجع ok: true دائماً (حتى لو كانت المصفوفة فارغة) لكي لا تظهر رسالة الخطأ
-        return json({ ok: true, items, hasMore: false, source: 'network' }, 200, corsHeaders);
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
+  if (msg.type === 'CHECK_CACHE') {
+    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}`)
+      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
+      .then(data => sendResponse({ ok: true, data: data.data }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
   }
-};
 
-/* ============================================
-   دوال الفلترة والاستخراج
-   ============================================ */
-
-function fastFilter(originalTitle, items) {
-    const cleanTitle = originalTitle.toLowerCase();
-    const isOriginalCase = /case|coque|housse|etui|pouch|holder/i.test(cleanTitle);
-    const isOriginalTape = /tape|ruban|label|sticker|refill/i.test(cleanTitle);
-
-    return items.filter(it => {
-        const itemTitleLower = it.title.toLowerCase();
-        if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) return false;
-        if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) return false;
-        return true;
-    });
-}
-
-function parseSimilarProducts(html, currentProductId, originalTitle) {
-    const out = [];
-    const regex = /href="\/\/www\.aliexpress\.com\/item\/(\d+)\.html[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<div[^>]*title[^>]*>(.*?)<\/div>/gs;
-    let match;
+  if (msg.type === 'SMART_SEARCH') {
+    const searchQuery = buildSmartSearchQuery(msg.title);
+    console.log('🔍 Optimized Query:', searchQuery); 
     
-    while ((match = regex.exec(html)) !== null) {
-        const id = match[1];
-        if (id === currentProductId) continue; 
-        
-        let img = match[2];
-        if (img.startsWith('//')) img = 'https:' + img;
-        
-        let title = match[3].replace(/<[^>]*>/g, '').trim();
-        if (!title) title = 'Produit similaire';
-
-        const priceMatch = html.substring(match.index, match.index + 2000).match(/(?:US\s*\$|€|\$)\s*([\d.,]+)/);
-        const price = priceMatch ? priceMatch[1].replace(',', '.') : '';
-
-        if (!out.find(x => x.id === id)) {
-            out.push({
-                id, title, img, price, rating: '0', sold: '',
-                link: 'https://www.aliexpress.com/item/' + id + '.html',
-                isExact: true, finalScore: 100
-            });
-        }
-    }
-    return out;
-}
-
-function parseSearchItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-      let img = '';
-      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
-      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {}; const sale = p.salePrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html', isExact: true, finalScore: 100 });
-    } catch (e) {}
+    const q = encodeURIComponent(searchQuery);
+    const originalTitle = encodeURIComponent(msg.title);
+    const originalImage = encodeURIComponent(msg.originalImage || '');
+    
+    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&page=1&country=${msg.country}`)
+      .then(res => res.json())
+      .then(data => {
+         if (data.ok) {
+            sendResponse({ ok: true, items: data.items, hasMore: data.hasMore });
+            if (msg.productId && data.items.length > 0) saveToCloudflare(msg.productId, data.items);
+         } else {
+            sendResponse({ ok: false, error: data.error });
+         }
+      }).catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
   }
-  return out;
-}
 
-/* ============================================
-   الدوال المساعدة
-   ============================================ */
-async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, useBrowser = false) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
+  if (msg.type === 'SMART_LOAD_MORE') {
+    const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
+    if (nextPage > MAX_PAGES_TO_FETCH) return sendResponse({ ok: true, items: [], hasMore: false }); 
 
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (status.disabled) continue;
+    const searchQuery = buildSmartSearchQuery(msg.title);
+    const q = encodeURIComponent(searchQuery);
+    const originalTitle = encodeURIComponent(msg.title);
+    const originalImage = encodeURIComponent(msg.originalImage || '');
 
-    for (let attempt = 1; attempt <= 2; attempt++) { 
-      try {
-        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage, useBrowser);
-        if (html && html.length > 5000) return { html, provider: provider.name };
-      } catch (e) {
-        if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); break; }
-        if (e.message.includes('CAPTCHA')) break; 
-        if (attempt < 2) { await new Promise(r => setTimeout(r, 3000)); continue; } else { break; }
+    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&page=${nextPage}&country=${msg.country}`)
+      .then(res => res.json())
+      .then(data => {
+         if (data.ok) {
+            let existingIds = new Set(msg.existingIds);
+            let unique = data.items.filter(i => !existingIds.has(i.id));
+            sendResponse({ ok: true, items: unique, hasMore: data.hasMore });
+            if (msg.productId && unique.length > 0) saveToCloudflare(msg.productId, unique);
+         } else {
+            sendResponse({ ok: false, error: data.error, hasMore: false });
+         }
+      }).catch(err => sendResponse({ ok: false, error: err.message, hasMore: false }));
+    return true;
+  }
+});
+
+function buildSmartSearchQuery(title) {
+  if (!title) return '';
+  const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s\-]/g, ' ');
+  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
+  
+  const originalWords = title.split(/\s+/);
+  let brand = '';
+  for (let w of originalWords) {
+      let cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
+      if (cleanW.length >= 2 && cleanW.length <= 8 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
+          brand = cleanW.toLowerCase();
+          break;
       }
-    }
   }
-  return { html: null, provider: null };
-}
 
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
-    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
-    return '';
+  const models = words.filter(w => {
+      const hasLetters = /[a-z]/.test(w);
+      const hasNumbers = /[0-9]/.test(w);
+      return hasLetters && hasNumbers;
+  });
+  const model = models[0] || '';
+
+  let category = '';
+  if (/flash drive|usb drive|usb flash|cle usb|флешка/i.test(cleanTitle)) category = 'usb flash drive';
+  else if (/multimeter|voltmeter|мультиметр/i.test(cleanTitle)) category = 'multimeter';
+  else if (/label maker|dymo|принтер этикеток/i.test(cleanTitle)) category = 'label maker';
+  else if (/case|cover|coque|housse|чехол|حافظة/i.test(cleanTitle)) category = 'case';
+  else if (/tape|label tape|ruban|sticker|etiquette/i.test(cleanTitle)) category = 'label tape';
+  else if (/sweeper|vacuum|пилосос/i.test(cleanTitle)) category = 'vacuum cleaner';
+  else if (/earbuds|headphone|casque|навушники/i.test(cleanTitle)) category = 'earbuds';
+
+  let queryParts = [];
+  if (brand) queryParts.push(brand);
+  if (model && model !== brand) queryParts.push(model);
+  if (category) queryParts.push(category);
+
+  if (queryParts.length > 0) {
+      return queryParts.join(' ');
   }
-  return String(v);
+  
+  return words.slice(0, 3).join(' ');
 }
 
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker); if (i < 0) return null;
-  const j = html.indexOf('[', i); if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
-
-async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage, useBrowser) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', useBrowser ? 'true' : 'false');
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage, useBrowser) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country);
-  url.searchParams.set('render', useBrowser ? 'true' : 'false');
-  url.searchParams.set('keep_headers', 'true');
-  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function getProviderStatus(providerName, env) {
-  try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
-}
-
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
-}
-
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+function saveToCloudflare(productId, items) {
+  const payload = {
+    base_product_id: productId,
+    all_items: items.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    })),
+    relevant_items: items.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    }))
+  };
+  fetch(`${WORKER_URL}/api/competitors`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }).then(res => res.json()).then(data => console.log('💾 Saved:', data)).catch(console.error);
 }
