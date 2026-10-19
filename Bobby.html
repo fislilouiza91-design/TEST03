@@ -1,10 +1,10 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   (Broad Search for Trackers & Niche Products)
+   (Smart Category & Brand Search)
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
-const MAX_PAGES_TO_FETCH = 3; 
+const MAX_PAGES_TO_FETCH = 3; // الحد الأقصى 3 طلبات
 
 const STOP_WORDS = new Set([
   'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
@@ -12,8 +12,7 @@ const STOP_WORDS = new Set([
   'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
   'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
   '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
-  'wireless', 'bluetooth', 'earbuds', 'headphones', 'tws', 'anc', 'enc', 'hifi'
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
 ]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -28,6 +27,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'SMART_SEARCH') {
+    // 🔥 بناء استعلام البحث الذكي والشامل
     const searchQuery = buildSmartSearchQuery(msg.title);
     console.log('🔍 Comprehensive Search Query:', searchQuery); 
     
@@ -73,14 +73,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// 🔥 استراتيجية البحث الشاملة للمنتجات المتخصصة
+// 🔥 استراتيجية البحث الشاملة (الماركة + الموديل + التصنيف)
 function buildSmartSearchQuery(title) {
   if (!title) return '';
   
   const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
 
-  // 1. استخراج الماركة
+  // 1. استخراج الماركة (أول كلمة مكتوبة بحروف كبيرة)
   const originalWords = title.split(/\s+/);
   let brand = '';
   for (let w of originalWords) {
@@ -101,19 +101,22 @@ function buildSmartSearchQuery(title) {
       return hasLetters && hasNumbers && !isVersion && !isCapacity;
   });
 
-  // 3. تحديد التصنيف بدقة (للمتتبعات)
-  let category = 'earbuds'; // الافتراضي
+  // 3. تحديد التصنيف العام (لضمان جلب المنتجات المشابهة حتى لو لم تحمل نفس الاسم)
+  let category = '';
   if (cleanTitle.includes('airtag') || cleanTitle.includes('tracker') || cleanTitle.includes('locator') || cleanTitle.includes('find my')) category = 'tracker';
-  else if (cleanTitle.includes('casque') || cleanTitle.includes('headphone')) category = 'casque';
+  else if (cleanTitle.includes('casque') || cleanTitle.includes('headphone') || cleanTitle.includes('écouteur') || cleanTitle.includes('earbuds')) category = 'earbuds';
   else if (cleanTitle.includes('montre') || cleanTitle.includes('watch')) category = 'watch';
+  else if (cleanTitle.includes('chargeur') || cleanTitle.includes('charger')) category = 'charger';
 
-  // 4. بناء الاستعلام
-  if (models.length > 0) {
-      // البحث بالموديل والتصنيف (مثلاً e96a tracker) لنجد كل من يبيع نفس المنتج
+  // 4. بناء الاستعلام الذكي
+  if (models.length > 0 && category) {
+      // إذا كان لدينا موديل وتصنيف (مثل: e96a tracker) -> هذا سيجلب المطابق والمشابه
       return `${models[0]} ${category}`;
-  } else if (brand) {
-      // البحث بالماركة والتصنيف (مثلاً hoco tracker)
+  } else if (brand && category) {
+      // إذا لم نجد موديل، نبحث بالماركة والتصنيف (مثل: hoco tracker)
       return `${brand} ${category}`;
+  } else if (models.length > 0) {
+      return models[0];
   } else {
       return words.slice(0, 3).join(' ');
   }
