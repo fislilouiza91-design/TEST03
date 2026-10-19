@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (45% Balanced Filter)
+   Smart Shopper - Cloudflare Worker (Vision AI Confirmation)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -83,7 +83,7 @@ export default {
         if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
         const hash = await hashUrl(q);
-        const cacheKey = `search:v4:${hash}:${page}`; // 🔥 v4 لمنع الكاش القديم
+        const cacheKey = `search:v5:${hash}:${page}`; // v5
         
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
@@ -96,13 +96,12 @@ export default {
         if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
 
         const rawItems = parseItems(html);
-        // إذا أعاد الموقع 5 منتجات أو أكثر، فهناك صفحات أخرى
         const hasMore = rawItems.length > 5; 
         
         let items = rawItems;
         
         if (originalTitle && items.length > 0 && env.AI) {
-            items = await hybridFilter(originalTitle, originalImage, items, env);
+            items = await visionFilter(originalTitle, originalImage, items, env);
         }
         
         if (items.length > 0) {
@@ -120,9 +119,9 @@ export default {
 };
 
 /* ============================================
-   فلترة وترتيب الذكاء الاصطناعي (45% Balanced)
+   فلترة الذكاء الاصطناعي (نصي + بصري)
    ============================================ */
-async function hybridFilter(originalTitle, originalImage, items, env) {
+async function visionFilter(originalTitle, originalImage, items, env) {
     try {
         const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
         const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
@@ -148,13 +147,14 @@ async function hybridFilter(originalTitle, originalImage, items, env) {
 
         const originalImgId = extractImageId(originalImage);
 
+        // النصي
         const modelName = '@cf/baai/bge-m3';
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
         const itemTitles = items.map(it => it.title);
         const itemsEmbedding = await env.AI.run(modelName, { text: itemTitles });
         
-        const scoredItems = items.map((it, index) => {
+        const scoredItems = await Promise.all(items.map(async (it, index) => {
             const itemVector = itemsEmbedding.data[index];
             const aiScore = cosineSimilarity(baseVector, itemVector);
             
@@ -172,22 +172,47 @@ async function hybridFilter(originalTitle, originalImage, items, env) {
             if (hasBrand) finalScore += 30;
             if (isSameImage) finalScore = 1000; 
             
-            // المطابق: صورة متطابقة، أو موديل مع تشابه 50%، أو ماركة مع تشابه 60%
-            const isExact = !isAccessory && (isSameImage || (hasModel && aiScore > 0.50) || (hasBrand && aiScore > 0.60));
+            let isExact = !isAccessory && (isSameImage || (hasModel && aiScore > 0.50) || (hasBrand && aiScore > 0.60));
+
+            // 🔥 الفحص البصري (فقط إذا لم يكن مطابقاً نصياً)
+            if (!isExact && !isAccessory && originalImage && it.img) {
+                isExact = await checkVisualMatch(originalImage, it.img, env);
+            }
 
             return { ...it, aiScore, finalScore, isExact, isAccessory };
-        });
+        }));
 
-        // 🔥 نسبة القبول 45%: لطرد المنتجات المختلفة تماماً، مع الإبقاء على المشابهة
+        // نقبل المنتجات المطابقة، والمنتجات المشابهة فقط إذا كانت 45%+
         const filteredItems = scoredItems.filter(it => !it.isAccessory && (it.isExact || it.aiScore >= 0.45));
         
-        // الترتيب الهرمي (finalScore الأعلى أولاً)
         filteredItems.sort((a, b) => b.finalScore - a.finalScore);
         
         return filteredItems;
     } catch (err) {
         console.error("AI Filter Error:", err);
         return items; 
+    }
+}
+
+// 🔥 دالة الفحص البصري باستخدام LLaVA
+async function checkVisualMatch(image1, image2, env) {
+    try {
+        const prompt = `You are a strict product matching assistant. Look at these two product images.
+Image 1 is the original product.
+Image 2 is a competitor's product.
+Are they the EXACT SAME product? Answer only with YES or NO.`;
+        
+        const response = await env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', {
+            image: [image1, image2],
+            prompt: prompt,
+            max_tokens: 10
+        });
+        
+        const answer = response.description.toLowerCase();
+        return answer.includes('yes');
+    } catch (e) {
+        console.error("Vision AI Error:", e);
+        return false;
     }
 }
 
