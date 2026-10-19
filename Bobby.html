@@ -1,194 +1,456 @@
 /* ============================================
-   Smart Shopper - Fullscreen Page Module (With Similar Tab)
+   Smart Shopper - Fullscreen Page Styles
    ============================================ */
-(function () {
-  'use strict';
 
-  const FS_ID = 'ss-fullscreen';
-  let isOpen = false;
-  let items = [];
-  let activeTab = 0;
-  let fetching = false;
-  let currentProductPrice = 0;
-  let callbacks = {};
+#ss-fullscreen {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 2147483647;
+    background: #f5f5f7;
+    display: flex;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    direction: ltr;
+    user-select: none;
+}
 
-  const SVG = {
-    back: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
-    close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
-    all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
-    cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
-    rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
-    discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
-    selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
-    similar: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>'
-  };
+/* ============================================
+   Header
+   ============================================ */
+.ss-fs-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    background: linear-gradient(135deg, #2b2b2b, #1a1a1a);
+    color: white;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
 
-  const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
-  const U = () => window.SS_Utils || {};
+.ss-fs-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
 
-  const esc = (s) => U().esc ? U().esc(s) : String(s || '');
-  const num = (s) => U().num ? U().num(s) : 0;
-  const stars = (r) => U().stars ? U().stars(r) : '';
+.ss-fs-logo {
+    background: #ff4747;
+    color: white;
+    font-weight: 900;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+}
 
-  function buildDOM() {
-    let el = document.getElementById(FS_ID);
-    if (el) el.remove();
+.ss-fs-titles { display: flex; flex-direction: column; }
+.ss-fs-title { font-size: 17px; font-weight: 800; line-height: 1.2; color: #fff; }
+.ss-fs-sub { font-size: 11px; color: rgba(255, 255, 255, 0.65); margin-top: 2px; }
 
-    el = document.createElement('div');
-    el.id = FS_ID;
-    el.innerHTML = `
-      <div class="ss-fs-header">
-        <div class="ss-fs-header-left">
-          <div class="ss-fs-logo">S</div>
-          <div class="ss-fs-titles">
-            <div class="ss-fs-title">${esc(T('panelTitle'))}</div>
-            <div class="ss-fs-sub">${esc(T('panelSubtitle'))}</div>
-          </div>
-        </div>
-        <div class="ss-fs-header-btns">
-          <button class="ss-fs-btn ss-fs-back" id="ss-fs-back" title="${esc(T('back') || 'Back')}">
-            ${SVG.back} <span>${esc(T('back') || 'Retour')}</span>
-          </button>
-          <button class="ss-fs-btn ss-fs-close" id="ss-fs-close" title="${esc(T('close'))}">${SVG.close}</button>
-        </div>
-      </div>
-      <div class="ss-fs-tabs" id="ss-fs-tabs">
-        <span class="ss-fs-tab" data-i="0">${SVG.all}<span>${esc(T('tabAll'))}</span></span>
-        <span class="ss-fs-tab" data-i="1">${SVG.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
-        <span class="ss-fs-tab" data-i="2">${SVG.rated}<span>${esc(T('tabBestRated'))}</span></span>
-        <span class="ss-fs-tab" data-i="3">${SVG.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
-        <span class="ss-fs-tab" data-i="4">${SVG.selling}<span>${esc(T('tabBestSelling'))}</span></span>
-        <span class="ss-fs-tab" data-i="5">${SVG.similar}<span>${esc(T('tabSimilar') || 'Similar')}</span></span>
-      </div>
-      <div class="ss-fs-list" id="ss-fs-list"></div>
-      <div class="ss-fs-footer" id="ss-fs-footer"></div>
-    `;
-    document.documentElement.appendChild(el);
+.ss-fs-header-btns {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
 
-    document.getElementById('ss-fs-back').onclick = () => close();
-    document.getElementById('ss-fs-close').onclick = () => close();
-    document.getElementById('ss-fs-tabs').addEventListener('click', (e) => {
-      const tab = e.target.closest('.ss-fs-tab');
-      if (!tab) return;
-      const newTab = +tab.dataset.i;
-      if (newTab === activeTab) return;
-      activeTab = newTab;
-      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => x.classList.toggle('active', x === tab));
-      if (callbacks.onTabChange) callbacks.onTabChange(newTab);
-    });
+.ss-fs-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.12);
+    border: none;
+    color: #fff;
+    padding: 9px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: background 0.2s, transform 0.15s;
+    font-family: inherit;
+}
+.ss-fs-btn:hover {
+    background: rgba(255, 255, 255, 0.22);
+}
+.ss-fs-btn:active {
+    transform: scale(0.97);
+}
+.ss-fs-btn svg { display: block; }
 
-    document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => {
-      x.classList.toggle('active', +x.dataset.i === activeTab);
-    });
-  }
+.ss-fs-back {
+    background: rgba(255, 71, 71, 0.9);
+}
+.ss-fs-back:hover {
+    background: #ff4747;
+}
 
-  function buildCard(it) {
-    const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
-    const itemPrice = num(it.price);
-    const hasComparison = currentProductPrice > 0 && itemPrice > 0;
-    const isHigher = hasComparison && itemPrice > currentProductPrice;
-    const boxClass = isHigher ? 'ss-fs-price-box ss-fs-higher' : 'ss-fs-price-box';
+.ss-fs-close {
+    background: rgba(255, 255, 255, 0.12);
+}
+.ss-fs-close:hover {
+    background: #e81123;
+}
 
-    const priceBox = `
-      <div class="${boxClass}">
-        <div class="ss-fs-price">${it.price ? esc(it.price) + ' ' + (U().getCurrencySymbol ? U().getCurrencySymbol() : '$') : '—'}</div>
-        ${discountValue ? `<div class="ss-fs-discount">-${esc(discountValue)}%</div>` : ''}
-      </div>`;
+/* ============================================
+   Tabs
+   ============================================ */
+.ss-fs-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 14px 24px;
+    background: #fafafa;
+    border-bottom: 1px solid #e8e8e8;
+    flex-shrink: 0;
+}
 
-    let metaHtml = '';
-    if (it.rating) metaHtml += `<span class="ss-fs-stars">${stars(it.rating)}</span><span class="ss-fs-rating">${esc(it.rating)}</span>`;
-    if (it.sold) metaHtml += `<span class="ss-fs-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
-    if (!metaHtml) metaHtml = `<span class="ss-fs-no-info">${esc(T('noReviews'))}</span>`;
+.ss-fs-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #555;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+.ss-fs-tab svg { display: block; opacity: 0.75; }
+.ss-fs-tab:hover:not(.active) {
+    background: #f0f0f0;
+    border-color: #d0d0d0;
+}
+.ss-fs-tab.active {
+    background: #1a1a1a;
+    border-color: #1a1a1a;
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
+}
+.ss-fs-tab.active svg { opacity: 1; }
 
-    return `
-      <a class="ss-fs-card" href="${esc(it.link)}" target="_blank" rel="noopener">
-        <div class="ss-fs-thumb-wrapper">
-          ${it.img ? `<img class="ss-fs-thumb" src="${esc(it.img)}" alt="">` : `<div class="ss-fs-thumb ss-fs-thumb-empty">🛍</div>`}
-        </div>
-        <div class="ss-fs-card-content">
-          <div class="ss-fs-card-title">${esc(it.title || 'Produit similaire')}</div>
-          <div class="ss-fs-card-meta">${metaHtml}</div>
-        </div>
-        ${priceBox}
-      </a>`;
-  }
+/* ============================================
+   List - Grid Layout
+   ============================================ */
+.ss-fs-list {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 20px 24px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 14px;
+    align-content: start;
+    background: #f5f5f7;
+}
 
-  function renderList() {
-    const l = document.getElementById('ss-fs-list'); if (!l) return;
+.ss-fs-list::-webkit-scrollbar { width: 10px; }
+.ss-fs-list::-webkit-scrollbar-track { background: #f0f0f0; }
+.ss-fs-list::-webkit-scrollbar-thumb {
+    background: #c5c5c5;
+    border-radius: 5px;
+    border: 2px solid #f0f0f0;
+}
+.ss-fs-list::-webkit-scrollbar-thumb:hover { background: #999; }
 
-    if (items.length === 0) {
-      l.innerHTML = `<div class="ss-fs-msg">${esc(T('noResults'))}</div>`;
-      updateFooter();
-      return;
+/* ============================================
+   Product Card
+   ============================================ */
+.ss-fs-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    background: #fff;
+    border: 1px solid #e8e8e8;
+    border-radius: 12px;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s;
+    min-height: 112px;
+    animation: ss-fs-fade-in 0.3s ease;
+    overflow: hidden;
+}
+
+@keyframes ss-fs-fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.ss-fs-card:hover {
+    border-color: #ff4747;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(255, 71, 71, 0.12);
+}
+
+.ss-fs-thumb-wrapper {
+    flex-shrink: 0;
+    width: 84px;
+    height: 84px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+}
+.ss-fs-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.ss-fs-thumb-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+    color: #ccc;
+}
+
+.ss-fs-card-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    overflow: hidden;
+}
+
+.ss-fs-card-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: #222;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+    max-height: 36px;
+}
+
+.ss-fs-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    color: #666;
+    line-height: 1.2;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.ss-fs-stars {
+    color: #ffa726;
+    font-size: 13px;
+    letter-spacing: -0.5px;
+    flex-shrink: 0;
+}
+.ss-fs-rating {
+    color: #444;
+    font-weight: 700;
+    font-size: 11.5px;
+    flex-shrink: 0;
+}
+.ss-fs-sold { color: #888; font-size: 11px; flex-shrink: 0; }
+.ss-fs-no-info { color: #bbb; font-size: 11px; font-style: italic; }
+
+/* ============================================
+   Price Box
+   ============================================ */
+.ss-fs-price-box {
+    flex-shrink: 0;
+    background: #e8f8f0;
+    border: 1px solid #c6ecd8;
+    border-radius: 10px;
+    padding: 12px 14px;
+    min-width: 100px;
+    max-width: 130px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+
+.ss-fs-price {
+    font-size: 16px;
+    font-weight: 800;
+    color: #00a854;
+    line-height: 1.1;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ss-fs-discount {
+    font-size: 11px;
+    font-weight: 700;
+    color: #00a854;
+    line-height: 1.1;
+}
+
+.ss-fs-price-box.ss-fs-higher {
+    background: #fff0ee;
+    border-color: #ffd4cc;
+}
+.ss-fs-price-box.ss-fs-higher .ss-fs-price,
+.ss-fs-price-box.ss-fs-higher .ss-fs-discount {
+    color: #e62e04;
+}
+
+/* ============================================
+   Footer
+   ============================================ */
+.ss-fs-footer {
+    flex-shrink: 0;
+    padding: 16px 24px;
+    background: #fff;
+    border-top: 1px solid #e8e8e8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.ss-fs-load-more {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: linear-gradient(135deg, #ff5e3a, #e62e04);
+    color: #fff;
+    border: none;
+    border-radius: 26px;
+    padding: 13px 32px;
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+    box-shadow: 0 4px 14px rgba(230, 46, 4, 0.25);
+}
+.ss-fs-load-more:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(230, 46, 4, 0.35);
+}
+.ss-fs-load-more:active:not(:disabled) {
+    transform: translateY(0);
+}
+.ss-fs-load-more:disabled {
+    cursor: wait;
+    opacity: 0.7;
+}
+.ss-fs-load-more svg { display: block; }
+
+.ss-fs-loading {
+    background: #f0f0f0 !important;
+    color: #888 !important;
+    box-shadow: none !important;
+}
+.ss-fs-loading:hover { transform: none !important; }
+
+.ss-fs-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(0,0,0,0.15);
+    border-top-color: #888;
+    border-radius: 50%;
+    animation: ss-fs-spin 0.7s linear infinite;
+}
+@keyframes ss-fs-spin { to { transform: rotate(360deg); } }
+
+.ss-fs-no-more {
+    font-size: 13px;
+    color: #999;
+    font-weight: 600;
+    padding: 8px 0;
+}
+
+.ss-fs-counter {
+    font-size: 11.5px;
+    color: #888;
+    font-weight: 500;
+}
+
+.ss-fs-msg {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 80px 20px;
+    font-size: 15px;
+    color: #888;
+    font-weight: 500;
+}
+
+/* ============================================
+   Loading State
+   ============================================ */
+.ss-fs-loading-state {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 120px 20px;
+    gap: 20px;
+}
+
+.ss-fs-loading-spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid rgba(0, 0, 0, 0.08);
+    border-top-color: #e62e04;
+    border-radius: 50%;
+    animation: ss-fs-loading-spin 0.9s linear infinite;
+}
+
+@keyframes ss-fs-loading-spin {
+    to { transform: rotate(360deg); }
+}
+
+.ss-fs-loading-text {
+    font-size: 15px;
+    color: #666;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+@media (max-width: 1100px) {
+    .ss-fs-list {
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     }
+}
 
-    const fragment = document.createDocumentFragment();
-    const temp = document.createElement('div');
-    temp.innerHTML = items.map(it => buildCard(it)).join('');
-    while (temp.firstChild) fragment.appendChild(temp.firstChild);
-    
-    l.innerHTML = '';
-    l.appendChild(fragment);
-    updateFooter();
-  }
-
-  function updateFooter() {
-    const f = document.getElementById('ss-fs-footer'); if (!f) return;
-    let html = '';
-
-    if (fetching) {
-      html += `<div class="ss-fs-loading" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:13px; padding:15px;">
-        <span class="ss-fs-spinner"></span>
-        <span>${esc(T('loading'))}</span>
-      </div>`;
-    } else if (items.length > 0) {
-      html += `<div class="ss-fs-counter">${items.length} ${esc(T('soldSuffix')) === 'vendus' ? 'produits' : 'items'}</div>`;
+@media (max-width: 768px) {
+    .ss-fs-header { padding: 12px 16px; }
+    .ss-fs-tabs { padding: 12px 16px; gap: 6px; }
+    .ss-fs-tab { font-size: 11.5px; padding: 7px 12px; }
+    .ss-fs-list {
+        padding: 14px 16px;
+        grid-template-columns: 1fr;
+        gap: 10px;
     }
-
-    f.innerHTML = html;
-  }
-
-  function open(opts) {
-    opts = opts || {};
-    items = opts.items || [];
-    activeTab = opts.activeTab || 0;
-    fetching = !!opts.fetching;
-    currentProductPrice = opts.currentProductPrice || 0;
-    callbacks = {
-      onTabChange: opts.onTabChange || null,
-      onRefresh: opts.onRefresh || null,
-      onClose: opts.onClose || null
-    };
-
-    buildDOM();
-    renderList();
-    isOpen = true;
-    document.documentElement.style.overflow = 'hidden';
-  }
-
-  function close() {
-    const el = document.getElementById(FS_ID);
-    if (el) el.remove();
-    isOpen = false;
-    document.documentElement.style.overflow = '';
-    if (callbacks.onClose) callbacks.onClose();
-  }
-
-  function updateItems(newItems) {
-    items = newItems || [];
-    if (isOpen) renderList();
-  }
-
-  function setState(state) {
-    if (state.fetching !== undefined) fetching = state.fetching;
-    if (state.activeTab !== undefined) {
-      activeTab = state.activeTab;
-      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x =>
-        x.classList.toggle('active', +x.dataset.i === activeTab)
-      );
-    }
-    if (isOpen) updateFooter();
-  }
-
-  window.SS_Fullscreen = { open, close, updateItems, setState, isOpen: () => isOpen };
-})();
+    .ss-fs-card { min-height: 96px; padding: 12px; }
+    .ss-fs-thumb-wrapper { width: 70px; height: 70px; }
+    .ss-fs-thumb { font-size: 26px; }
+    .ss-fs-price-box { min-width: 86px; max-width: 110px; padding: 10px 12px; }
+    .ss-fs-price { font-size: 15px; }
+    .ss-fs-footer { padding: 12px 16px; }
+    .ss-fs-load-more { padding: 11px 24px; font-size: 12.5px; }
+    .ss-fs-back span { display: none; }
+    .ss-fs-title { font-size: 15px; }
+    .ss-fs-logo { width: 34px; height: 34px; font-size: 18px; }
+}
