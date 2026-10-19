@@ -1,10 +1,11 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Final Version)
-   D1 (Monthly Rotation) + KV Cache (5 Days) + Circuit Breaker
+   Smart Shopper - Cloudflare Worker (AI Powered)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; // 5 أيام (5 * 24 * 60 * 60)
+const CACHE_TTL = 432000; // 5 أيام
+const MAX_PAGES_TO_FETCH = 3; 
+const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
 
 export default {
   async fetch(request, env, ctx) {
@@ -21,248 +22,268 @@ export default {
       const url = new URL(request.url);
       const productId = url.searchParams.get('productId');
 
-      // ========================================
-      // 1. GET: جلب البيانات (من KV ثم D1)
-      // ========================================
+      // 1. جلب المنتجات المتشابهة المحفوظة
       if (request.method === 'GET' && url.pathname === '/api/competitors') {
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-
-        // البحث في الكاش السريع (5 أيام)
         const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) {
-          return json({ source: 'kv', data: cached }, 200, corsHeaders);
-        }
+        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
 
-        // البحث في قاعدة البيانات D1 (شهرية)
         try {
           const { results } = await env.DB.prepare(`
             SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
             UNION ALL
             SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
           `).bind(productId, productId).all();
-
           if (results && results.length > 0) {
-            // إذا وُجدت في D1، نضعها في الكاش لمدة 5 أيام ونرجعها
             ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
             return json({ source: 'd1', data: results }, 200, corsHeaders);
           }
-        } catch (e) {
-          return json({ error: e.message }, 500, corsHeaders);
-        }
-
+        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
         return json({ status: 'not_found' }, 404, corsHeaders);
       }
 
-      // ========================================
-      // 2. POST: حفظ البيانات (من الإضافة)
-      // ========================================
+      // 2. حفظ المنتجات المتشابهة
       if (request.method === 'POST' && url.pathname === '/api/competitors') {
         const body = await request.json();
-        if (!body.base_product_id || !body.competitors || !Array.isArray(body.competitors)) {
+        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
           return json({ error: 'Invalid data' }, 400, corsHeaders);
         }
-
-        // تحديد الجدول بناءً على الشهر الحالي (فردي أو زوجي)
         const monthIndex = new Date().getUTCMonth(); 
         const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
         const now = Math.floor(Date.now() / 1000);
+        
+        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
 
-        const statements = body.competitors.map(c => {
+        const statements = body.all_items.map(c => {
+          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
           return env.DB.prepare(`
-            INSERT INTO ${tableName} 
-            (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET
-            price = excluded.price, seller_rating = excluded.seller_rating,
-            coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount,
-            scraped_at = excluded.scraped_at
+            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
+              price = excluded.price, seller_rating = excluded.seller_rating, 
+              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
+              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
           `).bind(
-            body.base_product_id, c.competitor_id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url, c.coupon_code || null, c.coupon_discount || null, now
+            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
+            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
+            isRelevant, now
           );
         });
-
         if (statements.length > 0) await env.DB.batch(statements);
-        
-        // تحديث الكاش لمدة 5 أيام
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.competitors), { expirationTtl: CACHE_TTL });
-
-        return json({ success: true, count: body.competitors.length }, 201, corsHeaders);
+        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
+        return json({ success: true }, 201, corsHeaders);
       }
 
-      // ========================================
-      // 3. Fallback Scrape (Circuit Breaker + Fallback)
-      // ========================================
-      if (request.method === 'GET' && url.pathname === '/api/fallback-scrape') {
-        // استقبال الرابط الكامل من الإضافة (بحث أو منتج)
-        const requestUrl = url.searchParams.get('url');
-        const targetUrl = requestUrl ? requestUrl : `https://www.aliexpress.com/item/${productId}.html`;
+      // 3. جلب صفحة بحث + فلترة بالذكاء الاصطناعي
+      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
+        const q = url.searchParams.get('q');
+        const originalTitle = url.searchParams.get('originalTitle'); // نطلب العنوان الأصلي للمقارنة
+        const page = parseInt(url.searchParams.get('page') || '1');
+        const country = (url.searchParams.get('country') || 'US').toUpperCase();
         
-        const { html, provider } = await fetchWithFallback(targetUrl, env);
+        if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
+        if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
-        if (!html) {
-          return json({ error: 'All providers failed or disabled' }, 502, corsHeaders);
+        const hash = await hashUrl(q);
+        const cacheKey = `search:${hash}:${page}`;
+        
+        // التحقق من الكاش
+        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
+        if (cached) return json({ ok: true, items: cached, source: 'kv' }, 200, corsHeaders);
+
+        // جلب من ScrapingAnt
+        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
+        const acceptLanguage = `${country.toLowerCase()}-${country},${country.toLowerCase()};q=0.9,en;q=0.8`;
+        const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
+        
+        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
+        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
+
+        let items = parseItems(html);
+        
+        // 🔥 فلترة الذكاء الاصطناعي (AI Semantic Filtering)
+        if (originalTitle && items.length > 0 && env.AI) {
+            console.log(`🤖 Running AI Filter on ${items.length} items...`);
+            items = await filterWithAI(originalTitle, items, env);
+            console.log(`✅ AI kept ${items.length} relevant items.`);
+        }
+        
+        if (items.length > 0) {
+            await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
         }
 
-        return json({ provider, html }, 200, corsHeaders);
-      }
-
-      // ========================================
-      // 4. Health & Providers Status
-      // ========================================
-      if (url.pathname === '/health') {
-        const statuses = await getProviderStatuses(env);
-        return json({
-          status: 'ok',
-          providers: {
-            scrapingant: formatStatus('scrapingant', statuses.scrapingant, !!env.SCRAPINGANT_KEY),
-            scraperapi: formatStatus('scraperapi', statuses.scraperapi, !!env.SCRAPERAPI_KEY)
-          }
-        }, 200, corsHeaders);
-      }
-
-      if (url.pathname === '/reset-provider') {
-        const provider = url.searchParams.get('provider');
-        if (provider) await clearProviderStatus(provider, env);
-        return json({ success: true, reset: provider }, 200, corsHeaders);
+        return json({ ok: true, items, source: 'network' }, 200, corsHeaders);
       }
 
       return json({ error: 'Not found' }, 404, corsHeaders);
     } catch (e) {
       return json({ error: e.message }, 500, corsHeaders);
     }
-  },
-
-  // ========================================
-  // Cron: التنظيف التلقائي الشهري + فحص المزودين
-  // ========================================
-  async scheduled(event, env, ctx) {
-    const now = new Date();
-    
-    // 1. فحص المزودين (يعمل حسب الجدولة اليومية)
-    ctx.waitUntil(healthCheckAllProviders(env));
-
-    // 2. تدوير الجداول (في أول يوم من كل شهر)
-    if (now.getUTCDate() === 1) {
-      const monthIndex = now.getUTCMonth();
-      const tableToClear = monthIndex % 2 === 0 ? 'scraped_products_odd' : 'scraped_products_even';
-      
-      try {
-        await env.DB.batch([
-          env.DB.prepare(`DROP TABLE IF EXISTS ${tableToClear}`),
-          env.DB.prepare(`
-            CREATE TABLE ${tableToClear} (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              base_product_id TEXT NOT NULL,
-              competitor_id TEXT NOT NULL,
-              title TEXT,
-              price REAL,
-              currency TEXT DEFAULT 'USD',
-              seller_rating REAL,
-              product_url TEXT,
-              coupon_code TEXT,
-              coupon_discount TEXT,
-              is_relevant INTEGER DEFAULT 1,
-              scraped_at INTEGER NOT NULL,
-              UNIQUE(base_product_id, competitor_id)
-            )
-          `),
-          env.DB.prepare(`CREATE INDEX idx_${tableToClear}_base ON ${tableToClear}(base_product_id, is_relevant)`)
-        ]);
-        console.log(`[Cron] Table ${tableToClear} rotated successfully for the new month.`);
-      } catch(e) {
-        console.error('[Cron] Cleanup failed:', e);
-      }
-    }
   }
 };
 
 /* ============================================
-   Circuit Breaker + Fallback Logic
+   🤖 AI Filter Function (Embeddings)
    ============================================ */
-async function fetchWithFallback(targetUrl, env) {
+async function filterWithAI(originalTitle, items, env) {
+    try {
+        // 1. الحصول على "البصمة الرقمية" (Embedding) لعنوان المنتج الأصلي
+        const originalEmbedding = await env.AI.run('@cf/baai/bge-small-en-v1.5', { text: [originalTitle] });
+        const baseVector = originalEmbedding.data[0];
+
+        // 2. استخراج عناوين المنتجات المجلوبة
+        const itemTitles = items.map(it => it.title);
+
+        // 3. الحصول على "البصمات الرقمية" للمنتجات المجلوبة
+        const itemsEmbedding = await env.AI.run('@cf/baai/bge-small-en-v1.5', { text: itemTitles });
+        
+        // 4. حساب "التشابه الدلالي" (Cosine Similarity) بين منتجك وكل منتج
+        const scoredItems = items.map((it, index) => {
+            const itemVector = itemsEmbedding.data[index];
+            const similarity = cosineSimilarity(baseVector, itemVector);
+            return { ...it, aiScore: similarity };
+        });
+
+        // 5. الفلترة: نريد فقط المنتجات التي تشبه منتجك بنسبة 68% أو أكثر
+        // هذا الرقم يضمن استبعاد الخوذات وحافظات الساعات، ويبقي على السماعات المشابهة
+        const AI_THRESHOLD = 0.68; 
+        
+        const filteredItems = scoredItems.filter(it => it.aiScore >= AI_THRESHOLD);
+        
+        // ترتيب النتائج (الأكثر تشابهاً أولاً)
+        filteredItems.sort((a, b) => b.aiScore - a.aiScore);
+        
+        return filteredItems;
+    } catch (err) {
+        console.error("AI Filter Error:", err);
+        return items; // في حال حدوث خطأ، نرجع المنتجات الأصلية لكي لا تتعطل الإضافة
+    }
+}
+
+// دالة حساب التشابه بين متجهين (Cosine Similarity)
+function cosineSimilarity(vecA, vecB) {
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/* ============================================
+   Parse & Fetch Helpers
+   ============================================ */
+async function hashUrl(url) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      if (!o || typeof o !== 'object') continue;
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = clean(extractText(rawTitle));
+      let img = '';
+      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
+      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
+      if (img && img.startsWith('//')) img = 'https:' + img;
+
+      const p = o.prices || {}; const sale = p.salePrice || {};
+      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+
+      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
+    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
+    return '';
+  }
+  return String(v);
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker); if (i < 0) return null;
+  const j = html.indexOf('[', i); if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
     { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
   ].filter(p => p.key);
 
-  if (!providers.length) return { html: null, provider: null };
-
   for (const provider of providers) {
     const status = await getProviderStatus(provider.name, env);
-
     if (status.disabled) continue;
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const html = await provider.fn(targetUrl, provider.key);
-        if (html && html.length > 5000) {
-          return { html, provider: provider.name };
-        }
+        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
+        if (html && html.length > 5000) return { html, provider: provider.name };
       } catch (e) {
-        const errType = classifyError(e);
-
-        if (errType === 'QUOTA') {
-          await disableProvider(provider.name, e.message, status, env);
-          break;
-        }
-
-        if (errType === 'CONCURRENCY' || errType === 'RATE') {
-          if (attempt < 3) {
-            await sleep(2000 * attempt);
-            continue;
-          } else {
-            break;
-          }
-        }
-        break;
+        if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); break; }
+        if (attempt < 3) { await new Promise(r => setTimeout(r, 2000)); continue; } else { break; }
       }
     }
   }
   return { html: null, provider: null };
 }
 
-function classifyError(error) {
-  const msg = String(error.message || '').toLowerCase();
-  if (msg.includes('concurrency') || msg.includes('too many') || msg.includes('simultaneous') || msg.includes('busy')) return 'CONCURRENCY';
-  if (msg.includes('429') || msg.includes('rate limit')) return 'RATE';
-  if (msg.includes('credits exhausted') || msg.includes('quota exceeded') || msg.includes('out of credits') || msg.includes('no more credits') || msg.includes('insufficient credits') || msg.includes('credit balance') || msg.includes('subscription required') || msg.includes('payment required')) return 'QUOTA';
-  return 'OTHER';
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function fetchFromScrapingAnt(targetUrl, apiKey) {
+async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
   const url = new URL('https://api.scrapingant.com/v2/general');
   url.searchParams.set('x-api-key', apiKey);
   url.searchParams.set('url', targetUrl);
+  url.searchParams.set('proxy_country', country);
   url.searchParams.set('browser', 'false');
-
+  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
   const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    if (errBody.toLowerCase().includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (errBody.toLowerCase().includes('credits exhausted') || errBody.toLowerCase().includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.text();
 }
 
-async function fetchFromScraperAPI(targetUrl, apiKey) {
+async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
   const url = new URL('https://api.scraperapi.com/');
   url.searchParams.set('api_key', apiKey);
   url.searchParams.set('url', targetUrl);
+  url.searchParams.set('country_code', country);
   url.searchParams.set('render', 'false');
-
+  url.searchParams.set('keep_headers', 'true');
+  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
   const res = await fetch(url.toString());
-  if (!res.ok) {
-    const errBody = await res.text();
-    if (errBody.toLowerCase().includes('concurrency')) throw new Error(`CONCURRENCY_LIMIT`);
-    if (res.status === 429) throw new Error(`429 rate limit`);
-    if (errBody.toLowerCase().includes('credits exhausted') || errBody.toLowerCase().includes('quota exceeded')) throw new Error(`402 credits exhausted`);
-    throw new Error(`HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.text();
 }
 
@@ -273,70 +294,12 @@ async function getProviderStatus(providerName, env) {
   } catch (e) { return { disabled: false }; }
 }
 
-async function getProviderStatuses(env) {
-  return {
-    scrapingant: await getProviderStatus('scrapingant', env),
-    scraperapi: await getProviderStatus('scraperapi', env)
-  };
-}
-
 async function disableProvider(providerName, reason, currentStatus, env) {
   const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = {
-    disabled: true,
-    permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES,
-    reason: reason,
-    consecutiveFailures: consecutiveFailures,
-    disabledAt: currentStatus.disabledAt || new Date().toISOString(),
-    lastHealthCheck: new Date().toISOString()
-  };
+  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
   await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
 }
 
-async function clearProviderStatus(providerName, env) {
-  await env.COMPETITOR_CACHE.delete(`provider:${providerName}`);
-}
-
-function formatStatus(name, status, configured) {
-  return {
-    configured: configured,
-    disabled: status?.disabled || false,
-    permanent: status?.permanent || false,
-    consecutiveFailures: status?.consecutiveFailures || 0,
-    reason: status?.reason || null
-  };
-}
-
-async function healthCheckAllProviders(env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY }
-  ].filter(p => p.key);
-
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (!status.disabled || status.permanent) continue;
-
-    const recovered = await testProvider(provider.name, provider.key);
-    if (recovered) {
-      await clearProviderStatus(provider.name, env);
-    }
-  }
-}
-
-async function testProvider(providerName, apiKey) {
-  try {
-    const testUrl = 'https://httpbin.org/ip';
-    const html = providerName === 'scrapingant' 
-      ? await fetchFromScrapingAnt(testUrl, apiKey) 
-      : await fetchFromScraperAPI(testUrl, apiKey);
-    return html && html.length > 20;
-  } catch (e) { return false; }
-}
-
 function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
+  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 }
