@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Filtered Similar Products)
+   Smart Shopper - Cloudflare Worker (Instant Fast Filter)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -77,7 +77,7 @@ export default {
         
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
 
-        const cacheKey = `product_page:v2:${productId}`; // v2
+        const cacheKey = `product_page:v3:${productId}`; // v3
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: false, source: 'kv' }, 200, corsHeaders);
 
@@ -85,22 +85,18 @@ export default {
         const acceptLanguage = `en-US,en;q=0.9`; 
         const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
         
+        // نستخدم المتصفح الوهمي (browser: true) لجلب صفحة المنتج
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, true);
         
         if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
 
-        // 1. استخراج المنتجات المشابهة
-        let items = parseSimilarProducts(html, productId);
+        // 1. استخراج المنتجات المشابهة (سريع جداً)
+        let items = parseSimilarProducts(html, productId, originalTitle);
         
         // 2. إذا لم نجد منتجات، نبحث بالعنوان
         if (items.length === 0) {
             const exactTitle = extractExactEnglishTitle(html, originalTitle);
             items = await searchWithExactTitle(exactTitle, proxyCountry, acceptLanguage, env, productId);
-        }
-
-        // 🔥 3. تمرير المنتجات المستخرجة على فلتر الذكاء الاصطناعي لطرد الأشرطة والقطع الغيار
-        if (originalTitle && items.length > 0 && env.AI) {
-            items = await filterAccessories(originalTitle, items, env);
         }
         
         if (items.length > 0) {
@@ -118,16 +114,21 @@ export default {
 };
 
 /* ============================================
-   دوال استخراج البيانات والفلترة
+   دوال استخراج البيانات (فلترة فورية بدون AI)
    ============================================ */
 
-function parseSimilarProducts(html, currentProductId) {
+function parseSimilarProducts(html, currentProductId, originalTitle) {
     const out = [];
+    // البحث عن روابط المنتجات في قسم المشابهة
     const regex = /href="\/\/www\.aliexpress\.com\/item\/(\d+)\.html[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<div[^>]*title[^>]*>(.*?)<\/div>/gs;
     let match;
-    let count = 0;
     
-    while ((match = regex.exec(html)) !== null && count < 20) {
+    // تحديد نوع المنتج الأصلي لطرد القطع الغيار
+    const cleanTitle = originalTitle.toLowerCase();
+    const isOriginalCase = /case|coque|housse|etui|pouch|holder/i.test(cleanTitle);
+    const isOriginalTape = /tape|ruban|label|sticker|refill/i.test(cleanTitle);
+
+    while ((match = regex.exec(html)) !== null) {
         const id = match[1];
         if (id === currentProductId) continue; 
         
@@ -136,7 +137,17 @@ function parseSimilarProducts(html, currentProductId) {
         
         let title = match[3].replace(/<[^>]*>/g, '').trim();
         if (!title) title = 'Produit similaire';
+        
+        const itemTitleLower = title.toLowerCase();
 
+        // 🔥 الفلترة الفورية: طرد الأشرطة إذا كان الأصلي حافظة، والعكس صحيح
+        let isRelevant = true;
+        if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) isRelevant = false;
+        if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) isRelevant = false;
+
+        if (!isRelevant) continue;
+
+        // محاولة إيجاد السعر
         const priceMatch = html.substring(match.index, match.index + 2000).match(/(?:US\s*\$|€|\$)\s*([\d.,]+)/);
         const price = priceMatch ? priceMatch[1].replace(',', '.') : '';
 
@@ -146,7 +157,6 @@ function parseSimilarProducts(html, currentProductId) {
                 link: 'https://www.aliexpress.com/item/' + id + '.html',
                 isExact: true, finalScore: 100
             });
-            count++;
         }
     }
     return out;
@@ -171,38 +181,6 @@ async function searchWithExactTitle(title, proxyCountry, acceptLanguage, env, cu
     return rawItems.filter(it => it.id !== currentProductId);
 }
 
-// 🔥 الفلتر الذكي لطرد القطع الغيار (مثل الأشرطة)
-async function filterAccessories(originalTitle, items, env) {
-    try {
-        const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-        // هل المنتج الأصلي عبارة عن حافظة؟
-        const isOriginalCase = /case|coque|housse|etui|pouch|holder/i.test(cleanTitle);
-        // هل المنتج الأصلي عبارة عن شريط؟
-        const isOriginalTape = /tape|ruban|label|sticker|refill/i.test(cleanTitle);
-
-        const filtered = items.filter(it => {
-            const itemTitleLower = it.title.toLowerCase();
-            
-            // إذا كان الأصلي حافظة، نطرد الأشرطة والحبر
-            if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) {
-                return false;
-            }
-            // إذا كان الأصلي شريط، نطرد الحافظات
-            if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) {
-                return false;
-            }
-            return true;
-        });
-
-        return filtered;
-    } catch (e) {
-        return items;
-    }
-}
-
-/* ============================================
-   Parse Search Items & Helpers
-   ============================================ */
 function parseSearchItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
@@ -233,6 +211,9 @@ function parseSearchItems(html) {
   return out;
 }
 
+/* ============================================
+   الدوال المساعدة
+   ============================================ */
 async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, useBrowser = false) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
