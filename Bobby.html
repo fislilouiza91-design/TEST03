@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Content Script (Clean UI with Smart Ranking)
+   Smart Shopper - Content Script (Original Product Fallback)
    ============================================ */
 (function () {
   'use strict';
@@ -23,7 +23,7 @@
   let isBackgroundFetching = false;
   let nextPageToFetch = 2;
   let hasMoreResults = true;
-  const MAX_PAGES_TO_FETCH = 4; 
+  const MAX_PAGES_TO_FETCH = 5; 
 
   let searchState = { running: false, complete: false, startTime: 0, totalItems: 0 };
 
@@ -33,6 +33,7 @@
     rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
     discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
     selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
+    similar: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
     minimize: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     close: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
     expand: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>'
@@ -138,6 +139,7 @@
           <span class="ss-tab" data-i="2">${SVG_ICONS.rated}<span>${esc(T('tabBestRated'))}</span></span>
           <span class="ss-tab" data-i="3">${SVG_ICONS.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
           <span class="ss-tab" data-i="4">${SVG_ICONS.selling}<span>${esc(T('tabBestSelling'))}</span></span>
+          <span class="ss-tab" data-i="5">${SVG_ICONS.similar}<span>${esc(T('tabSimilar') || 'Similar')}</span></span>
         </div>
         <div class="ss-progress" id="ss-progress"></div>
         <div class="ss-list" id="ss-list"></div>
@@ -149,12 +151,21 @@
     document.getElementById('ss-expand').onclick = openFullscreen;
     document.getElementById('ss-tabs').addEventListener('click', onTabClick);
     makeDraggable(panel, document.getElementById('ss-header'));
+
+    document.getElementById('ss-list').addEventListener('scroll', (e) => {
+        const list = e.target;
+        if (list.scrollTop + list.clientHeight >= list.scrollHeight - 100) {
+            if (hasMoreResults && !isBackgroundFetching && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
+                prefetchBackgroundPages(); 
+            }
+        }
+    }, { passive: true });
   }
 
   function syncFullscreen() {
     if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) {
         window.SS_Fullscreen.updateItems(cachedSortedItems);
-        window.SS_Fullscreen.setState({ fetching: isBackgroundFetching });
+        window.SS_Fullscreen.setState({ fetching: isBackgroundFetching, activeTab: activeTab });
     }
   }
 
@@ -212,13 +223,46 @@
 
   function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
 
-  // 🔥 الترتيب الذكي (بدون شارات)
+  // 🔥 دالة الترتيب الذكية (مع التراجع للمنتج الأصلي فقط إذا لم توجد منتجات مطابقة)
   function applySort() {
+    const p = detectProduct();
+    const getOriginalProduct = () => {
+        if (!p) return [];
+        return [{
+            id: currentProductId || 'original',
+            title: p.title,
+            img: document.querySelector('meta[property="og:image"]')?.content || '',
+            price: p.price > 0 ? p.price.toString() : '',
+            rating: '0',
+            sold: '',
+            link: window.location.href,
+            isExact: true
+        }];
+    };
+
+    // 1. في وضع "الكل": نعرض المطابق أولاً، ثم المشابه. وإذا كانت القائمة فارغة نعرض المنتج الأصلي.
     if (activeTab === 0) { 
-        // في وضع "الكل"، نحافظ على ترتيب الذكاء الاصطناعي القادم من الخادم
-        cachedSortedItems = [...allFetchedItems]; 
+        cachedSortedItems = [...allFetchedItems].sort((a, b) => (b.isExact ? 1 : 0) - (a.isExact ? 1 : 0));
+        if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
         return; 
     }
+    
+    // 2. في وضع "مشابه": نعرض المشابه فقط. وإذا لم يوجد، نعرض المنتج الأصلي.
+    if (activeTab === 5) {
+        cachedSortedItems = allFetchedItems.filter(it => !it.isExact);
+        if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
+        return;
+    }
+    
+    // 3. بقية الأزرار (الأرخص، التقييم...)
+    const exactMatches = allFetchedItems.filter(it => it.isExact);
+    
+    // 🔥 إذا لم توجد منتجات مطابقة نهائياً، نعرض المنتج الأصلي وفقط.
+    if (exactMatches.length === 0) {
+        cachedSortedItems = getOriginalProduct();
+        return;
+    }
+    
     const sorters = [ 
         null, 
         (a, b) => num(a.price) - num(b.price), 
@@ -226,7 +270,7 @@
         (a, b) => discNum(b.discount) - discNum(a.discount), 
         (a, b) => soldNum(b.sold) - soldNum(a.sold) 
     ];
-    cachedSortedItems = [...allFetchedItems].sort(sorters[activeTab] || sorters[1]);
+    cachedSortedItems = [...exactMatches].sort(sorters[activeTab] || sorters[1]);
   }
 
   function buildCard(it, i) {
@@ -243,7 +287,6 @@
     if (it.sold) metaHtml += `<span class="ss-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
     if (!metaHtml) metaHtml = `<span class="ss-no-info">${esc(T('noReviews'))}</span>`;
 
-    // تم إزالة الشارة (Badge) ليكون التصميم نظيفاً
     return `<a class="ss-card" href="${esc(it.link)}" target="_blank" rel="noopener">
         <div class="ss-thumb-wrapper">${it.img ? `<img class="ss-thumb" data-src="${esc(it.img)}" alt="">` : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}</div>
         <div class="ss-card-content">
@@ -266,7 +309,7 @@
   function renderList(reset) {
     const l = document.getElementById('ss-list'); if (!l) return;
     applySort();
-    if (reset) { if (allFetchedItems.length === 0) { message(T('noResults')); return; } l.innerHTML = ''; setupImageObserver(); }
+    if (reset) { if (cachedSortedItems.length === 0) { message(T('noResults')); return; } l.innerHTML = ''; setupImageObserver(); }
     if (!cachedSortedItems.length) return;
 
     const temp = document.createElement('div');
@@ -287,7 +330,7 @@
           <span class="ss-spinner" style="border-top-color:#ff4747;"></span>
           <span>${esc(T('loading'))}</span>
         </div>`;
-      } else if (!hasMoreResults && allFetchedItems.length > 0) {
+      } else if (!hasMoreResults && cachedSortedItems.length > 0) {
         html += `<div class="ss-no-more" style="font-size:11px; color:#999; text-align:center; padding:10px;">${esc(T('noMoreResults'))}</div>`;
       }
     }
@@ -295,11 +338,9 @@
   }
 
   function prefetchBackgroundPages() {
-    if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) {
-        isBackgroundFetching = false; updateFooter(); syncFullscreen(); return;
-    }
+    if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) return;
+    
     isBackgroundFetching = true; updateFooter(); syncFullscreen();
-
     const existingIds = allFetchedItems.map(x => x.id);
 
     chrome.runtime.sendMessage({ 
@@ -309,15 +350,10 @@
         isBackgroundFetching = false;
         if (resp && resp.ok && resp.items && resp.items.length > 0) {
             allFetchedItems = allFetchedItems.concat(resp.items);
-            
-            // 🔥 الترتيب التلقائي: وضع الدقيق (isExact) في المقدمة دائماً
-            allFetchedItems.sort((a, b) => (b.isExact ? 1 : 0) - (a.isExact ? 1 : 0));
-            
             nextPageToFetch++;
             renderList(true); updateProgress(); syncFullscreen();
 
-            if (resp.hasMore && nextPageToFetch <= MAX_PAGES_TO_FETCH) setTimeout(prefetchBackgroundPages, 2000); 
-            else hasMoreResults = false;
+            if (!resp.hasMore) hasMoreResults = false; 
         } else { hasMoreResults = false; }
         updateFooter(); syncFullscreen();
     });
@@ -358,8 +394,6 @@
 
       renderList(true); updateProgress(); updateFooter(); syncFullscreen();
       if (allFetchedItems.length === 0) message(T('noResults'));
-      
-      if (hasMoreResults) prefetchBackgroundPages();
     });
   }
 
