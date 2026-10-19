@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Hierarchical & Continuous)
+   Smart Shopper - Cloudflare Worker (45% Balanced Filter)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -83,7 +83,7 @@ export default {
         if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
         const hash = await hashUrl(q);
-        const cacheKey = `search:v3:${hash}:${page}`;
+        const cacheKey = `search:v4:${hash}:${page}`; // 🔥 v4 لمنع الكاش القديم
         
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
@@ -96,7 +96,7 @@ export default {
         if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
 
         const rawItems = parseItems(html);
-        // 🔥 إذا أعاد الموقع 5 منتجات أو أكثر، فهناك صفحات أخرى
+        // إذا أعاد الموقع 5 منتجات أو أكثر، فهناك صفحات أخرى
         const hasMore = rawItems.length > 5; 
         
         let items = rawItems;
@@ -120,7 +120,7 @@ export default {
 };
 
 /* ============================================
-   فلترة وترتيب الذكاء الاصطناعي (Hierarchical)
+   فلترة وترتيب الذكاء الاصطناعي (45% Balanced)
    ============================================ */
 async function hybridFilter(originalTitle, originalImage, items, env) {
     try {
@@ -172,14 +172,14 @@ async function hybridFilter(originalTitle, originalImage, items, env) {
             if (hasBrand) finalScore += 30;
             if (isSameImage) finalScore = 1000; 
             
-            // نعتبره مطابقاً فقط إذا حقق شروطاً صارمة
+            // المطابق: صورة متطابقة، أو موديل مع تشابه 50%، أو ماركة مع تشابه 60%
             const isExact = !isAccessory && (isSameImage || (hasModel && aiScore > 0.50) || (hasBrand && aiScore > 0.60));
 
             return { ...it, aiScore, finalScore, isExact, isAccessory };
         });
 
-        // نقبل المنتجات التي ليست إكسسوار ولها درجة تشابه 20% فأكثر لتظهر في الأسفل
-        const filteredItems = scoredItems.filter(it => !it.isAccessory && (it.isExact || it.aiScore >= 0.20));
+        // 🔥 نسبة القبول 45%: لطرد المنتجات المختلفة تماماً، مع الإبقاء على المشابهة
+        const filteredItems = scoredItems.filter(it => !it.isAccessory && (it.isExact || it.aiScore >= 0.45));
         
         // الترتيب الهرمي (finalScore الأعلى أولاً)
         filteredItems.sort((a, b) => b.finalScore - a.finalScore);
