@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Smart Category Filter)
+   Smart Shopper - Cloudflare Worker (Auto-Translator)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -73,7 +73,7 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
-        const q = url.searchParams.get('q');
+        let q = url.searchParams.get('q');
         const originalTitle = url.searchParams.get('originalTitle'); 
         const originalImage = url.searchParams.get('originalImage');
         const page = parseInt(url.searchParams.get('page') || '1');
@@ -82,14 +82,17 @@ export default {
         if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
         if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
+        // 🔥 الترجمة التلقائية إلى الإنجليزية إذا كانت الكلمات تحتوي على حروف غير إنجليزية
+        q = await translateToEnglish(q, env);
+
         const hash = await hashUrl(q);
-        const cacheKey = `search:v7:${hash}:${page}`; // 🔥 v7 لإجبار النظام على جلب بيانات جديدة
+        const cacheKey = `search:v8:${hash}:${page}`; // v8
         
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
 
         const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `${country.toLowerCase()}-${country},${country.toLowerCase()};q=0.9,en;q=0.8`;
+        const acceptLanguage = `en-US,en;q=0.9`; // نبحث دائماً باللغة الإنجليزية
         const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
         
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
@@ -119,14 +122,35 @@ export default {
 };
 
 /* ============================================
-   فلترة الذكاء الاصطناعي (Smart Category Filter)
+   🔥 دالة الترجمة التلقائية
+   ============================================ */
+async function translateToEnglish(text, env) {
+    // إذا كان النص يحتوي على حروف غير إنجليزية (سيريلية، عربية، إلخ)
+    if (/[^\x00-\x7F]/.test(text)) {
+        try {
+            const response = await env.AI.run('@cf/meta/m2m100-1.2b', {
+                text: text,
+                source_lang: 'auto',
+                target_lang: 'en'
+            });
+            if (response && response.translated_text) {
+                return response.translated_text;
+            }
+        } catch (e) {
+            console.error("Translation error:", e);
+        }
+    }
+    return text;
+}
+
+/* ============================================
+   فلترة الذكاء الاصطناعي
    ============================================ */
 async function strictCategoryFilter(originalTitle, items, env) {
     try {
         const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
         const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
         
-        // 1. تحديد طبيعة المنتج الأصلي
         const isOriginalCover = /cover|housse|tarp|bâche/i.test(cleanTitle);
         const isOriginalCase = /case|coque|etui|pouch/i.test(cleanTitle);
 
@@ -149,7 +173,6 @@ async function strictCategoryFilter(originalTitle, items, env) {
         });
         const model = models[0] || '';
 
-        // النصي
         const modelName = '@cf/baai/bge-m3';
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
@@ -162,13 +185,10 @@ async function strictCategoryFilter(originalTitle, items, env) {
             
             const itemTitleLower = it.title.toLowerCase();
             
-            // 🔥 2. الاستبعاد القسري للفئات الخاطئة (طرد الأقنعة)
             const isWrongCategory = 
                 (isOriginalCover && /balaclava|mask|helmet|glove|jacket|pants|shoe|goggle|scarf/i.test(itemTitleLower)) ||
                 (isOriginalCase && /cover|tarp|balaclava|mask/i.test(itemTitleLower));
 
-            // 🔥 3. منع الإكسسوارات بذكاء
-            // إذا كان المنتج الأصلي غطاء، فلا نعتبر الغطاء إكسسواراً
             const isAccessory = 
                 (!isOriginalCover && /cover|tarp/i.test(itemTitleLower)) ||
                 (!isOriginalCase && /case|coque|etui|pouch/i.test(itemTitleLower)) ||
@@ -188,7 +208,6 @@ async function strictCategoryFilter(originalTitle, items, env) {
             return { ...it, aiScore, finalScore, isExact, isAccessory, isWrongCategory };
         });
 
-        // نقبل المنتجات التي ليست إكسسوار، وليست فئة خاطئة، وتشابهها 35%+
         const filteredItems = scoredItems.filter(it => 
             !it.isWrongCategory && 
             !it.isAccessory && 
