@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Product Page Scraper)
+   Smart Shopper - Cloudflare Worker (Filtered Similar Products)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -71,34 +71,36 @@ export default {
         return json({ success: true }, 201, corsHeaders);
       }
 
-      // 🔥 جلب صفحة المنتج مباشرة
       if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
         const originalTitle = decodeURIComponent(url.searchParams.get('originalTitle') || '');
         const country = (url.searchParams.get('country') || 'US').toUpperCase();
         
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
 
-        const cacheKey = `product_page:v1:${productId}`;
+        const cacheKey = `product_page:v2:${productId}`; // v2
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: false, source: 'kv' }, 200, corsHeaders);
 
         const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `en-US,en;q=0.9`; // نطلب النسخة الإنجليزية دائماً
+        const acceptLanguage = `en-US,en;q=0.9`; 
         const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
         
-        // نستخدم المتصفح الوهمي (browser: true) لأن صفحة المنتج تعتمد على JavaScript بشدة
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, true);
         
         if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
 
-        // 1. محاولة استخراج المنتجات المشابهة من داخل الصفحة
+        // 1. استخراج المنتجات المشابهة
         let items = parseSimilarProducts(html, productId);
         
-        // 2. إذا لم نجد منتجات مشابهة في الـ HTML، نستخرج العنوان الإنجليزي الدقيق ونبحث به
+        // 2. إذا لم نجد منتجات، نبحث بالعنوان
         if (items.length === 0) {
-            console.log("No similar products found in HTML, falling back to exact title search...");
             const exactTitle = extractExactEnglishTitle(html, originalTitle);
             items = await searchWithExactTitle(exactTitle, proxyCountry, acceptLanguage, env, productId);
+        }
+
+        // 🔥 3. تمرير المنتجات المستخرجة على فلتر الذكاء الاصطناعي لطرد الأشرطة والقطع الغيار
+        if (originalTitle && items.length > 0 && env.AI) {
+            items = await filterAccessories(originalTitle, items, env);
         }
         
         if (items.length > 0) {
@@ -116,20 +118,18 @@ export default {
 };
 
 /* ============================================
-   دوال استخراج البيانات من صفحة المنتج
+   دوال استخراج البيانات والفلترة
    ============================================ */
 
-// استخراج المنتجات المشابهة من الـ HTML
 function parseSimilarProducts(html, currentProductId) {
     const out = [];
-    // نبحث عن روابط المنتجات في قسم المشابهة
     const regex = /href="\/\/www\.aliexpress\.com\/item\/(\d+)\.html[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<div[^>]*title[^>]*>(.*?)<\/div>/gs;
     let match;
     let count = 0;
     
     while ((match = regex.exec(html)) !== null && count < 20) {
         const id = match[1];
-        if (id === currentProductId) continue; // استبعاد المنتج الحالي
+        if (id === currentProductId) continue; 
         
         let img = match[2];
         if (img.startsWith('//')) img = 'https:' + img;
@@ -137,7 +137,6 @@ function parseSimilarProducts(html, currentProductId) {
         let title = match[3].replace(/<[^>]*>/g, '').trim();
         if (!title) title = 'Produit similaire';
 
-        // محاولة إيجاد السعر (قد يكون صعباً بالـ Regex، نتركه فارغاً أو نستخدم Regex آخر)
         const priceMatch = html.substring(match.index, match.index + 2000).match(/(?:US\s*\$|€|\$)\s*([\d.,]+)/);
         const price = priceMatch ? priceMatch[1].replace(',', '.') : '';
 
@@ -153,7 +152,6 @@ function parseSimilarProducts(html, currentProductId) {
     return out;
 }
 
-// استخراج العنوان الإنجليزي الدقيق من الميتا تاج
 function extractExactEnglishTitle(html, fallbackTitle) {
     const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
     if (ogTitleMatch && ogTitleMatch[1]) {
@@ -162,9 +160,7 @@ function extractExactEnglishTitle(html, fallbackTitle) {
     return fallbackTitle;
 }
 
-// البحث بالعنوان الإنجليزي الدقيق (كخطة بديلة)
 async function searchWithExactTitle(title, proxyCountry, acceptLanguage, env, currentProductId) {
-    // تنظيف العنوان من الرموز الزائدة
     const q = encodeURIComponent(title.replace(/[^\w\s]/gi, ' ').slice(0, 50));
     const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=1`;
     
@@ -175,8 +171,37 @@ async function searchWithExactTitle(title, proxyCountry, acceptLanguage, env, cu
     return rawItems.filter(it => it.id !== currentProductId);
 }
 
+// 🔥 الفلتر الذكي لطرد القطع الغيار (مثل الأشرطة)
+async function filterAccessories(originalTitle, items, env) {
+    try {
+        const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+        // هل المنتج الأصلي عبارة عن حافظة؟
+        const isOriginalCase = /case|coque|housse|etui|pouch|holder/i.test(cleanTitle);
+        // هل المنتج الأصلي عبارة عن شريط؟
+        const isOriginalTape = /tape|ruban|label|sticker|refill/i.test(cleanTitle);
+
+        const filtered = items.filter(it => {
+            const itemTitleLower = it.title.toLowerCase();
+            
+            // إذا كان الأصلي حافظة، نطرد الأشرطة والحبر
+            if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) {
+                return false;
+            }
+            // إذا كان الأصلي شريط، نطرد الحافظات
+            if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) {
+                return false;
+            }
+            return true;
+        });
+
+        return filtered;
+    } catch (e) {
+        return items;
+    }
+}
+
 /* ============================================
-   Parse Search Items (للبحث البديل)
+   Parse Search Items & Helpers
    ============================================ */
 function parseSearchItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
@@ -208,9 +233,6 @@ function parseSearchItems(html) {
   return out;
 }
 
-/* ============================================
-   الدوال المساعدة الأساسية
-   ============================================ */
 async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, useBrowser = false) {
   const providers = [
     { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
