@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Vision AI Confirmation)
+   Smart Shopper - Cloudflare Worker (Strict Category Filtering)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -83,7 +83,7 @@ export default {
         if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
         const hash = await hashUrl(q);
-        const cacheKey = `search:v5:${hash}:${page}`; // v5
+        const cacheKey = `search:v6:${hash}:${page}`; // 🔥 v6 لمنع الكاش القديم
         
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
@@ -101,7 +101,7 @@ export default {
         let items = rawItems;
         
         if (originalTitle && items.length > 0 && env.AI) {
-            items = await visionFilter(originalTitle, originalImage, items, env);
+            items = await strictCategoryFilter(originalTitle, items, env);
         }
         
         if (items.length > 0) {
@@ -119,13 +119,18 @@ export default {
 };
 
 /* ============================================
-   فلترة الذكاء الاصطناعي (نصي + بصري)
+   فلترة الذكاء الاصطناعي (استبعاد الفئات الخاطئة)
    ============================================ */
-async function visionFilter(originalTitle, originalImage, items, env) {
+async function strictCategoryFilter(originalTitle, items, env) {
     try {
         const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
         const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
         
+        // 1. تحديد طبيعة المنتج الأصلي
+        const isOriginalCover = /cover|housse|tarp|bâche/i.test(cleanTitle);
+        const isOriginalCase = /case|coque|etui|pouch/i.test(cleanTitle);
+        const isOriginalMask = /mask|masque|balaclava|helmet|cagoule/i.test(cleanTitle);
+
         const originalWords = originalTitle.split(/\s+/);
         let brand = '';
         for (let w of originalWords) {
@@ -145,8 +150,6 @@ async function visionFilter(originalTitle, originalImage, items, env) {
         });
         const model = models[0] || '';
 
-        const originalImgId = extractImageId(originalImage);
-
         // النصي
         const modelName = '@cf/baai/bge-m3';
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
@@ -154,36 +157,41 @@ async function visionFilter(originalTitle, originalImage, items, env) {
         const itemTitles = items.map(it => it.title);
         const itemsEmbedding = await env.AI.run(modelName, { text: itemTitles });
         
-        const scoredItems = await Promise.all(items.map(async (it, index) => {
+        const scoredItems = items.map((it, index) => {
             const itemVector = itemsEmbedding.data[index];
             const aiScore = cosineSimilarity(baseVector, itemVector);
             
             const itemTitleLower = it.title.toLowerCase();
+            
+            // 🔥 2. الاستبعاد القسري للفئات الخاطئة (السر هنا)
+            const isWrongCategory = 
+                (isOriginalCover && /balaclava|mask|helmet|glove|jacket|pants|shoe|goggle|scarf/i.test(itemTitleLower)) ||
+                (isOriginalCase && /cover|tarp|balaclava|mask/i.test(itemTitleLower)) ||
+                (isOriginalMask && /cover|tarp|case/i.test(itemTitleLower));
+
             const isAccessory = /case|cover|protector|cable|charger|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitleLower);
 
             const hasModel = model ? itemTitleLower.includes(model) : false;
             const hasBrand = brand ? itemTitleLower.includes(brand) : false;
 
-            const itemImgId = extractImageId(it.img);
-            const isSameImage = originalImgId && itemImgId && originalImgId === itemImgId;
-
             let finalScore = (aiScore * 100);
             if (hasModel) finalScore += 50; 
             if (hasBrand) finalScore += 30;
-            if (isSameImage) finalScore = 1000; 
             
-            let isExact = !isAccessory && (isSameImage || (hasModel && aiScore > 0.50) || (hasBrand && aiScore > 0.60));
+            // إذا كان من فئة خاطئة، نعطيه درجة 0
+            if (isWrongCategory) finalScore = 0;
 
-            // 🔥 الفحص البصري (فقط إذا لم يكن مطابقاً نصياً)
-            if (!isExact && !isAccessory && originalImage && it.img) {
-                isExact = await checkVisualMatch(originalImage, it.img, env);
-            }
+            const isExact = !isWrongCategory && !isAccessory && (hasModel || (hasBrand && aiScore > 0.60));
 
-            return { ...it, aiScore, finalScore, isExact, isAccessory };
-        }));
+            return { ...it, aiScore, finalScore, isExact, isAccessory, isWrongCategory };
+        });
 
-        // نقبل المنتجات المطابقة، والمنتجات المشابهة فقط إذا كانت 45%+
-        const filteredItems = scoredItems.filter(it => !it.isAccessory && (it.isExact || it.aiScore >= 0.45));
+        // نقبل المنتجات التي ليست إكسسوار، وليست فئة خاطئة، وتشابهها 45%+
+        const filteredItems = scoredItems.filter(it => 
+            !it.isWrongCategory && 
+            !it.isAccessory && 
+            (it.isExact || it.aiScore >= 0.45)
+        );
         
         filteredItems.sort((a, b) => b.finalScore - a.finalScore);
         
@@ -192,35 +200,6 @@ async function visionFilter(originalTitle, originalImage, items, env) {
         console.error("AI Filter Error:", err);
         return items; 
     }
-}
-
-// 🔥 دالة الفحص البصري باستخدام LLaVA
-async function checkVisualMatch(image1, image2, env) {
-    try {
-        const prompt = `You are a strict product matching assistant. Look at these two product images.
-Image 1 is the original product.
-Image 2 is a competitor's product.
-Are they the EXACT SAME product? Answer only with YES or NO.`;
-        
-        const response = await env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', {
-            image: [image1, image2],
-            prompt: prompt,
-            max_tokens: 10
-        });
-        
-        const answer = response.description.toLowerCase();
-        return answer.includes('yes');
-    } catch (e) {
-        console.error("Vision AI Error:", e);
-        return false;
-    }
-}
-
-function extractImageId(url) {
-    if (!url) return null;
-    const match = url.match(/\/kf\/([A-Za-z0-9]+)\./);
-    if (match && match[1]) return match[1].slice(0, 10);
-    return null;
 }
 
 function cosineSimilarity(vecA, vecB) {
