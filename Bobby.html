@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Instant Fast Filter)
+   Smart Shopper - Cloudflare Worker (Product Page + Search Fallback)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -77,32 +77,48 @@ export default {
         
         if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
 
-        const cacheKey = `product_page:v3:${productId}`; // v3
+        const cacheKey = `product_page:v4:${productId}`; 
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: false, source: 'kv' }, 200, corsHeaders);
 
         const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
         const acceptLanguage = `en-US,en;q=0.9`; 
-        const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
         
-        // نستخدم المتصفح الوهمي (browser: true) لجلب صفحة المنتج
+        let items = [];
+        let success = false;
+
+        // 🔥 المحاولة 1: سحب صفحة المنتج (متجر AliExpress)
+        const targetUrl = `https://www.aliexpress.com/item/${productId}.html`;
         const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, true);
         
-        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
+        if (html) {
+            items = parseSimilarProducts(html, productId, originalTitle);
+            if (items.length > 0) success = true;
+        }
 
-        // 1. استخراج المنتجات المشابهة (سريع جداً)
-        let items = parseSimilarProducts(html, productId, originalTitle);
-        
-        // 2. إذا لم نجد منتجات، نبحث بالعنوان
-        if (items.length === 0) {
-            const exactTitle = extractExactEnglishTitle(html, originalTitle);
-            items = await searchWithExactTitle(exactTitle, proxyCountry, acceptLanguage, env, productId);
+        // 🔥 المحاولة 2: إذا فشلت صفحة المنتج، نبحث بالعنوان (سريع جداً)
+        if (!success) {
+            console.log("Fallback to fast search...");
+            const cleanTitle = originalTitle.replace(/[^\w\s]/gi, ' ').trim();
+            const searchQ = cleanTitle.split(/\s+/).slice(0, 5).join(' ');
+            const searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(searchQ).replace(/%20/g, '-')}.html?page=1`;
+            
+            const { html: searchHtml } = await fetchWithFallback(searchUrl, proxyCountry, acceptLanguage, env, false);
+            if (searchHtml) {
+                items = parseSearchItems(searchHtml).filter(it => it.id !== productId);
+            }
         }
         
+        // فلترة القطع الغيار (مثل الأشرطة)
+        if (originalTitle && items.length > 0) {
+            items = fastFilter(originalTitle, items);
+        }
+
         if (items.length > 0) {
             await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
         }
 
+        // نرجع ok: true دائماً (حتى لو كانت المصفوفة فارغة) لكي لا تظهر رسالة الخطأ
         return json({ ok: true, items, hasMore: false, source: 'network' }, 200, corsHeaders);
       }
 
@@ -114,20 +130,27 @@ export default {
 };
 
 /* ============================================
-   دوال استخراج البيانات (فلترة فورية بدون AI)
+   دوال الفلترة والاستخراج
    ============================================ */
 
-function parseSimilarProducts(html, currentProductId, originalTitle) {
-    const out = [];
-    // البحث عن روابط المنتجات في قسم المشابهة
-    const regex = /href="\/\/www\.aliexpress\.com\/item\/(\d+)\.html[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<div[^>]*title[^>]*>(.*?)<\/div>/gs;
-    let match;
-    
-    // تحديد نوع المنتج الأصلي لطرد القطع الغيار
+function fastFilter(originalTitle, items) {
     const cleanTitle = originalTitle.toLowerCase();
     const isOriginalCase = /case|coque|housse|etui|pouch|holder/i.test(cleanTitle);
     const isOriginalTape = /tape|ruban|label|sticker|refill/i.test(cleanTitle);
 
+    return items.filter(it => {
+        const itemTitleLower = it.title.toLowerCase();
+        if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) return false;
+        if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) return false;
+        return true;
+    });
+}
+
+function parseSimilarProducts(html, currentProductId, originalTitle) {
+    const out = [];
+    const regex = /href="\/\/www\.aliexpress\.com\/item\/(\d+)\.html[^>]*>.*?<img[^>]+src="([^"]+)"[^>]*>.*?<div[^>]*title[^>]*>(.*?)<\/div>/gs;
+    let match;
+    
     while ((match = regex.exec(html)) !== null) {
         const id = match[1];
         if (id === currentProductId) continue; 
@@ -137,17 +160,7 @@ function parseSimilarProducts(html, currentProductId, originalTitle) {
         
         let title = match[3].replace(/<[^>]*>/g, '').trim();
         if (!title) title = 'Produit similaire';
-        
-        const itemTitleLower = title.toLowerCase();
 
-        // 🔥 الفلترة الفورية: طرد الأشرطة إذا كان الأصلي حافظة، والعكس صحيح
-        let isRelevant = true;
-        if (isOriginalCase && /tape|ruban|refill|sticker|ink|ribbon/i.test(itemTitleLower)) isRelevant = false;
-        if (isOriginalTape && /case|coque|housse|etui|pouch|holder/i.test(itemTitleLower)) isRelevant = false;
-
-        if (!isRelevant) continue;
-
-        // محاولة إيجاد السعر
         const priceMatch = html.substring(match.index, match.index + 2000).match(/(?:US\s*\$|€|\$)\s*([\d.,]+)/);
         const price = priceMatch ? priceMatch[1].replace(',', '.') : '';
 
@@ -160,25 +173,6 @@ function parseSimilarProducts(html, currentProductId, originalTitle) {
         }
     }
     return out;
-}
-
-function extractExactEnglishTitle(html, fallbackTitle) {
-    const ogTitleMatch = html.match(/<meta property="og:title" content="([^"]+)"/i);
-    if (ogTitleMatch && ogTitleMatch[1]) {
-        return ogTitleMatch[1].replace(/&quot;/g, '"').trim();
-    }
-    return fallbackTitle;
-}
-
-async function searchWithExactTitle(title, proxyCountry, acceptLanguage, env, currentProductId) {
-    const q = encodeURIComponent(title.replace(/[^\w\s]/gi, ' ').slice(0, 50));
-    const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=1`;
-    
-    const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env, false);
-    if (!html) return [];
-
-    const rawItems = parseSearchItems(html);
-    return rawItems.filter(it => it.id !== currentProductId);
 }
 
 function parseSearchItems(html) {
