@@ -1,18 +1,21 @@
 /* ============================================
    Smart Shopper - Background Service Worker
-   (Multilingual Smart Search)
+   (Aggressive Keyword Extraction)
    ============================================ */
 
 const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
 const MAX_PAGES_TO_FETCH = 3; 
 
+// قائمة كلمات الحشو والصفات التي تدمر البحث (يجب حذفها)
 const STOP_WORDS = new Set([
   'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
   'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
   'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
   'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
   '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
+  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
+  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
 ]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -28,7 +31,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'SMART_SEARCH') {
     const searchQuery = buildSmartSearchQuery(msg.title);
-    console.log('🔍 Multilingual Search Query:', searchQuery); 
+    console.log('✂️ Cleaned Search Query:', searchQuery); 
     
     const q = encodeURIComponent(searchQuery);
     const originalTitle = encodeURIComponent(msg.title);
@@ -72,14 +75,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// 🔥 استراتيجية البحث الشاملة مع قاموس الترجمة
+// 🔥 خوارزمية "المقص" لاستخراج الكلمات الجوهرية فقط
 function buildSmartSearchQuery(title) {
   if (!title) return '';
   
   const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
   const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
 
-  // 1. استخراج الماركة (عادة بالإنجليزية في كل اللغات)
+  // محاولة إيجاد ماركة (حروف كبيرة)
   const originalWords = title.split(/\s+/);
   let brand = '';
   for (let w of originalWords) {
@@ -89,39 +92,18 @@ function buildSmartSearchQuery(title) {
           break;
       }
   }
-  if (!brand && words.length > 0) brand = words[0];
 
-  // 2. استخراج الموديل (عادة بالإنجليزية والأرقام في كل اللغات)
-  const models = words.filter(w => {
-      const hasLetters = /[a-z]/.test(w);
-      const hasNumbers = /[0-9]/.test(w);
-      const isVersion = w.includes('.');
-      const isCapacity = /^\d+[h|m|mah|w]$/i.test(w);
-      return hasLetters && hasNumbers && !isVersion && !isCapacity;
-  });
+  // إزالة الكلمات التي تحتوي على شرطات (double-door) أو أرقام إصدارات
+  const coreWords = words.filter(w => !w.includes('-') && !/^\d+[a-z]?$/i.test(w));
 
-  // 3. قاموس ترجمة نوع المنتج إلى الإنجليزية (للبحث في AliExpress)
-  let productType = '';
-  if (/flashlight|torch|lampe|linterna|fener|كشاف|مصباح/i.test(cleanTitle)) productType = 'flashlight';
-  else if (/tracker|airtag|locator|traqueur|localizador|متتبع/i.test(cleanTitle)) productType = 'tracker';
-  else if (/casque|headphone|écouteur|earbuds|audífono|auricular|سماعة|هيدفون/i.test(cleanTitle)) productType = 'headphones';
-  else if (/montre|watch|reloj|ساعة/i.test(cleanTitle)) productType = 'smartwatch';
-  else if (/chargeur|charger|cargador|شاحن/i.test(cleanTitle)) productType = 'charger';
-  else if (/clavier|keyboard|teclado|لوحة مفاتيح/i.test(cleanTitle)) productType = 'keyboard';
-  else if (/souris|mouse|ratón|ماوس/i.test(cleanTitle)) productType = 'mouse';
-
-  // 4. بناء الاستعلام الذكي (ماركة + موديل + نوع بالإنجليزية)
-  let queryParts = [];
-  if (brand) queryParts.push(brand);
-  if (models.length > 0) queryParts.push(models[0]);
-  if (productType) queryParts.push(productType);
-
-  if (queryParts.length > 0) {
-      return queryParts.join(' ');
-  } else {
-      // كخطة أخيرة، نأخذ أول 3 كلمات
-      return words.slice(0, 3).join(' ');
+  // إذا وجدنا ماركة، نأخذ الماركة + أول 3 كلمات أساسية
+  if (brand) {
+      return `${brand} ${coreWords.slice(0, 3).join(' ')}`.trim();
   }
+  
+  // إذا لم نجد ماركة، نأخذ أول 3 كلمات أساسية فقط (والتي يجب أن تكون اسم المنتج الحقيقي)
+  // مثلاً: caja de arena para gatos -> caja arena gatos
+  return coreWords.slice(0, 3).join(' ');
 }
 
 function saveToCloudflare(productId, items) {
