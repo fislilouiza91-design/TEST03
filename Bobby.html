@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Strict Category Filtering)
+   Smart Shopper - Cloudflare Worker (Smart Category Filter)
    ============================================ */
 
 const MAX_CONSECUTIVE_FAILURES = 10;
@@ -83,7 +83,7 @@ export default {
         if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
 
         const hash = await hashUrl(q);
-        const cacheKey = `search:v6:${hash}:${page}`; // 🔥 v6 لمنع الكاش القديم
+        const cacheKey = `search:v7:${hash}:${page}`; // 🔥 v7 لإجبار النظام على جلب بيانات جديدة
         
         const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
         if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
@@ -119,7 +119,7 @@ export default {
 };
 
 /* ============================================
-   فلترة الذكاء الاصطناعي (استبعاد الفئات الخاطئة)
+   فلترة الذكاء الاصطناعي (Smart Category Filter)
    ============================================ */
 async function strictCategoryFilter(originalTitle, items, env) {
     try {
@@ -129,7 +129,6 @@ async function strictCategoryFilter(originalTitle, items, env) {
         // 1. تحديد طبيعة المنتج الأصلي
         const isOriginalCover = /cover|housse|tarp|bâche/i.test(cleanTitle);
         const isOriginalCase = /case|coque|etui|pouch/i.test(cleanTitle);
-        const isOriginalMask = /mask|masque|balaclava|helmet|cagoule/i.test(cleanTitle);
 
         const originalWords = originalTitle.split(/\s+/);
         let brand = '';
@@ -163,13 +162,17 @@ async function strictCategoryFilter(originalTitle, items, env) {
             
             const itemTitleLower = it.title.toLowerCase();
             
-            // 🔥 2. الاستبعاد القسري للفئات الخاطئة (السر هنا)
+            // 🔥 2. الاستبعاد القسري للفئات الخاطئة (طرد الأقنعة)
             const isWrongCategory = 
                 (isOriginalCover && /balaclava|mask|helmet|glove|jacket|pants|shoe|goggle|scarf/i.test(itemTitleLower)) ||
-                (isOriginalCase && /cover|tarp|balaclava|mask/i.test(itemTitleLower)) ||
-                (isOriginalMask && /cover|tarp|case/i.test(itemTitleLower));
+                (isOriginalCase && /cover|tarp|balaclava|mask/i.test(itemTitleLower));
 
-            const isAccessory = /case|cover|protector|cable|charger|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitleLower);
+            // 🔥 3. منع الإكسسوارات بذكاء
+            // إذا كان المنتج الأصلي غطاء، فلا نعتبر الغطاء إكسسواراً
+            const isAccessory = 
+                (!isOriginalCover && /cover|tarp/i.test(itemTitleLower)) ||
+                (!isOriginalCase && /case|coque|etui|pouch/i.test(itemTitleLower)) ||
+                /protector|cable|charger|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitleLower);
 
             const hasModel = model ? itemTitleLower.includes(model) : false;
             const hasBrand = brand ? itemTitleLower.includes(brand) : false;
@@ -178,7 +181,6 @@ async function strictCategoryFilter(originalTitle, items, env) {
             if (hasModel) finalScore += 50; 
             if (hasBrand) finalScore += 30;
             
-            // إذا كان من فئة خاطئة، نعطيه درجة 0
             if (isWrongCategory) finalScore = 0;
 
             const isExact = !isWrongCategory && !isAccessory && (hasModel || (hasBrand && aiScore > 0.60));
@@ -186,11 +188,11 @@ async function strictCategoryFilter(originalTitle, items, env) {
             return { ...it, aiScore, finalScore, isExact, isAccessory, isWrongCategory };
         });
 
-        // نقبل المنتجات التي ليست إكسسوار، وليست فئة خاطئة، وتشابهها 45%+
+        // نقبل المنتجات التي ليست إكسسوار، وليست فئة خاطئة، وتشابهها 35%+
         const filteredItems = scoredItems.filter(it => 
             !it.isWrongCategory && 
             !it.isAccessory && 
-            (it.isExact || it.aiScore >= 0.45)
+            (it.isExact || it.aiScore >= 0.35)
         );
         
         filteredItems.sort((a, b) => b.finalScore - a.finalScore);
