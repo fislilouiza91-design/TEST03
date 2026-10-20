@@ -1,5 +1,6 @@
+
 /* ============================================
-   Proxy Manager - v5.0 (PAC Isolated Testing)
+   Proxy Manager - v5.5 (Strict URL Isolation)
    ============================================ */
 
 const PROXY_SOURCES = [
@@ -21,16 +22,13 @@ export async function refreshProxyPool() {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) continue;
       const text = await res.text();
-      const parsed = parseProxyText(text);
-      all.push(...parsed);
+      all.push(...parseProxyText(text));
     } catch (e) {
       console.warn(`[Proxy] ❌ فشل جلب من ${url.split('/')[4] || url}`);
     }
   }
   
-  const unique = Array.from(
-    new Map(all.map(p => [`${p.host}:${p.port}`, p])).values()
-  );
+  const unique = Array.from(new Map(all.map(p => [`${p.host}:${p.port}`, p])).values());
   unique.sort(() => Math.random() - 0.5);
   
   proxyPool = unique;
@@ -51,41 +49,36 @@ function parseProxyText(text) {
     if (parts.length === 2) {
       const host = parts[0];
       const port = parseInt(parts[1], 10);
-      if (host && !isNaN(port) && port > 0) {
-        out.push({ scheme: 'http', host, port, country: '' });
-      }
+      if (host && !isNaN(port) && port > 0) out.push({ scheme: 'http', host, port });
     }
   }
   return out;
 }
 
-/* ============================================
-   ⭐ الاختبار المعزول (لن يؤثر على تصفحك أبداً)
-   ============================================ */
+/* ⭐ سكربت PAC صارم: يوجه فقط الروابط التي تحمل بصمتنا السرية */
+function buildPAC(proxy) {
+  return `function FindProxyForURL(url, host) {
+    if (url.indexOf("_ext_fetch=1") !== -1 || url.indexOf("_ext_test=1") !== -1) {
+      return "PROXY ${proxy.host}:${proxy.port}";
+    }
+    return "DIRECT";
+  }`;
+}
+
 async function testProxy(proxy, timeoutMs = 4000) {
   proxyRequestedAuth = false;
   currentTestingProxy = proxy;
   
   try {
-    // نطبق بروكسي "ذكي" يختبر فقط ملف robots.txt
-    const pacScript = `function FindProxyForURL(url, host) {
-      if (url.indexOf("robots.txt") !== -1) {
-        return "PROXY ${proxy.host}:${proxy.port}";
-      }
-      return "DIRECT";
-    }`;
-
     await chrome.proxy.settings.set({
       scope: 'regular',
-      value: { mode: 'pac_script', pacScript: { data: pacScript } }
+      value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
     });
 
-    // نطلب الملف الصغير
-    const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
-    
+    // نضع بصمة _ext_test=1 لكي يمر الطلب عبر البروكسي
+    const testUrl = `https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`;
     const res = await fetch(testUrl, { 
       signal: AbortSignal.timeout(timeoutMs),
-      method: 'GET',
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
@@ -95,32 +88,17 @@ async function testProxy(proxy, timeoutMs = 4000) {
     return false;
   } finally {
     currentTestingProxy = null;
-    // ⭐ مسح فوري بعد الاختبار
     await clearProxy();
   }
 }
 
-/* ============================================
-   تطبيق البروكسي الفعلي (فقط لروابط البحث wholesale)
-   ============================================ */
 export async function applyProxyForAliExpress(proxy) {
-  if (!proxy) {
-    await clearProxy();
-    return;
-  }
-  
+  if (!proxy) return await clearProxy();
   currentProxy = proxy;
-  
-  const pacScript = `function FindProxyForURL(url, host) {
-    if (host.indexOf("aliexpress.com") !== -1 && url.indexOf("wholesale") !== -1) {
-      return "PROXY ${proxy.host}:${proxy.port}";
-    }
-    return "DIRECT";
-  }`;
   
   await chrome.proxy.settings.set({
     scope: 'regular',
-    value: { mode: 'pac_script', pacScript: { data: pacScript } }
+    value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
   });
 }
 
@@ -132,11 +110,8 @@ export async function clearProxy() {
 export async function getNextProxy(maxTries = 10) {
   if (proxyPool.length === 0) {
     const stored = await chrome.storage.local.get('proxyPool');
-    if (stored.proxyPool && stored.proxyPool.length > 0) {
-      proxyPool = stored.proxyPool;
-    } else {
-      await refreshProxyPool();
-    }
+    if (stored.proxyPool?.length > 0) proxyPool = stored.proxyPool;
+    else await refreshProxyPool();
   }
   
   if (proxyPool.length === 0) return null;
@@ -145,8 +120,7 @@ export async function getNextProxy(maxTries = 10) {
     const candidate = proxyPool[proxyIndex++];
     console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
     
-    const works = await testProxy(candidate, 4000);
-    if (works) {
+    if (await testProxy(candidate, 4000)) {
       console.log(`[Proxy] ✅ بروكسي صالح: ${candidate.host}:${candidate.port}`);
       return candidate;
     }
@@ -169,8 +143,4 @@ export function setupProxyAuth() {
     { urls: ['<all_urls>'] },
     ['asyncBlocking']
   );
-}
-
-export function getStatus() {
-  return { currentProxy, poolSize: proxyPool.length, remaining: proxyPool.length - proxyIndex };
 }
