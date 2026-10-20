@@ -1,5 +1,5 @@
 /* ============================================
-   Proxy Manager - v3.2 (Kill Auth Popups)
+   Proxy Manager - v3.3 (Strict Auth Filter)
    ============================================ */
 
 const PROXY_SOURCES = [
@@ -13,6 +13,7 @@ let proxyPool = [];
 let proxyIndex = 0;
 let authCredentials = { username: '', password: '' };
 
+// متغيرات لمراقبة المصادقة
 let proxyRequestedAuth = false;
 let currentTestingProxy = null;
 
@@ -29,7 +30,7 @@ export async function refreshProxyPool() {
       const parsed = parseProxyText(text);
       all.push(...parsed);
     } catch (e) {
-      console.warn(`[Proxy] ❌ فشل جلب من ${url}`);
+      console.warn(`[Proxy] ❌ فشل جلب من ${url.split('/')[4] || url}`);
     }
   }
   
@@ -65,7 +66,7 @@ function parseProxyText(text) {
 }
 
 /* ============================================
-   2. اختبار البروكسي
+   2. اختبار البروكسي (استبعاد بروكسيات المصادقة)
    ============================================ */
 async function testProxy(proxy, timeoutMs = 5000) {
   proxyRequestedAuth = false;
@@ -73,6 +74,8 @@ async function testProxy(proxy, timeoutMs = 5000) {
   
   try {
     await applyProxyInternal(proxy);
+    
+    // اختبار على AliExpress لضمان دعم HTTPS وعدم طلب مصادقة
     const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
     
     const res = await fetch(testUrl, { 
@@ -81,8 +84,9 @@ async function testProxy(proxy, timeoutMs = 5000) {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
-    // إذا طلب البروكسي كلمة مرور، نرفضه
+    // إذا طلب البروكسي مصادقة (407) أو تم اعتراضه، نرفضه
     if (proxyRequestedAuth || res.status === 407) {
+      console.warn(`[Proxy] 🚫 بروكسي يتطلب مصادقة: ${proxy.host}:${proxy.port}`);
       return false;
     }
     
@@ -91,15 +95,15 @@ async function testProxy(proxy, timeoutMs = 5000) {
     return false;
   } finally {
     currentTestingProxy = null;
+    // ⭐ مسح البروكسي بعد الاختبار لعدم التأثير على التصفح العادي
+    await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
   }
 }
 
 /* ============================================
-   3. تطبيق البروكسي
+   3. تطبيق البروكسي (للاختبار فقط)
    ============================================ */
 async function applyProxyInternal(proxy) {
-  authCredentials = { username: proxy.username || '', password: proxy.password || '' };
-  
   await chrome.proxy.settings.set({
     scope: 'regular',
     value: {
@@ -112,6 +116,9 @@ async function applyProxyInternal(proxy) {
   });
 }
 
+/* ============================================
+   4. تطبيق PAC لتوجيه AliExpress فقط
+   ============================================ */
 export async function applyProxyForAliExpress(proxy) {
   if (!proxy) {
     await chrome.proxy.settings.clear({ scope: 'regular' });
@@ -138,7 +145,7 @@ export async function applyProxyForAliExpress(proxy) {
 }
 
 /* ============================================
-   4. الحصول على بروكسي جديد
+   5. الحصول على بروكسي جديد
    ============================================ */
 export async function getNextProxy(maxTries = 10) {
   if (proxyPool.length === 0) {
@@ -169,16 +176,19 @@ export async function getNextProxy(maxTries = 10) {
 }
 
 /* ============================================
-   ⭐ 5. الحل الجذري لمنع النافذة (Cancel Auth)
+   6. منع نوافذ المصادقة
    ============================================ */
 export function setupProxyAuth() {
+  // نستخدم onAuthRequired لاعتراض طلبات المصادقة وإلغائها
   chrome.webRequest.onAuthRequired.addListener(
     (details, callback) => {
       if (details.isProxy) {
+        // إذا كنا نختبر بروكسياً، نسجل أنه طلب مصادقة
         if (currentTestingProxy) {
           proxyRequestedAuth = true;
         }
-        // ⭐ إلغاء الطلب فوراً، هذا يمنع ظهور نافذة المصادقة
+        
+        // ⭐ إلغاء الطلب لمنع ظهور النافذة المنبثقة
         callback({ cancel: true }); 
         return;
       }
@@ -189,6 +199,9 @@ export function setupProxyAuth() {
   );
 }
 
+/* ============================================
+   7. حالة البروكسي
+   ============================================ */
 export function getStatus() {
   return { currentProxy, poolSize: proxyPool.length, remaining: proxyPool.length - proxyIndex };
 }
