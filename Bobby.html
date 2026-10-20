@@ -1,5 +1,5 @@
 /* ============================================
-   Proxy Manager - v3.4 (Safe Isolation)
+   Proxy Manager - v5.0 (PAC Isolated Testing)
    ============================================ */
 
 const PROXY_SOURCES = [
@@ -11,7 +11,6 @@ const PROXY_SOURCES = [
 let currentProxy = null;
 let proxyPool = [];
 let proxyIndex = 0;
-
 let proxyRequestedAuth = false;
 let currentTestingProxy = null;
 
@@ -60,12 +59,28 @@ function parseProxyText(text) {
   return out;
 }
 
-async function testProxy(proxy, timeoutMs = 5000) {
+/* ============================================
+   ⭐ الاختبار المعزول (لن يؤثر على تصفحك أبداً)
+   ============================================ */
+async function testProxy(proxy, timeoutMs = 4000) {
   proxyRequestedAuth = false;
   currentTestingProxy = proxy;
   
   try {
-    await applyProxyInternal(proxy);
+    // نطبق بروكسي "ذكي" يختبر فقط ملف robots.txt
+    const pacScript = `function FindProxyForURL(url, host) {
+      if (url.indexOf("robots.txt") !== -1) {
+        return "PROXY ${proxy.host}:${proxy.port}";
+      }
+      return "DIRECT";
+    }`;
+
+    await chrome.proxy.settings.set({
+      scope: 'regular',
+      value: { mode: 'pac_script', pacScript: { data: pacScript } }
+    });
+
+    // نطلب الملف الصغير
     const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
     
     const res = await fetch(testUrl, { 
@@ -74,45 +89,28 @@ async function testProxy(proxy, timeoutMs = 5000) {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
-    if (proxyRequestedAuth || res.status === 407) {
-      return false;
-    }
+    if (proxyRequestedAuth || res.status === 407) return false;
     return res.status >= 200 && res.status < 500;
   } catch (e) {
     return false;
   } finally {
     currentTestingProxy = null;
-    await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
+    // ⭐ مسح فوري بعد الاختبار
+    await clearProxy();
   }
 }
 
-async function applyProxyInternal(proxy) {
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: {
-      mode: 'fixed_servers',
-      rules: {
-        singleProxy: { scheme: proxy.scheme || 'http', host: proxy.host, port: proxy.port },
-        bypassList: ['localhost', '127.0.0.1', '<local>']
-      }
-    }
-  });
-}
-
-/* ============================================================
-   تطبيق PAC (عزل تام): البروكسي يطبق فقط على روابط البحث wholesale
-   ============================================================ */
+/* ============================================
+   تطبيق البروكسي الفعلي (فقط لروابط البحث wholesale)
+   ============================================ */
 export async function applyProxyForAliExpress(proxy) {
   if (!proxy) {
-    await chrome.proxy.settings.clear({ scope: 'regular' });
-    currentProxy = null;
+    await clearProxy();
     return;
   }
   
   currentProxy = proxy;
   
-  // السحر هنا: نوجه فقط الروابط التي تحتوي على "wholesale" (وهي روابط البحث)
-  // بينما صفحات المنتجات وباقي الموقع تمر مباشرة (DIRECT) دون بروكسي
   const pacScript = `function FindProxyForURL(url, host) {
     if (host.indexOf("aliexpress.com") !== -1 && url.indexOf("wholesale") !== -1) {
       return "PROXY ${proxy.host}:${proxy.port}";
@@ -124,14 +122,11 @@ export async function applyProxyForAliExpress(proxy) {
     scope: 'regular',
     value: { mode: 'pac_script', pacScript: { data: pacScript } }
   });
-  
-  console.log(`[Proxy] 🎯 تفعيل البروكسي لروابط البحث فقط → ${proxy.host}:${proxy.port}`);
 }
 
 export async function clearProxy() {
   await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
   currentProxy = null;
-  console.log('[Proxy] 🧹 تم إيقاف البروكسي والعودة للتصفح المباشر.');
 }
 
 export async function getNextProxy(maxTries = 10) {
@@ -157,7 +152,6 @@ export async function getNextProxy(maxTries = 10) {
     }
   }
   
-  console.warn('[Proxy] ❌ فشلت المحاولات الحالية، جلب قائمة جديدة...');
   await refreshProxyPool();
   return proxyPool.length > 0 ? proxyPool[0] : null;
 }
@@ -166,10 +160,7 @@ export function setupProxyAuth() {
   chrome.webRequest.onAuthRequired.addListener(
     (details, callback) => {
       if (details.isProxy) {
-        if (currentTestingProxy) {
-          proxyRequestedAuth = true;
-        }
-        // إلغاء طلب المصادقة لمنع النافذة المنبثقة
+        if (currentTestingProxy) proxyRequestedAuth = true;
         callback({ cancel: true }); 
         return;
       }
