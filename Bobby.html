@@ -1,6 +1,5 @@
 /* ============================================
-   Smart Shopper - Background v3.0
-   مع إدارة البروكسي ومعالجة الأخطاء
+   Smart Shopper - Background v3.1 (Sticky Proxy)
    ============================================ */
 
 import {
@@ -12,7 +11,7 @@ import {
 } from './proxy-manager.js';
 
 const MAX_PAGES = 10;
-const DELAY_BETWEEN_PAGES = 1500;
+const DELAY_BETWEEN_PAGES = 2500; // زيادة التأخير لتقليل الحظر
 
 /* ============================================
    التهيئة
@@ -38,22 +37,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   
-  if (msg.type === 'REFRESH_PROXIES') {
-    refreshProxyPool().then(count => sendResponse({ ok: true, count }));
-    return true;
-  }
-  
-  if (msg.type === 'CLEAR_PROXY') {
-    applyProxyForAliExpress(null).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  
   if (msg.type !== 'SMART_SEARCH') return;
   const tabId = sender.tab && sender.tab.id;
   
   (async () => {
     try {
-      // 1. الحصول على بروكسي وتطبيقه
+      // 1. الحصول على بروكسي وتطبيقه (مرة واحدة لكل منتج)
       console.log('[Search] 🔄 جلب بروكسي جديد...');
       let proxy = await getNextProxy();
       await applyProxyForAliExpress(proxy);
@@ -68,11 +57,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       
       let page = 1;
       let retries = 0;
-      const MAX_RETRIES = 3;
+      const MAX_RETRIES = 5;
 
-      // 2. حلقة الزحف
+      // 2. حلقة جلب الصفحات
       while (page <= MAX_PAGES && retries < MAX_RETRIES) {
         try {
+          console.log(`[Fetch] جلب الصفحة ${page} باستخدام ${proxy.host}:${proxy.port}...`);
           const items = await fetchPage(baseUrl, page);
           
           if (items && items.length > 0) {
@@ -85,7 +75,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             
             if (newItems.length > 0) {
               totalFetched += newItems.length;
-              
               if (tabId) {
                 if (!firstBatchSent) {
                   sendResponse({ ok: true, items: newItems, searchUrl: baseUrl, done: false, count: newItems.length });
@@ -95,14 +84,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 }
               }
             }
+          } else {
+             // صفحة فارغة (نهاية النتائج)
+             if (page === 1) break; // إذا كانت الأولى فارغة، ننهي البحث
           }
           
           page++;
+          retries = 0; // تصفير المحاولات لأن البروكسي أثبت نجاحه
           await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES));
           
         } catch (err) {
           if (err.message === 'PROXY_FAILED') {
-            console.warn(`[Search] ⚠️ البروكسي تالف، جاري التبديل (محاولة ${retries + 1}/${MAX_RETRIES})...`);
+            console.warn(`[Search] ⚠️ البروكسي توقف أو تم حظره، جاري التبديل (محاولة ${retries + 1}/${MAX_RETRIES})...`);
             retries++;
             proxy = await getNextProxy();
             await applyProxyForAliExpress(proxy);
@@ -132,7 +125,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ============================================
-   دالة جلب صفحة
+   دالة جلب صفحة (ترمي خطأ عند الحظر لتبديل البروكسي)
    ============================================ */
 async function fetchPage(baseUrl, page) {
   try {
@@ -144,26 +137,28 @@ async function fetchPage(baseUrl, page) {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
-      signal: AbortSignal.timeout(12000)
+      signal: AbortSignal.timeout(15000)
     });
     
     if (!res.ok) {
       if (res.status === 403 || res.status === 429) {
         console.warn(`[Fetch] صفحة ${page} → محظور (HTTP ${res.status})`);
+        throw new Error('PROXY_FAILED'); // ⭐ يتبدل البروكسي فوراً
       }
       return [];
     }
     
     const html = await res.text();
-    if (html.includes('captcha') || html.includes('punish')) {
+    if (html.includes('captcha') || html.includes('punish') || html.includes('slide to verify')) {
       console.warn(`[Fetch] صفحة ${page} → كابتشا`);
-      return [];
+      throw new Error('PROXY_FAILED'); // ⭐ يتبدل البروكسي فوراً
     }
     
     let items = parseItems(html);
     if (!items.length) items = fallbackIds(html);
     return items;
   } catch (e) {
+    if (e.message === 'PROXY_FAILED') throw e;
     console.warn(`[Fetch] صفحة ${page} فشلت:`, e.message);
     throw new Error('PROXY_FAILED');
   }
