@@ -1,419 +1,60 @@
-/* ============================================
-   Smart Shopper - Background Service Worker
-   v1.1 - Auto Proxy Rotation
-   ============================================ */
+Smart Shopper - إضافة Chrome عائمة
+====================================
 
-const MAX_PAGES = 8;
-const PARALLEL_BATCH = 3;
-const DELAY_BETWEEN_BATCHES = 400;
+ما الذي تفعله؟
+--------------
+لوحة عائمة تظهر تلقائياً أثناء تصفح أي صفحة منتج، وتبحث في AliExpress
+عن منتجات مشابهة وأرخص وتعرضها مع السعر والتخفيض والتقييم وعدد المبيعات،
+مع فرز حسب: الأرخص / أفضل تقييم / أكبر خصم / الأكثر مبيعاً.
 
-/* ============================================================
-   ⚙️ إعدادات دوران الـ IP
-   ============================================================
-   املأ PROXIES بوكلائك الحقيقية. اتركها فارغة لتعطيل الدوران.
-   يمكنك أيضاً ضبطها من console الإضافة (chrome://extensions →
-   Inspect views → service worker) بدون تعديل الكود:
+⭐ الميزة الجديدة: دوران IP تلقائي
+---------------------------------
+الإضافة تغيّر عنوان IP تلقائياً بعد كل N عملية بحث لتفادي حظر AliExpress.
 
-     chrome.storage.local.set({ __proxies: [
-       { scheme:'http',   host:'1.2.3.4', port:8080, username:'u', password:'p' },
-       { scheme:'socks5', host:'5.6.7.8', port:1080 }
-     ]});
+للتفعيل:
+1. افتح ملف background.js.
+2. ابحث عن const PROXIES = [...]
+3. ضع وكلاءك بهذا الشكل:
+     { scheme: 'http',   host: '1.2.3.4', port: 8080, username: 'user', password: 'pass' },
+     { scheme: 'socks5', host: '5.6.7.8', port: 1080 }
+4. احفظ الملف، ثم أعد تحميل الإضافة من chrome://extensions
 
-   الصيغ المدعومة للـ scheme: 'http' | 'https' | 'socks4' | 'socks5'
-   ============================================================ */
-const PROXIES = [
-  // أمثلة — احذفها وضع وكلاءك:
-  // { scheme: 'http',   host: '1.2.3.4', port: 8080, username: 'user', password: 'pass' },
-  // { scheme: 'socks5', host: '5.6.7.8', port: 1080 },
-];
+بديل أسرع (بدون تعديل الكود):
+افتح service worker من chrome://extensions → Inspect views → service worker
+وألصق في الـ console:
+   chrome.storage.local.set({ __proxies: [
+     { scheme:'http',   host:'1.2.3.4', port:8080, username:'u', password:'p' },
+     { scheme:'socks5', host:'5.6.7.8', port:1080 }
+   ]});
 
-// عدد عمليات السحب لكل IP قبل التبديل — "سحب مرتين ثم تغيير VPN"
-const ROTATE_AFTER_N_SEARCHES = 2;
+الإعدادات القابلة للتعديل (في أعلى background.js):
+- ROTATE_AFTER_N_SEARCHES = 2   → عدد السحبات لكل IP (2 = سحب مرتين)
+- PROXY_SETTLE_MS          = 1200 → وقت الانتظار بعد التبديل
 
-// وقت الانتظار بعد تبديل البروكسي قبل بدء البحث (ms)
-const PROXY_SETTLE_MS = 1200;
+تغيير عدد السحبات لكل IP:
+- 1 = تبديل كل سحب
+- 2 = تبديل كل سحبتين (الافتراضي)
+- 3 = تبديل كل 3 سحبات
 
-/* ============================================================
-   دوران الـ IP - إدارة الحالة
-   ============================================================ */
-let currentAuth = { username: '', password: '' };
-let sessionInitialized = false;
+فحص الحالة (من console الـ service worker):
+   chrome.runtime.sendMessage({type:'GET_PROXY_STATUS'}, console.log);
 
-async function getProxies() {
-  const { __proxies } = await chrome.storage.local.get('__proxies');
-  if (Array.isArray(__proxies) && __proxies.length) return __proxies;
-  return PROXIES;
-}
+إعادة تعيين العدّاد:
+   chrome.runtime.sendMessage({type:'RESET_PROXY_STATE'}, console.log);
 
-async function getRotationState() {
-  const { __proxyState } = await chrome.storage.local.get('__proxyState');
-  return __proxyState || { index: 0, count: 0 };
-}
+خطوات التثبيت
+--------------
+1. فك ضغط الملف ZIP.
+2. افتح chrome://extensions وفعّل "وضع المطوّر".
+3. اضغط "تحميل غير مضغوط" واختر مجلد smart-shopper.
+4. ضع وكلاءك في background.js (انظر أعلاه).
+5. أعد تحميل الإضافة، وصفّح أي منتج.
 
-async function saveRotationState(state) {
-  await chrome.storage.local.set({ __proxyState: state });
-}
-
-async function applyProxy(proxy) {
-  if (!proxy) {
-    await chrome.proxy.settings.clear({ scope: 'regular' });
-    currentAuth = { username: '', password: '' };
-    return;
-  }
-  currentAuth = {
-    username: proxy.username || '',
-    password: proxy.password || ''
-  };
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: {
-      mode: 'fixed_servers',
-      rules: {
-        singleProxy: {
-          scheme: proxy.scheme || 'http',
-          host: proxy.host,
-          port: proxy.port
-        },
-        bypassList: ['localhost', '127.0.0.1']
-      }
-    }
-  });
-  console.log(`[Proxy] ✅ ${proxy.scheme}://${proxy.host}:${proxy.port}`);
-}
-
-/* مصادقة البروكسي (إذا كان يحتاج username/password) */
-chrome.webRequest.onAuthRequired.addListener(
-  (details, callback) => {
-    if (!currentAuth.username && !currentAuth.password) {
-      callback({});
-      return;
-    }
-    callback({ authCredentials: currentAuth });
-  },
-  { urls: ['<all_urls>'] },
-  ['asyncBlocking']
-);
-
-/* يُستدعى قبل كل بحث — يقرر إن كان الوقت قد حان للتبديل */
-async function rotateIfNeeded() {
-  const proxies = await getProxies();
-  if (!proxies.length) return; // لا وكلاء → العمل كالمعتاد
-
-  let state = await getRotationState();
-
-  // أول بحث بعد تحميل الإضافة: طبّق البروكسي الحالي
-  if (!sessionInitialized) {
-    sessionInitialized = true;
-    try {
-      if (state.index >= proxies.length) state.index = 0;
-      await applyProxy(proxies[state.index]);
-      await new Promise(r => setTimeout(r, PROXY_SETTLE_MS));
-      state.count = 1;
-      await saveRotationState(state);
-    } catch (e) {
-      console.error('[Proxy] init failed', e);
-    }
-    return;
-  }
-
-  // لم نصل للحد بعد → استخدم البروكسي الحالي
-  if (state.count < ROTATE_AFTER_N_SEARCHES) {
-    state.count++;
-    await saveRotationState(state);
-    return;
-  }
-
-  // وصلنا للحد → دوّر للبروكسي التالي (جرّب كل واحد حتى ينجح)
-  const startIndex = state.index;
-  for (let i = 1; i <= proxies.length; i++) {
-    const newIndex = (startIndex + i) % proxies.length;
-    try {
-      await applyProxy(proxies[newIndex]);
-      state.index = newIndex;
-      state.count = 1;
-      await saveRotationState(state);
-      await new Promise(r => setTimeout(r, PROXY_SETTLE_MS));
-      console.log(`[Proxy] 🔄 rotated to index ${newIndex}`);
-      return;
-    } catch (e) {
-      console.error('[Proxy] failed index', newIndex, e);
-    }
-  }
-  console.error('[Proxy] ❌ all proxies failed — using previous');
-  state.count++;
-  await saveRotationState(state);
-}
-
-/* ============================================================
-   مستمع الرسائل الرئيسي
-   ============================================================ */
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  // تقرير حالة البروكسي (للتشخيص من console)
-  if (msg.type === 'GET_PROXY_STATUS') {
-    (async () => {
-      const proxies = await getProxies();
-      const state = await getRotationState();
-      sendResponse({
-        ok: true,
-        enabled: proxies.length > 0,
-        totalProxies: proxies.length,
-        currentIndex: state.index,
-        searchesOnCurrent: state.count,
-        rotateAfter: ROTATE_AFTER_N_SEARCHES,
-        currentProxy: proxies[state.index] || null
-      });
-    })();
-    return true;
-  }
-
-  // إعادة تعيين عدّاد الدوران يدوياً
-  if (msg.type === 'RESET_PROXY_STATE') {
-    (async () => {
-      sessionInitialized = false;
-      await chrome.storage.local.remove(['__proxyState']);
-      await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
-      sendResponse({ ok: true });
-    })();
-    return true;
-  }
-
-  // البحث الرئيسي
-  if (msg.type !== 'SMART_SEARCH') return;
-  const tabId = sender.tab && sender.tab.id;
-
-  (async () => {
-    try {
-      // ⭐ تبديل البروكسي إذا لزم قبل بدء البحث
-      await rotateIfNeeded();
-
-      const q = encodeURIComponent((msg.title || '').slice(0, 90));
-      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
-
-      const seenIds = new Set();
-      let firstBatchSent = false;
-      let totalFetched = 0;
-
-      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
-        const pages = [];
-        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
-          pages.push(batch + i + 1);
-        }
-
-        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
-        const newItems = [];
-        let emptyPages = 0;
-
-        for (const items of results) {
-          if (!items || !items.length) { emptyPages++; continue; }
-          for (const it of items) {
-            if (!it || !it.id || seenIds.has(it.id)) continue;
-            seenIds.add(it.id);
-            newItems.push(it);
-          }
-        }
-
-        totalFetched += newItems.length;
-
-        if (newItems.length > 0 && tabId) {
-          if (!firstBatchSent) {
-            sendResponse({ ok: true, items: newItems, searchUrl: baseUrl, done: false, count: newItems.length });
-            firstBatchSent = true;
-          } else {
-            try {
-              chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_UPDATE', items: newItems, searchUrl: baseUrl });
-            } catch (e) {}
-          }
-        }
-
-        if (emptyPages === pages.length) break;
-        if (batch + PARALLEL_BATCH < MAX_PAGES) await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
-      }
-
-      // ⭐ إذا فشل البحث تماماً (0 نتيجة) → أجبر التبديل في البحث القادم
-      if (totalFetched === 0) {
-        const st = await getRotationState();
-        st.count = ROTATE_AFTER_N_SEARCHES;
-        await saveRotationState(st);
-        console.warn('[Search] 0 results — will rotate proxy on next search');
-      }
-
-      if (tabId) {
-        try { chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }); } catch (e) {}
-      }
-      if (!firstBatchSent) sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
-    } catch (e) {
-      sendResponse({ ok: false, error: String(e) });
-    }
-  })();
-
-  return true;
-});
-
-/* ============================================================
-   دوال استخراج البيانات — بدون تغيير
-   ============================================================ */
-
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : '';
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
-      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
-      'price', 'storeName', 'desc', 'label'];
-    for (const k of keys) {
-      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
-    }
-    for (const k in v) {
-      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
-    }
-    return '';
-  }
-  return String(v);
-}
-
-function extractStore(o) {
-  const candidates = [
-    o.storeName, o.sellerName, o.shopName, o.companyName, o.sellerAdminName,
-    o.storeAdminName, o.store && o.store.storeName, o.store && o.store.name,
-    o.store && o.store.sellerName, o.store && o.store.companyName,
-    o.seller && o.seller.name, o.seller && o.seller.storeName,
-    o.seller && o.seller.companyName, o.shop && o.shop.name,
-    o.shopInfo && o.shopInfo.name, o.storeInfo && o.storeInfo.name
-  ];
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim() && c !== 'undefined' && c !== 'null' && c !== 'AliExpress') {
-      return c.trim();
-    }
-  }
-  return 'AliExpress';
-}
-
-async function fetchPage(baseUrl, page) {
-  try {
-    const url = baseUrl + '&page=' + page;
-    const res = await fetch(url, {
-      headers: {
-        'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      }
-    });
-    if (!res.ok) {
-      console.warn(`[Fetch] page ${page} → HTTP ${res.status}`);
-      return [];
-    }
-    const html = await res.text();
-    let items = parseItems(html);
-    if (!items.length) items = fallbackIds(html);
-    return items;
-  } catch (e) {
-    console.warn(`[Fetch] page ${page} error:`, String(e));
-    return [];
-  }
-}
-
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-
-      let img = '';
-      if (o.image) {
-        if (typeof o.image === 'string') img = o.image;
-        else img = o.image.imgUrl || o.image.imageUrl || o.image.url || '';
-      }
-      if (!img && o.picUrl) {
-        if (typeof o.picUrl === 'string') img = o.picUrl;
-        else img = o.picUrl.imgUrl || o.picUrl.url || '';
-      }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const orig = p.originalPrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
-                    sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
-      const discount = extractText(o.discount || sale.discount || '');
-      const store = extractStore(o);
-      const rating = extractText(
-        (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
-        o.averageStarRate || o.starRating || ''
-      );
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-      const shipping = extractText(o.logisticsDesc || o.shipping || '');
-      const shippingFree = o.freeShipping ||
-                           (typeof shipping === 'string' && /free|gratuit/i.test(shipping));
-
-      const badges = [];
-      if (o.isChoice) badges.push('Choice');
-      if (o.isFreeShipping || shippingFree) badges.push('FreeShipping');
-
-      out.push({
-        id: String(id), title: title || 'Produit similaire',
-        img, price, oldPrice, discount, store, rating, sold,
-        shipping, shippingFree, badges,
-        link: 'https://www.aliexpress.com/item/' + id + '.html'
-      });
-    } catch (e) {}
-  }
-  return out;
-}
-
-function fallbackIds(html) {
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set(); const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({
-      id: m[1], title: 'Produit similaire', img: '', price: '', oldPrice: '',
-      discount: '', store: 'AliExpress', rating: '', sold: '',
-      shipping: '', shippingFree: false, badges: [],
-      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
-    });
-  }
-  return out;
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function clean(s) {
-  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-}
+⚠️ ملاحظات مهمة
+---------------
+- الوكلاء يجب أن تدعم HTTPS CONNECT (معظم HTTP/HTTPS/SOCKS5 تدعمها).
+- وكلاء مجانية عادةً بطيئة وغير مستقرة — يُفضّل وكلاء مدفوعة (Residential Proxies)
+  لنتائج أفضل على AliExpress.
+- Tor (socks5://127.0.0.1:9050) يعمل أيضاً، لكن عناوينه مدرجة في القوائم
+  السوداء لدى AliExpress وغالباً لن تعمل.
+- إذا كانت كل الوكلاء تفشل، الإضافة ستعمل بدون بروكسي (كأنك لم تضبط شيئاً).
