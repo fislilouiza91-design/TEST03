@@ -1,5 +1,5 @@
 /* ============================================
-   Proxy Manager - v3.0 (Text Sources)
+   Proxy Manager - v3.0 (Text Sources & HTTPS Test)
    ============================================ */
 
 // مصادر نصية موثوقة (تعيد IP:PORT مباشرة)
@@ -57,7 +57,6 @@ function parseProxyText(text) {
   const lines = text.split('\n');
   for (let line of lines) {
     line = line.trim();
-    // تجاهل التعليقات والأسطر الفارغة
     if (!line || line.startsWith('#')) continue;
     
     const parts = line.split(':');
@@ -73,25 +72,29 @@ function parseProxyText(text) {
 }
 
 /* ============================================
-   2. اختبار البروكسي
+   2. اختبار البروكسي (على AliExpress لضمان دعم HTTPS)
    ============================================ */
 async function testProxy(proxy, timeoutMs = 5000) {
   try {
     await applyProxyInternal(proxy);
-    // نستخدم httpbin لاختبار الاتصال
-    const res = await fetch(`https://httpbin.org/ip?t=${Date.now()}`, { 
-      signal: AbortSignal.timeout(timeoutMs) 
+    
+    // نطلب ملف robots.txt (صغير جداً ويتطلب HTTPS)
+    const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
+    
+    const res = await fetch(testUrl, { 
+      signal: AbortSignal.timeout(timeoutMs),
+      method: 'GET' 
     });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return !!data.origin;
+    
+    // إذا نجح الاتصال (200 أو 403)، فهذا يعني أن البروكسي يدعم HTTPS
+    return res.status >= 200 && res.status < 500;
   } catch (e) {
     return false;
   }
 }
 
 /* ============================================
-   3. تطبيق البروكسي (مؤقت للاختبار)
+   3. تطبيق البروكسي (للاختبار)
    ============================================ */
 async function applyProxyInternal(proxy) {
   authCredentials = {
@@ -131,7 +134,7 @@ export async function applyProxyForAliExpress(proxy) {
     password: proxy.password || ''
   };
   
-  // ⚠️ سكربت PAC يجب أن يكون ASCII فقط (بدون تعليقات عربية)
+  // PAC Script (ASCII only)
   const pacScript = `function FindProxyForURL(url, host) {
     if (host.indexOf("aliexpress.com") !== -1 || host.indexOf("aliexpress.us") !== -1) {
       return "PROXY ${proxy.host}:${proxy.port}";
@@ -154,7 +157,6 @@ export async function applyProxyForAliExpress(proxy) {
    5. الحصول على بروكسي جديد
    ============================================ */
 export async function getNextProxy(maxTries = 5) {
-  // إذا كانت القائمة فارغة، جلب من جديد
   if (proxyPool.length === 0) {
     const stored = await chrome.storage.local.get('proxyPool');
     if (stored.proxyPool && stored.proxyPool.length > 0) {
@@ -169,7 +171,6 @@ export async function getNextProxy(maxTries = 5) {
     return null;
   }
   
-  // محاولة اختبار 5 بروكسيات
   for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
     const candidate = proxyPool[proxyIndex++];
     console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
