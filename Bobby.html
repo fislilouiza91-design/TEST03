@@ -1,5 +1,5 @@
 /* ============================================
-   Proxy Manager - v3.1 (Filter Auth-Required Proxies)
+   Proxy Manager - v3.2 (Kill Auth Popups)
    ============================================ */
 
 const PROXY_SOURCES = [
@@ -13,7 +13,6 @@ let proxyPool = [];
 let proxyIndex = 0;
 let authCredentials = { username: '', password: '' };
 
-// ⭐ متغير لتتبع ما إذا كان البروكسي الحالي يطلب مصادقة أثناء الاختبار
 let proxyRequestedAuth = false;
 let currentTestingProxy = null;
 
@@ -29,9 +28,8 @@ export async function refreshProxyPool() {
       const text = await res.text();
       const parsed = parseProxyText(text);
       all.push(...parsed);
-      console.log(`[Proxy] ✅ ${parsed.length} بروكسي من ${url.split('/')[4]}`);
     } catch (e) {
-      console.warn(`[Proxy] ❌ فشل جلب من ${url}:`, e.message);
+      console.warn(`[Proxy] ❌ فشل جلب من ${url}`);
     }
   }
   
@@ -44,11 +42,7 @@ export async function refreshProxyPool() {
   proxyIndex = 0;
   console.log(`[Proxy] 📦 جاهز ${proxyPool.length} بروكسي`);
   
-  await chrome.storage.local.set({ 
-    proxyPool: proxyPool.slice(0, 1000),
-    poolUpdatedAt: Date.now() 
-  });
-  
+  await chrome.storage.local.set({ proxyPool: proxyPool.slice(0, 1000) });
   return proxyPool.length;
 }
 
@@ -71,33 +65,29 @@ function parseProxyText(text) {
 }
 
 /* ============================================
-   2. اختبار البروكسي (مع كشف المصادقة)
+   2. اختبار البروكسي
    ============================================ */
 async function testProxy(proxy, timeoutMs = 5000) {
-  // ⭐ تصفير مؤشر المصادقة قبل الاختبار
   proxyRequestedAuth = false;
   currentTestingProxy = proxy;
   
   try {
     await applyProxyInternal(proxy);
     const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
+    
     const res = await fetch(testUrl, { 
       signal: AbortSignal.timeout(timeoutMs),
-      method: 'GET' 
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
-    // ⭐ إذا طلب البروكسي مصادقة أثناء الاختبار، نعتبره غير صالح
-    if (proxyRequestedAuth) {
-      console.warn(`[Proxy] 🚫 البروكسي ${proxy.host}:${proxy.port} يتطلب مصادقة، تم تجاهله.`);
+    // إذا طلب البروكسي كلمة مرور، نرفضه
+    if (proxyRequestedAuth || res.status === 407) {
       return false;
     }
     
     return res.status >= 200 && res.status < 500;
   } catch (e) {
-    if (proxyRequestedAuth) {
-      console.warn(`[Proxy] 🚫 البروكسي ${proxy.host}:${proxy.port} يتطلب مصادقة (خطأ)، تم تجاهله.`);
-      return false;
-    }
     return false;
   } finally {
     currentTestingProxy = null;
@@ -105,33 +95,23 @@ async function testProxy(proxy, timeoutMs = 5000) {
 }
 
 /* ============================================
-   3. تطبيق البروكسي (للاختبار)
+   3. تطبيق البروكسي
    ============================================ */
 async function applyProxyInternal(proxy) {
-  authCredentials = {
-    username: proxy.username || '',
-    password: proxy.password || ''
-  };
+  authCredentials = { username: proxy.username || '', password: proxy.password || '' };
   
   await chrome.proxy.settings.set({
     scope: 'regular',
     value: {
       mode: 'fixed_servers',
       rules: {
-        singleProxy: {
-          scheme: proxy.scheme || 'http',
-          host: proxy.host,
-          port: proxy.port
-        },
+        singleProxy: { scheme: proxy.scheme || 'http', host: proxy.host, port: proxy.port },
         bypassList: ['localhost', '127.0.0.1', '<local>']
       }
     }
   });
 }
 
-/* ============================================
-   4. تطبيق PAC لتوجيه AliExpress فقط
-   ============================================ */
 export async function applyProxyForAliExpress(proxy) {
   if (!proxy) {
     await chrome.proxy.settings.clear({ scope: 'regular' });
@@ -140,10 +120,7 @@ export async function applyProxyForAliExpress(proxy) {
   }
   
   currentProxy = proxy;
-  authCredentials = {
-    username: proxy.username || '',
-    password: proxy.password || ''
-  };
+  authCredentials = { username: proxy.username || '', password: proxy.password || '' };
   
   const pacScript = `function FindProxyForURL(url, host) {
     if (host.indexOf("aliexpress.com") !== -1 || host.indexOf("aliexpress.us") !== -1) {
@@ -154,17 +131,14 @@ export async function applyProxyForAliExpress(proxy) {
   
   await chrome.proxy.settings.set({
     scope: 'regular',
-    value: {
-      mode: 'pac_script',
-      pacScript: { data: pacScript }
-    }
+    value: { mode: 'pac_script', pacScript: { data: pacScript } }
   });
   
   console.log(`[Proxy] 🎯 AliExpress → ${proxy.host}:${proxy.port}`);
 }
 
 /* ============================================
-   5. الحصول على بروكسي جديد (مع تصفية المصادقة)
+   4. الحصول على بروكسي جديد
    ============================================ */
 export async function getNextProxy(maxTries = 10) {
   if (proxyPool.length === 0) {
@@ -176,10 +150,7 @@ export async function getNextProxy(maxTries = 10) {
     }
   }
   
-  if (proxyPool.length === 0) {
-    console.warn('[Proxy] ⚠️ لا توجد بروكسيات متاحة، سيتم التصفح مباشرة');
-    return null;
-  }
+  if (proxyPool.length === 0) return null;
   
   for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
     const candidate = proxyPool[proxyIndex++];
@@ -194,41 +165,23 @@ export async function getNextProxy(maxTries = 10) {
   
   console.warn('[Proxy] ❌ فشلت المحاولات الحالية، جلب قائمة جديدة...');
   await refreshProxyPool();
-  
-  if (proxyPool.length > 0) {
-    return proxyPool[0];
-  }
-  return null;
+  return proxyPool.length > 0 ? proxyPool[0] : null;
 }
 
 /* ============================================
-   6. مصادقة البروكسي (تسجيل مرة واحدة فقط)
+   ⭐ 5. الحل الجذري لمنع النافذة (Cancel Auth)
    ============================================ */
 export function setupProxyAuth() {
-  // ⭐ تسجيل المستمع مرة واحدة فقط
   chrome.webRequest.onAuthRequired.addListener(
     (details, callback) => {
-      // إذا كان الطلب لبروكسي (isProxy)
       if (details.isProxy) {
-        // ⭐ إذا كنا نختبر بروكسياً ولا نملك بيانات اعتماد، نرفض الطلب ونسجل أنه طلب مصادقة
         if (currentTestingProxy) {
           proxyRequestedAuth = true;
-          callback({}); // رفض المصادقة (لن تظهر نافذة)
-          return;
         }
-        
-        // إذا كان البروكسي الحالي لديه بيانات اعتماد (نادراً ما يحدث مع المجاني)
-        if (authCredentials.username || authCredentials.password) {
-          callback({ authCredentials });
-          return;
-        }
-        
-        // ⭐ في حالة عدم وجود بيانات اعتماد، نرفض المصادقة بهدوء (لن تظهر نافذة)
-        callback({});
+        // ⭐ إلغاء الطلب فوراً، هذا يمنع ظهور نافذة المصادقة
+        callback({ cancel: true }); 
         return;
       }
-      
-      // لطلبات أخرى (غير البروكسي)، لا نفعل شيئاً
       callback({});
     },
     { urls: ['<all_urls>'] },
@@ -236,13 +189,6 @@ export function setupProxyAuth() {
   );
 }
 
-/* ============================================
-   7. حالة البروكسي
-   ============================================ */
 export function getStatus() {
-  return {
-    currentProxy,
-    poolSize: proxyPool.length,
-    remaining: proxyPool.length - proxyIndex
-  };
+  return { currentProxy, poolSize: proxyPool.length, remaining: proxyPool.length - proxyIndex };
 }
