@@ -1,60 +1,31 @@
-Smart Shopper - إضافة Chrome عائمة
-====================================
-
-ما الذي تفعله؟
---------------
-لوحة عائمة تظهر تلقائياً أثناء تصفح أي صفحة منتج، وتبحث في AliExpress
-عن منتجات مشابهة وأرخص وتعرضها مع السعر والتخفيض والتقييم وعدد المبيعات،
-مع فرز حسب: الأرخص / أفضل تقييم / أكبر خصم / الأكثر مبيعاً.
-
-⭐ الميزة الجديدة: دوران IP تلقائي
----------------------------------
-الإضافة تغيّر عنوان IP تلقائياً بعد كل N عملية بحث لتفادي حظر AliExpress.
-
-للتفعيل:
-1. افتح ملف background.js.
-2. ابحث عن const PROXIES = [...]
-3. ضع وكلاءك بهذا الشكل:
-     { scheme: 'http',   host: '1.2.3.4', port: 8080, username: 'user', password: 'pass' },
-     { scheme: 'socks5', host: '5.6.7.8', port: 1080 }
-4. احفظ الملف، ثم أعد تحميل الإضافة من chrome://extensions
-
-بديل أسرع (بدون تعديل الكود):
-افتح service worker من chrome://extensions → Inspect views → service worker
-وألصق في الـ console:
-   chrome.storage.local.set({ __proxies: [
-     { scheme:'http',   host:'1.2.3.4', port:8080, username:'u', password:'p' },
-     { scheme:'socks5', host:'5.6.7.8', port:1080 }
-   ]});
-
-الإعدادات القابلة للتعديل (في أعلى background.js):
-- ROTATE_AFTER_N_SEARCHES = 2   → عدد السحبات لكل IP (2 = سحب مرتين)
-- PROXY_SETTLE_MS          = 1200 → وقت الانتظار بعد التبديل
-
-تغيير عدد السحبات لكل IP:
-- 1 = تبديل كل سحب
-- 2 = تبديل كل سحبتين (الافتراضي)
-- 3 = تبديل كل 3 سحبات
-
-فحص الحالة (من console الـ service worker):
-   chrome.runtime.sendMessage({type:'GET_PROXY_STATUS'}, console.log);
-
-إعادة تعيين العدّاد:
-   chrome.runtime.sendMessage({type:'RESET_PROXY_STATE'}, console.log);
-
-خطوات التثبيت
---------------
-1. فك ضغط الملف ZIP.
-2. افتح chrome://extensions وفعّل "وضع المطوّر".
-3. اضغط "تحميل غير مضغوط" واختر مجلد smart-shopper.
-4. ضع وكلاءك في background.js (انظر أعلاه).
-5. أعد تحميل الإضافة، وصفّح أي منتج.
-
-⚠️ ملاحظات مهمة
----------------
-- الوكلاء يجب أن تدعم HTTPS CONNECT (معظم HTTP/HTTPS/SOCKS5 تدعمها).
-- وكلاء مجانية عادةً بطيئة وغير مستقرة — يُفضّل وكلاء مدفوعة (Residential Proxies)
-  لنتائج أفضل على AliExpress.
-- Tor (socks5://127.0.0.1:9050) يعمل أيضاً، لكن عناوينه مدرجة في القوائم
-  السوداء لدى AliExpress وغالباً لن تعمل.
-- إذا كانت كل الوكلاء تفشل، الإضافة ستعمل بدون بروكسي (كأنك لم تضبط شيئاً).
+{
+  "manifest_version": 3,
+  "name": "Smart Shopper",
+  "version": "2.0.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "https://*.aliexpress.com/*",
+    "https://*.aliexpress.us/*",
+    "https://api.proxyscrape.com/*",
+    "https://raw.githubusercontent.com/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://httpbin.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [{
+    "matches": ["https://*.aliexpress.com/*", "https://*.aliexpress.us/*"],
+    "js": ["content.js"],
+    "css": ["styles.css"],
+    "run_at": "document_idle"
+  }],
+  "action": { "default_title": "Smart Shopper" }
+}
