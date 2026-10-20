@@ -1,5 +1,5 @@
 /* ============================================
-   Proxy Manager - v3.3 (Strict Auth Filter)
+   Proxy Manager - v3.4 (Safe Isolation)
    ============================================ */
 
 const PROXY_SOURCES = [
@@ -11,15 +11,10 @@ const PROXY_SOURCES = [
 let currentProxy = null;
 let proxyPool = [];
 let proxyIndex = 0;
-let authCredentials = { username: '', password: '' };
 
-// متغيرات لمراقبة المصادقة
 let proxyRequestedAuth = false;
 let currentTestingProxy = null;
 
-/* ============================================
-   1. جلب بروكسيات جديدة
-   ============================================ */
 export async function refreshProxyPool() {
   const all = [];
   for (const url of PROXY_SOURCES) {
@@ -65,17 +60,12 @@ function parseProxyText(text) {
   return out;
 }
 
-/* ============================================
-   2. اختبار البروكسي (استبعاد بروكسيات المصادقة)
-   ============================================ */
 async function testProxy(proxy, timeoutMs = 5000) {
   proxyRequestedAuth = false;
   currentTestingProxy = proxy;
   
   try {
     await applyProxyInternal(proxy);
-    
-    // اختبار على AliExpress لضمان دعم HTTPS وعدم طلب مصادقة
     const testUrl = `https://www.aliexpress.com/robots.txt?t=${Date.now()}`;
     
     const res = await fetch(testUrl, { 
@@ -84,25 +74,18 @@ async function testProxy(proxy, timeoutMs = 5000) {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     
-    // إذا طلب البروكسي مصادقة (407) أو تم اعتراضه، نرفضه
     if (proxyRequestedAuth || res.status === 407) {
-      console.warn(`[Proxy] 🚫 بروكسي يتطلب مصادقة: ${proxy.host}:${proxy.port}`);
       return false;
     }
-    
     return res.status >= 200 && res.status < 500;
   } catch (e) {
     return false;
   } finally {
     currentTestingProxy = null;
-    // ⭐ مسح البروكسي بعد الاختبار لعدم التأثير على التصفح العادي
     await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
   }
 }
 
-/* ============================================
-   3. تطبيق البروكسي (للاختبار فقط)
-   ============================================ */
 async function applyProxyInternal(proxy) {
   await chrome.proxy.settings.set({
     scope: 'regular',
@@ -116,9 +99,9 @@ async function applyProxyInternal(proxy) {
   });
 }
 
-/* ============================================
-   4. تطبيق PAC لتوجيه AliExpress فقط
-   ============================================ */
+/* ============================================================
+   تطبيق PAC (عزل تام): البروكسي يطبق فقط على روابط البحث wholesale
+   ============================================================ */
 export async function applyProxyForAliExpress(proxy) {
   if (!proxy) {
     await chrome.proxy.settings.clear({ scope: 'regular' });
@@ -127,10 +110,11 @@ export async function applyProxyForAliExpress(proxy) {
   }
   
   currentProxy = proxy;
-  authCredentials = { username: proxy.username || '', password: proxy.password || '' };
   
+  // السحر هنا: نوجه فقط الروابط التي تحتوي على "wholesale" (وهي روابط البحث)
+  // بينما صفحات المنتجات وباقي الموقع تمر مباشرة (DIRECT) دون بروكسي
   const pacScript = `function FindProxyForURL(url, host) {
-    if (host.indexOf("aliexpress.com") !== -1 || host.indexOf("aliexpress.us") !== -1) {
+    if (host.indexOf("aliexpress.com") !== -1 && url.indexOf("wholesale") !== -1) {
       return "PROXY ${proxy.host}:${proxy.port}";
     }
     return "DIRECT";
@@ -141,12 +125,15 @@ export async function applyProxyForAliExpress(proxy) {
     value: { mode: 'pac_script', pacScript: { data: pacScript } }
   });
   
-  console.log(`[Proxy] 🎯 AliExpress → ${proxy.host}:${proxy.port}`);
+  console.log(`[Proxy] 🎯 تفعيل البروكسي لروابط البحث فقط → ${proxy.host}:${proxy.port}`);
 }
 
-/* ============================================
-   5. الحصول على بروكسي جديد
-   ============================================ */
+export async function clearProxy() {
+  await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
+  currentProxy = null;
+  console.log('[Proxy] 🧹 تم إيقاف البروكسي والعودة للتصفح المباشر.');
+}
+
 export async function getNextProxy(maxTries = 10) {
   if (proxyPool.length === 0) {
     const stored = await chrome.storage.local.get('proxyPool');
@@ -175,20 +162,14 @@ export async function getNextProxy(maxTries = 10) {
   return proxyPool.length > 0 ? proxyPool[0] : null;
 }
 
-/* ============================================
-   6. منع نوافذ المصادقة
-   ============================================ */
 export function setupProxyAuth() {
-  // نستخدم onAuthRequired لاعتراض طلبات المصادقة وإلغائها
   chrome.webRequest.onAuthRequired.addListener(
     (details, callback) => {
       if (details.isProxy) {
-        // إذا كنا نختبر بروكسياً، نسجل أنه طلب مصادقة
         if (currentTestingProxy) {
           proxyRequestedAuth = true;
         }
-        
-        // ⭐ إلغاء الطلب لمنع ظهور النافذة المنبثقة
+        // إلغاء طلب المصادقة لمنع النافذة المنبثقة
         callback({ cancel: true }); 
         return;
       }
@@ -199,9 +180,6 @@ export function setupProxyAuth() {
   );
 }
 
-/* ============================================
-   7. حالة البروكسي
-   ============================================ */
 export function getStatus() {
   return { currentProxy, poolSize: proxyPool.length, remaining: proxyPool.length - proxyIndex };
 }
