@@ -1,12 +1,12 @@
 /* ============================================
-   Proxy Manager - التحكم الكامل في chrome.proxy
+   Proxy Manager - v3.0 (Text Sources)
    ============================================ */
 
-// مصادر البروكسي المجانية (محدثة تلقائياً)
+// مصادر نصية موثوقة (تعيد IP:PORT مباشرة)
 const PROXY_SOURCES = [
-  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=json',
-  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json',
-  'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.json',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
 ];
 
 let currentProxy = null;
@@ -15,7 +15,7 @@ let proxyIndex = 0;
 let authCredentials = { username: '', password: '' };
 
 /* ============================================
-   1. جلب بروكسيات جديدة من المصادر
+   1. جلب بروكسيات جديدة
    ============================================ */
 export async function refreshProxyPool() {
   const all = [];
@@ -23,15 +23,17 @@ export async function refreshProxyPool() {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) continue;
-      const data = await res.json();
-      const parsed = parseProxyResponse(data);
+      
+      const text = await res.text();
+      const parsed = parseProxyText(text);
       all.push(...parsed);
-      console.log(`[Proxy] ✅ ${parsed.length} بروكسي من ${url.split('/')[2]}`);
+      console.log(`[Proxy] ✅ ${parsed.length} بروكسي من ${url.split('/')[4]}`);
     } catch (e) {
       console.warn(`[Proxy] ❌ فشل جلب من ${url}:`, e.message);
     }
   }
   
+  // إزالة التكرارات وخلط القائمة
   const unique = Array.from(
     new Map(all.map(p => [`${p.host}:${p.port}`, p])).values()
   );
@@ -42,65 +44,44 @@ export async function refreshProxyPool() {
   console.log(`[Proxy] 📦 جاهز ${proxyPool.length} بروكسي`);
   
   await chrome.storage.local.set({ 
-    proxyPool: proxyPool.slice(0, 500),
+    proxyPool: proxyPool.slice(0, 1000),
     poolUpdatedAt: Date.now() 
   });
   
   return proxyPool.length;
 }
 
-/* ============================================
-   إصلاح 1: دالة تحليل البيانات (تدعم جميع الصيغ)
-   ============================================ */
-function parseProxyResponse(data) {
+// دالة تحليل النص (ip:port)
+function parseProxyText(text) {
   const out = [];
-  if (!Array.isArray(data)) return out;
-  
-  for (const item of data) {
-    try {
-      let host = null;
-      let port = null;
-      let scheme = 'http';
-      let country = '';
-
-      // صيغة ProxyScrape
-      if (typeof item.proxy === 'string') {
-        const parts = item.proxy.split(':');
-        if (parts.length >= 2) {
-          host = parts[0];
-          port = parseInt(parts[1], 10);
-        }
-      } 
-      // صيغة Proxifly (حيث item.proxy = "http://160.153.0.39:80")
-      else if (item.ip && item.port) {
-        host = item.ip;
-        port = parseInt(item.port, 10);
-        scheme = item.protocol || 'http';
-      }
-      
+  const lines = text.split('\n');
+  for (let line of lines) {
+    line = line.trim();
+    // تجاهل التعليقات والأسطر الفارغة
+    if (!line || line.startsWith('#')) continue;
+    
+    const parts = line.split(':');
+    if (parts.length === 2) {
+      const host = parts[0];
+      const port = parseInt(parts[1], 10);
       if (host && !isNaN(port) && port > 0) {
-        out.push({
-          scheme: scheme === 'https' ? 'http' : scheme, // بعض البروكسيات تسمي نفسها https لكنها http
-          host,
-          port,
-          country: item.ip_data?.countryCode || item.geolocation?.country || ''
-        });
+        out.push({ scheme: 'http', host, port, country: '' });
       }
-    } catch (e) {
-      // تجاهل العناصر التالفة
     }
   }
   return out;
 }
 
 /* ============================================
-   2. اختبار البروكسي (هل هو صالح؟)
+   2. اختبار البروكسي
    ============================================ */
 async function testProxy(proxy, timeoutMs = 5000) {
   try {
-    const testUrl = `https://httpbin.org/ip?t=${Date.now()}`;
     await applyProxyInternal(proxy);
-    const res = await fetch(testUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    // نستخدم httpbin لاختبار الاتصال
+    const res = await fetch(`https://httpbin.org/ip?t=${Date.now()}`, { 
+      signal: AbortSignal.timeout(timeoutMs) 
+    });
     if (!res.ok) return false;
     const data = await res.json();
     return !!data.origin;
@@ -110,7 +91,7 @@ async function testProxy(proxy, timeoutMs = 5000) {
 }
 
 /* ============================================
-   3. تطبيق البروكسي (الدالة الداخلية)
+   3. تطبيق البروكسي (مؤقت للاختبار)
    ============================================ */
 async function applyProxyInternal(proxy) {
   authCredentials = {
@@ -135,7 +116,7 @@ async function applyProxyInternal(proxy) {
 }
 
 /* ============================================
-   إصلاح 2: تطبيق PAC (ضمان أن يكون النص ASCII فقط)
+   4. تطبيق PAC لتوجيه AliExpress فقط
    ============================================ */
 export async function applyProxyForAliExpress(proxy) {
   if (!proxy) {
@@ -150,7 +131,7 @@ export async function applyProxyForAliExpress(proxy) {
     password: proxy.password || ''
   };
   
-  // سكربت PAC خالص بـ ASCII (بدون تعليقات أو أحرف خاصة)
+  // ⚠️ سكربت PAC يجب أن يكون ASCII فقط (بدون تعليقات عربية)
   const pacScript = `function FindProxyForURL(url, host) {
     if (host.indexOf("aliexpress.com") !== -1 || host.indexOf("aliexpress.us") !== -1) {
       return "PROXY ${proxy.host}:${proxy.port}";
@@ -170,12 +151,13 @@ export async function applyProxyForAliExpress(proxy) {
 }
 
 /* ============================================
-   4. الحصول على بروكسي جديد (مع اختبار)
+   5. الحصول على بروكسي جديد
    ============================================ */
 export async function getNextProxy(maxTries = 5) {
+  // إذا كانت القائمة فارغة، جلب من جديد
   if (proxyPool.length === 0) {
     const stored = await chrome.storage.local.get('proxyPool');
-    if (stored.proxyPool?.length) {
+    if (stored.proxyPool && stored.proxyPool.length > 0) {
       proxyPool = stored.proxyPool;
     } else {
       await refreshProxyPool();
@@ -187,6 +169,7 @@ export async function getNextProxy(maxTries = 5) {
     return null;
   }
   
+  // محاولة اختبار 5 بروكسيات
   for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
     const candidate = proxyPool[proxyIndex++];
     console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
@@ -198,7 +181,7 @@ export async function getNextProxy(maxTries = 5) {
     }
   }
   
-  console.warn('[Proxy] ❌ فشلت كل المحاولات، جلب قائمة جديدة...');
+  console.warn('[Proxy] ❌ فشلت المحاولات الحالية، جلب قائمة جديدة...');
   await refreshProxyPool();
   
   if (proxyPool.length > 0) {
@@ -208,7 +191,7 @@ export async function getNextProxy(maxTries = 5) {
 }
 
 /* ============================================
-   5. مصادقة البروكسي
+   6. مصادقة البروكسي
    ============================================ */
 export function setupProxyAuth() {
   chrome.webRequest.onAuthRequired.addListener(
@@ -225,7 +208,7 @@ export function setupProxyAuth() {
 }
 
 /* ============================================
-   6. الحالة
+   7. حالة البروكسي
    ============================================ */
 export function getStatus() {
   return {
