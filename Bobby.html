@@ -1,46 +1,236 @@
-{
-  "manifest_version": 3,
-  "name": "Smart Shopper",
-  "version": "2.1.0",
-  "description": "Trouvez le meilleur prix pour le même produit sur AliExpress avec rotation d'IP",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage",
-    "proxy",
-    "webRequest",
-    "webRequestAuthProvider"
-  ],
-  "host_permissions": [
-    "https://*.aliexpress.com/*",
-    "https://*.aliexpress.us/*",
-    "https://api.proxyscrape.com/*",
-    "https://raw.githubusercontent.com/*",
-    "https://cdn.jsdelivr.net/*",
-    "https://httpbin.org/*"
-  ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://*.aliexpress.com/*",
-        "https://*.aliexpress.us/*"
-      ],
-      "js": ["content.js"],
-      "css": ["styles.css"],
-      "run_at": "document_idle"
+/* ============================================
+   Proxy Manager - التحكم الكامل في chrome.proxy
+   ============================================ */
+
+// مصادر البروكسي المجانية (محدثة تلقائياً)
+const PROXY_SOURCES = [
+  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=json',
+  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json',
+  'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.json',
+];
+
+let currentProxy = null;
+let proxyPool = [];
+let proxyIndex = 0;
+let authCredentials = { username: '', password: '' };
+
+/* ============================================
+   1. جلب بروكسيات جديدة من المصادر
+   ============================================ */
+export async function refreshProxyPool() {
+  const all = [];
+  for (const url of PROXY_SOURCES) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const parsed = parseProxyResponse(data);
+      all.push(...parsed);
+      console.log(`[Proxy] ✅ ${parsed.length} بروكسي من ${url.split('/')[2]}`);
+    } catch (e) {
+      console.warn(`[Proxy] ❌ فشل جلب من ${url}:`, e.message);
     }
-  ],
-  "icons": {
-    "16": "icon16.png",
-    "32": "icon32.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
-  },
-  "action": {
-    "default_title": "Smart Shopper"
   }
+  
+  const unique = Array.from(
+    new Map(all.map(p => [`${p.host}:${p.port}`, p])).values()
+  );
+  unique.sort(() => Math.random() - 0.5);
+  
+  proxyPool = unique;
+  proxyIndex = 0;
+  console.log(`[Proxy] 📦 جاهز ${proxyPool.length} بروكسي`);
+  
+  await chrome.storage.local.set({ 
+    proxyPool: proxyPool.slice(0, 500),
+    poolUpdatedAt: Date.now() 
+  });
+  
+  return proxyPool.length;
+}
+
+/* ============================================
+   إصلاح 1: دالة تحليل البيانات (تدعم جميع الصيغ)
+   ============================================ */
+function parseProxyResponse(data) {
+  const out = [];
+  if (!Array.isArray(data)) return out;
+  
+  for (const item of data) {
+    try {
+      let host = null;
+      let port = null;
+      let scheme = 'http';
+      let country = '';
+
+      // صيغة ProxyScrape
+      if (typeof item.proxy === 'string') {
+        const parts = item.proxy.split(':');
+        if (parts.length >= 2) {
+          host = parts[0];
+          port = parseInt(parts[1], 10);
+        }
+      } 
+      // صيغة Proxifly (حيث item.proxy = "http://160.153.0.39:80")
+      else if (item.ip && item.port) {
+        host = item.ip;
+        port = parseInt(item.port, 10);
+        scheme = item.protocol || 'http';
+      }
+      
+      if (host && !isNaN(port) && port > 0) {
+        out.push({
+          scheme: scheme === 'https' ? 'http' : scheme, // بعض البروكسيات تسمي نفسها https لكنها http
+          host,
+          port,
+          country: item.ip_data?.countryCode || item.geolocation?.country || ''
+        });
+      }
+    } catch (e) {
+      // تجاهل العناصر التالفة
+    }
+  }
+  return out;
+}
+
+/* ============================================
+   2. اختبار البروكسي (هل هو صالح؟)
+   ============================================ */
+async function testProxy(proxy, timeoutMs = 5000) {
+  try {
+    const testUrl = `https://httpbin.org/ip?t=${Date.now()}`;
+    await applyProxyInternal(proxy);
+    const res = await fetch(testUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!data.origin;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ============================================
+   3. تطبيق البروكسي (الدالة الداخلية)
+   ============================================ */
+async function applyProxyInternal(proxy) {
+  authCredentials = {
+    username: proxy.username || '',
+    password: proxy.password || ''
+  };
+  
+  await chrome.proxy.settings.set({
+    scope: 'regular',
+    value: {
+      mode: 'fixed_servers',
+      rules: {
+        singleProxy: {
+          scheme: proxy.scheme || 'http',
+          host: proxy.host,
+          port: proxy.port
+        },
+        bypassList: ['localhost', '127.0.0.1', '<local>']
+      }
+    }
+  });
+}
+
+/* ============================================
+   إصلاح 2: تطبيق PAC (ضمان أن يكون النص ASCII فقط)
+   ============================================ */
+export async function applyProxyForAliExpress(proxy) {
+  if (!proxy) {
+    await chrome.proxy.settings.clear({ scope: 'regular' });
+    currentProxy = null;
+    return;
+  }
+  
+  currentProxy = proxy;
+  authCredentials = {
+    username: proxy.username || '',
+    password: proxy.password || ''
+  };
+  
+  // سكربت PAC خالص بـ ASCII (بدون تعليقات أو أحرف خاصة)
+  const pacScript = `function FindProxyForURL(url, host) {
+    if (host.indexOf("aliexpress.com") !== -1 || host.indexOf("aliexpress.us") !== -1) {
+      return "PROXY ${proxy.host}:${proxy.port}";
+    }
+    return "DIRECT";
+  }`;
+  
+  await chrome.proxy.settings.set({
+    scope: 'regular',
+    value: {
+      mode: 'pac_script',
+      pacScript: { data: pacScript }
+    }
+  });
+  
+  console.log(`[Proxy] 🎯 AliExpress → ${proxy.host}:${proxy.port}`);
+}
+
+/* ============================================
+   4. الحصول على بروكسي جديد (مع اختبار)
+   ============================================ */
+export async function getNextProxy(maxTries = 5) {
+  if (proxyPool.length === 0) {
+    const stored = await chrome.storage.local.get('proxyPool');
+    if (stored.proxyPool?.length) {
+      proxyPool = stored.proxyPool;
+    } else {
+      await refreshProxyPool();
+    }
+  }
+  
+  if (proxyPool.length === 0) {
+    console.warn('[Proxy] ⚠️ لا توجد بروكسيات متاحة، سيتم التصفح مباشرة');
+    return null;
+  }
+  
+  for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
+    const candidate = proxyPool[proxyIndex++];
+    console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
+    
+    const works = await testProxy(candidate, 4000);
+    if (works) {
+      console.log(`[Proxy] ✅ بروكسي صالح: ${candidate.host}:${candidate.port}`);
+      return candidate;
+    }
+  }
+  
+  console.warn('[Proxy] ❌ فشلت كل المحاولات، جلب قائمة جديدة...');
+  await refreshProxyPool();
+  
+  if (proxyPool.length > 0) {
+    return proxyPool[0];
+  }
+  return null;
+}
+
+/* ============================================
+   5. مصادقة البروكسي
+   ============================================ */
+export function setupProxyAuth() {
+  chrome.webRequest.onAuthRequired.addListener(
+    (details, callback) => {
+      if (authCredentials.username || authCredentials.password) {
+        callback({ authCredentials });
+      } else {
+        callback({});
+      }
+    },
+    { urls: ['<all_urls>'] },
+    ['asyncBlocking']
+  );
+}
+
+/* ============================================
+   6. الحالة
+   ============================================ */
+export function getStatus() {
+  return {
+    currentProxy,
+    poolSize: proxyPool.length,
+    remaining: proxyPool.length - proxyIndex
+  };
 }
