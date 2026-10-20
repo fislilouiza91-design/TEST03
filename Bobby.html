@@ -1,145 +1,190 @@
 /* ============================================
-   Proxy Manager - v5.5 (Strict URL Isolation)
+   Smart Shopper - Background v5.5
    ============================================ */
 
-const PROXY_SOURCES = [
-  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
-  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
-  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
-];
+import {
+  refreshProxyPool, getNextProxy, applyProxyForAliExpress,
+  clearProxy, setupProxyAuth
+} from './proxy-manager.js';
 
-let currentProxy = null;
-let proxyPool = [];
-let proxyIndex = 0;
-let proxyRequestedAuth = false;
-let currentTestingProxy = null;
+const MAX_PAGES = 10;
+const DELAY_BETWEEN_PAGES = 2000;
 
-export async function refreshProxyPool() {
-  const all = [];
-  for (const url of PROXY_SOURCES) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
-      const text = await res.text();
-      all.push(...parseProxyText(text));
-    } catch (e) {
-      console.warn(`[Proxy] ❌ فشل جلب من ${url.split('/')[4] || url}`);
-    }
+chrome.runtime.onInstalled.addListener(async () => {
+  await clearProxy(); // تنظيف أي بروكسي عالق عند التثبيت
+  setupProxyAuth();
+  await refreshProxyPool();
+});
+chrome.runtime.onStartup.addListener(clearProxy);
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
+  
+  if (msg.type === 'CLEAR_PROXY') {
+    clearProxy().then(() => sendResponse({ ok: true }));
+    return true;
   }
+
+  if (msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
   
-  const unique = Array.from(new Map(all.map(p => [`${p.host}:${p.port}`, p])).values());
-  unique.sort(() => Math.random() - 0.5);
-  
-  proxyPool = unique;
-  proxyIndex = 0;
-  console.log(`[Proxy] 📦 جاهز ${proxyPool.length} بروكسي`);
-  
-  await chrome.storage.local.set({ proxyPool: proxyPool.slice(0, 1000) });
-  return proxyPool.length;
+  (async () => {
+    try {
+      let page = 1, retries = 0, totalFetched = 0, firstBatchSent = false;
+      const MAX_RETRIES = 5, seenIds = new Set();
+      
+      // ⭐ البصمة السرية: نضع _ext_fetch=1 في رابط البحث
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0&_ext_fetch=1';
+
+      while (page <= MAX_PAGES && retries < MAX_RETRIES) {
+        let proxy = await getNextProxy();
+        if (!proxy) break;
+
+        await applyProxyForAliExpress(proxy);
+        await new Promise(r => setTimeout(r, 500)); // انتظار بسيط لتطبيق PAC
+
+        try {
+          console.log(`[Fetch] صفحة ${page} عبر ${proxy.host}:${proxy.port}...`);
+          const items = await fetchPage(baseUrl, page);
+          
+          if (items && items.length > 0) {
+            const newItems = items.filter(it => it && it.id && !seenIds.has(it.id));
+            newItems.forEach(it => seenIds.add(it.id));
+            
+            if (newItems.length > 0) {
+              totalFetched += newItems.length;
+              if (tabId) {
+                if (!firstBatchSent) {
+                  // إرسال الدفعة الأولى للواجهة
+                  sendResponse({ ok: true, items: newItems, searchUrl: baseUrl.replace('&_ext_fetch=1', ''), done: false });
+                  firstBatchSent = true;
+                } else {
+                  // إرسال الدفعات التالية
+                  chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_UPDATE', items: newItems }).catch(() => {});
+                }
+              }
+            }
+          }
+          
+          page++;
+          retries = 0; 
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_PAGES));
+        } catch (err) {
+          if (err.message === 'PROXY_FAILED') {
+            console.warn(`[Search] ⚠️ البروكسي توقف، تبديل...`);
+            retries++;
+          } else break;
+        } finally {
+          // ⭐ مسح إجباري للبروكسي بعد كل صفحة (لحماية تصفح المستخدم)
+          await clearProxy(); 
+        }
+      }
+      
+      if (tabId) chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }).catch(() => {});
+      if (!firstBatchSent) sendResponse({ ok: true, items: [], done: true });
+      
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+  return true;
+});
+
+async function fetchPage(baseUrl, page) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      signal: AbortSignal.timeout(12000)
+    });
+    
+    if (!res.ok) {
+      if ([403, 407, 429].includes(res.status)) throw new Error('PROXY_FAILED'); 
+      return [];
+    }
+    
+    const html = await res.text();
+    if (html.includes('captcha') || html.includes('punish') || html.includes('slide to verify')) {
+      throw new Error('PROXY_FAILED'); 
+    }
+    
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    throw new Error('PROXY_FAILED');
+  }
 }
 
-function parseProxyText(text) {
+/* ============================================
+   دوال استخراج البيانات (لا تغيير عليها)
+   ============================================ */
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  
   const out = [];
-  const lines = text.split('\n');
-  for (let line of lines) {
-    line = line.trim();
-    if (!line || line.startsWith('#')) continue;
-    const parts = line.split(':');
-    if (parts.length === 2) {
-      const host = parts[0];
-      const port = parseInt(parts[1], 10);
-      if (host && !isNaN(port) && port > 0) out.push({ scheme: 'http', host, port });
-    }
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const title = clean(o.title?.displayTitle || o.title || '');
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice || p.formatedPrice || '';
+      const discount = o.discount || sale.discount || '';
+      const rating = (o.evaluation && o.evaluation.starRating) || o.averageStarRate || '';
+      const sold = o.tradeDesc || o.sold || '';
+      out.push({ id: String(id), title: title || 'Produit', img, price, discount, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch {}
   }
   return out;
 }
 
-/* ⭐ سكربت PAC صارم: يوجه فقط الروابط التي تحمل بصمتنا السرية */
-function buildPAC(proxy) {
-  return `function FindProxyForURL(url, host) {
-    if (url.indexOf("_ext_fetch=1") !== -1 || url.indexOf("_ext_test=1") !== -1) {
-      return "PROXY ${proxy.host}:${proxy.port}";
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ id: m[1], title: 'Produit', img: '', price: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
+  }
+  return out;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
     }
-    return "DIRECT";
-  }`;
-}
-
-async function testProxy(proxy, timeoutMs = 4000) {
-  proxyRequestedAuth = false;
-  currentTestingProxy = proxy;
-  
-  try {
-    await chrome.proxy.settings.set({
-      scope: 'regular',
-      value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
-    });
-
-    // نضع بصمة _ext_test=1 لكي يمر الطلب عبر البروكسي للاختبار
-    const testUrl = `https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`;
-    const res = await fetch(testUrl, { 
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    
-    if (proxyRequestedAuth || res.status === 407) return false;
-    return res.status >= 200 && res.status < 500;
-  } catch (e) {
-    return false;
-  } finally {
-    currentTestingProxy = null;
-    await clearProxy();
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
   }
+  return null;
 }
 
-export async function applyProxyForAliExpress(proxy) {
-  if (!proxy) return await clearProxy();
-  currentProxy = proxy;
-  
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
-  });
-}
-
-export async function clearProxy() {
-  await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
-  currentProxy = null;
-}
-
-export async function getNextProxy(maxTries = 10) {
-  if (proxyPool.length === 0) {
-    const stored = await chrome.storage.local.get('proxyPool');
-    if (stored.proxyPool?.length > 0) proxyPool = stored.proxyPool;
-    else await refreshProxyPool();
-  }
-  
-  if (proxyPool.length === 0) return null;
-  
-  for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
-    const candidate = proxyPool[proxyIndex++];
-    console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
-    
-    if (await testProxy(candidate, 4000)) {
-      console.log(`[Proxy] ✅ بروكسي صالح: ${candidate.host}:${candidate.port}`);
-      return candidate;
-    }
-  }
-  
-  await refreshProxyPool();
-  return proxyPool.length > 0 ? proxyPool[0] : null;
-}
-
-export function setupProxyAuth() {
-  chrome.webRequest.onAuthRequired.addListener(
-    (details, callback) => {
-      if (details.isProxy) {
-        if (currentTestingProxy) proxyRequestedAuth = true;
-        callback({ cancel: true }); // يلغي طلب المصادقة لمنع النوافذ المنبثقة
-        return;
-      }
-      callback({});
-    },
-    { urls: ['<all_urls>'] },
-    ['asyncBlocking']
-  );
-}
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
