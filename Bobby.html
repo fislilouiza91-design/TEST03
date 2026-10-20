@@ -1,238 +1,262 @@
 /* ============================================
-   Proxy Manager - التحكم الكامل في chrome.proxy
+   Smart Shopper - Background v2.0
+   مع التحكم الكامل في chrome.proxy
    ============================================ */
 
-// مصادر البروكسي المجانية (محدثة تلقائياً)
-const PROXY_SOURCES = [
-  // ProxyScrape - HTTP proxies
-  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=json',
-  // ProxyScrape - SOCKS5
-  'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=json',
-  // Proxifly (GitHub)
-  'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.json',
-];
+import {
+  refreshProxyPool,
+  getNextProxy,
+  applyProxyForAliExpress,
+  setupProxyAuth,
+  getStatus
+} from './proxy-manager.js';
 
-// الحالة الحالية
-let currentProxy = null;       // { scheme, host, port, username, password }
-let proxyPool = [];            // قائمة البروكسيات المتاحة
-let proxyIndex = 0;
-let authCredentials = { username: '', password: '' };
+// ⚙️ الإعدادات
+const MAX_PAGES = 10;
+const PARALLEL_BATCH = 1;
+const DELAY_BETWEEN_BATCHES = 1500;
 
 /* ============================================
-   1. جلب بروكسيات جديدة من المصادر
+   التهيئة عند بدء الإضافة
    ============================================ */
-export async function refreshProxyPool() {
-  const all = [];
-  for (const url of PROXY_SOURCES) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const parsed = parseProxyResponse(data);
-      all.push(...parsed);
-      console.log(`[Proxy] ✅ ${parsed.length} بروكسي من ${url.split('/')[2]}`);
-    } catch (e) {
-      console.warn(`[Proxy] ❌ فشل جلب من ${url}:`, e.message);
-    }
+chrome.runtime.onInstalled.addListener(async () => {
+  setupProxyAuth();
+  await refreshProxyPool();
+  console.log('[Init] الإضافة جاهزة');
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  setupProxyAuth();
+});
+
+/* ============================================
+   مستمع الرسائل الرئيسي
+   ============================================ */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
+  
+  // حالة البروكسي (للتشخيص)
+  if (msg.type === 'PROXY_STATUS') {
+    sendResponse(getStatus());
+    return true;
   }
   
-  // إزالة التكرارات
-  const unique = Array.from(
-    new Map(all.map(p => [`${p.host}:${p.port}`, p])).values()
-  );
+  // تحديث قائمة البروكسي يدوياً
+  if (msg.type === 'REFRESH_PROXIES') {
+    refreshProxyPool().then(count => sendResponse({ ok: true, count }));
+    return true;
+  }
   
-  // خلط عشوائي (مهم لتوزيع الحمل)
-  unique.sort(() => Math.random() - 0.5);
+  // إلغاء البروكسي (تصفح مباشر)
+  if (msg.type === 'CLEAR_PROXY') {
+    applyProxyForAliExpress(null).then(() => sendResponse({ ok: true }));
+    return true;
+  }
   
-  proxyPool = unique;
-  proxyIndex = 0;
-  console.log(`[Proxy] 📦 جاهز ${proxyPool.length} بروكسي`);
+  // البحث الرئيسي
+  if (msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
   
-  await chrome.storage.local.set({ 
-    proxyPool: proxyPool.slice(0, 500),  // نخزن 500 فقط
-    poolUpdatedAt: Date.now() 
-  });
+  (async () => {
+    try {
+      // ⭐ 1. الحصول على بروكسي جديد واختباره
+      console.log('[Search] 🔄 جلب بروكسي جديد...');
+      const proxy = await getNextProxy();
+      
+      // ⭐ 2. تطبيقه على AliExpress فقط (PAC)
+      await applyProxyForAliExpress(proxy);
+      
+      // ⭐ 3. الانتظار حتى يستقر الاتصال
+      await new Promise(r => setTimeout(r, 2000));
+      
+      // ⭐ 4. بدء الزحف
+      const q = encodeURIComponent((msg.title || '').slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0';
+      
+      const seenIds = new Set();
+      let firstBatchSent = false;
+      let totalFetched = 0;
+      
+      for (let batch = 0; batch < MAX_PAGES; batch += PARALLEL_BATCH) {
+        const pages = [];
+        for (let i = 0; i < PARALLEL_BATCH && (batch + i) < MAX_PAGES; i++) {
+          pages.push(batch + i + 1);
+        }
+        
+        const results = await Promise.all(pages.map(p => fetchPage(baseUrl, p)));
+        const newItems = [];
+        let emptyPages = 0;
+        
+        for (const items of results) {
+          if (!items || !items.length) { emptyPages++; continue; }
+          for (const it of items) {
+            if (!it || !it.id || seenIds.has(it.id)) continue;
+            seenIds.add(it.id);
+            newItems.push(it);
+          }
+        }
+        
+        totalFetched += newItems.length;
+        
+        if (newItems.length > 0 && tabId) {
+          if (!firstBatchSent) {
+            sendResponse({ ok: true, items: newItems, searchUrl: baseUrl, done: false, count: newItems.length });
+            firstBatchSent = true;
+          } else {
+            chrome.tabs.sendMessage(tabId, {
+              type: 'SMART_SEARCH_UPDATE',
+              items: newItems,
+              searchUrl: baseUrl
+            }).catch(() => {});
+          }
+        }
+        
+        // إذا فشلت صفحة (حظر)، نغير البروكسي فوراً
+        if (emptyPages === pages.length && batch === 0) {
+          console.warn('[Search] ⚠️ حظر محتمل، تبديل البروكسي...');
+          const newProxy = await getNextProxy();
+          await applyProxyForAliExpress(newProxy);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+        
+        if (emptyPages === pages.length) break;
+        if (batch + PARALLEL_BATCH < MAX_PAGES) {
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
+        }
+      }
+      
+      if (tabId) {
+        chrome.tabs.sendMessage(tabId, {
+          type: 'SMART_SEARCH_DONE',
+          total: totalFetched
+        }).catch(() => {});
+      }
+      if (!firstBatchSent) {
+        sendResponse({ ok: true, items: [], searchUrl: baseUrl, done: true });
+      }
+      
+    } catch (e) {
+      console.error('[Search] فشل:', e);
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
   
-  return proxyPool.length;
+  return true;
+});
+
+/* ============================================
+   دالة جلب صفحة (بدون تعديل)
+   ============================================ */
+async function fetchPage(baseUrl, page) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: {
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    
+    if (!res.ok) {
+      console.warn(`[Fetch] صفحة ${page} → HTTP ${res.status}`);
+      return [];
+    }
+    
+    const html = await res.text();
+    if (html.includes('captcha') || html.includes('punish')) {
+      console.warn(`[Fetch] صفحة ${page} → حظر مكتشف`);
+      return [];
+    }
+    
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    console.warn(`[Fetch] صفحة ${page} فشلت:`, e.message);
+    return [];
+  }
 }
 
-function parseProxyResponse(data) {
-  const out = [];
-  if (!Array.isArray(data)) return out;
+/* ============================================
+   دوال التحليل (كما هي من كودك الأصلي)
+   ============================================ */
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
   
-  for (const item of data) {
+  const out = [];
+  for (const o of arr) {
     try {
-      // صيغة ProxyScrape
-      if (item.proxy) {
-        const [host, port] = item.proxy.split(':');
-        if (host && port) out.push({ scheme: 'http', host, port: +port, country: item.ip_data?.countryCode || '' });
-      }
-      // صيغة Proxifly
-      else if (item.ip && item.port) {
-        out.push({
-          scheme: item.protocol || 'http',
-          host: item.ip,
-          port: +item.port,
-          country: item.geolocation?.country || ''
-        });
-      }
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      
+      const title = clean(o.title?.displayTitle || o.title || '');
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice || p.formatedPrice || '';
+      const discount = o.discount || sale.discount || '';
+      const rating = (o.evaluation && o.evaluation.starRating) || o.averageStarRate || '';
+      const sold = o.tradeDesc || o.sold || '';
+      
+      out.push({
+        id: String(id),
+        title: title || 'Produit similaire',
+        img, price, discount, rating, sold,
+        link: 'https://www.aliexpress.com/item/' + id + '.html'
+      });
     } catch {}
   }
   return out;
 }
 
-/* ============================================
-   2. اختبار البروكسي (هل هو صالح؟)
-   ============================================ */
-async function testProxy(proxy, timeoutMs = 5000) {
-  try {
-    // نستخدم httpbin.org/ip لأنها سريعة وموثوقة
-    const testUrl = `https://httpbin.org/ip?t=${Date.now()}`;
-    
-    // نطبق البروكسي مؤقتاً
-    await applyProxyInternal(proxy);
-    
-    const res = await fetch(testUrl, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) return false;
-    
-    const data = await res.json();
-    // إذا رجع IP مختلف عن IP الحقيقي، فالبروكسي يعمل
-    return !!data.origin;
-  } catch (e) {
-    return false;
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({
+      id: m[1], title: 'Produit', img: '', price: '', discount: '',
+      rating: '', sold: '',
+      link: 'https://www.aliexpress.com/item/' + m[1] + '.html'
+    });
   }
+  return out;
 }
 
-/* ============================================
-   3. تطبيق البروكسي (الدالة الداخلية)
-   ============================================ */
-async function applyProxyInternal(proxy) {
-  authCredentials = {
-    username: proxy.username || '',
-    password: proxy.password || ''
-  };
-  
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: {
-      mode: 'fixed_servers',
-      rules: {
-        singleProxy: {
-          scheme: proxy.scheme || 'http',
-          host: proxy.host,
-          port: proxy.port
-        },
-        bypassList: ['localhost', '127.0.0.1', '<local>']
-      }
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
     }
-  });
-}
-
-/* ============================================
-   4. تطبيق PAC لتوجيه AliExpress فقط
-   ============================================ */
-export async function applyProxyForAliExpress(proxy) {
-  if (!proxy) {
-    // إلغاء البروكسي (تصفح مباشر)
-    await chrome.proxy.settings.clear({ scope: 'regular' });
-    currentProxy = null;
-    return;
-  }
-  
-  currentProxy = proxy;
-  authCredentials = {
-    username: proxy.username || '',
-    password: proxy.password || ''
-  };
-  
-  // سكربت PAC: يوجه AliExpress عبر البروكسي، والبقية DIRECT
-  const pacScript = `
-    function FindProxyForURL(url, host) {
-      // AliExpress فقط
-      if (host.includes('aliexpress.com') || host.includes('aliexpress.us')) {
-        return 'PROXY ${proxy.host}:${proxy.port}';
-      }
-      // كل شيء آخر → اتصال مباشر (تصفح طبيعي)
-      return 'DIRECT';
-    }
-  `;
-  
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: {
-      mode: 'pac_script',
-      pacScript: { data: pacScript }
-    }
-  });
-  
-  console.log(`[Proxy] 🎯 AliExpress → ${proxy.host}:${proxy.port}`);
-}
-
-/* ============================================
-   5. الحصول على بروكسي جديد (مع اختبار)
-   ============================================ */
-export async function getNextProxy(maxTries = 5) {
-  // إذا كانت القائمة فارغة، جلب جديدة
-  if (proxyPool.length === 0) {
-    const stored = await chrome.storage.local.get('proxyPool');
-    if (stored.proxyPool?.length) {
-      proxyPool = stored.proxyPool;
-    } else {
-      await refreshProxyPool();
-    }
-  }
-  
-  if (proxyPool.length === 0) {
-    console.warn('[Proxy] ⚠️ لا توجد بروكسيات متاحة، سيتم التصفح مباشرة');
-    return null;
-  }
-  
-  // جرّب حتى 5 بروكسيات
-  for (let i = 0; i < maxTries && proxyIndex < proxyPool.length; i++) {
-    const candidate = proxyPool[proxyIndex++];
-    console.log(`[Proxy] 🧪 اختبار ${candidate.host}:${candidate.port} (${i + 1}/${maxTries})`);
-    
-    const works = await testProxy(candidate, 4000);
-    if (works) {
-      console.log(`[Proxy] ✅ بروكسي صالح: ${candidate.host}:${candidate.port}`);
-      return candidate;
-    }
-  }
-  
-  console.warn('[Proxy] ❌ فشلت كل المحاولات، جلب قائمة جديدة...');
-  await refreshProxyPool();
-  
-  // محاولة أخيرة بقائمة جديدة
-  if (proxyPool.length > 0) {
-    return proxyPool[0];
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
   }
   return null;
 }
 
-/* ============================================
-   6. مصادقة البروكسي (إذا كان يحتاج كلمة مرور)
-   ============================================ */
-export function setupProxyAuth() {
-  chrome.webRequest.onAuthRequired.addListener(
-    (details, callback) => {
-      if (authCredentials.username || authCredentials.password) {
-        callback({ authCredentials });
-      } else {
-        callback({});
-      }
-    },
-    { urls: ['<all_urls>'] },
-    ['asyncBlocking']
-  );
-}
-
-/* ============================================
-   7. الحالة (للتشخيص)
-   ============================================ */
-export function getStatus() {
-  return {
-    currentProxy,
-    poolSize: proxyPool.length,
-    remaining: proxyPool.length - proxyIndex
-  };
+function clean(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
