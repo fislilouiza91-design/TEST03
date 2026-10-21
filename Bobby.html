@@ -1,36 +1,42 @@
-{
-  "manifest_version": 3,
-  "name": "Smart Shopper",
-  "version": "4.0",
-  "description": "Trouvez le meilleur prix",
-  "permissions": [
-    "storage",
-    "proxy",
-    "webRequest",
-    "webRequestAuthProvider"
-  ],
-  "host_permissions": [
-    "https://*.aliexpress.com/*",
-    "https://*.aliexpress.us/*",
-    "https://raw.githubusercontent.com/*",
-    "http://127.0.0.1:3000/*" 
-  ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://*.aliexpress.com/*",
-        "https://*.aliexpress.us/*"
-      ],
-      "js": ["content.js"],
-      "css": ["styles.css"],
-      "run_at": "document_idle"
-    }
-  ],
-  "action": {
-    "default_title": "Smart Shopper"
-  }
-}
+const express = require('express');
+const cors = require('cors');
+const { exec } = require('child_process');
+const app = express();
+
+app.use(cors());
+
+const COUNTRIES = ['US', 'DE', 'GB', 'FR', 'NL', 'CA', 'JP', 'SG'];
+let currentCountryIndex = 0;
+
+// ⭐ تم تصحيح المسار هنا بناءً على معلوماتك
+const PSIPHON_PATH = `"C:\\Program Files\\Psiphon\\psiphon3.exe"`; 
+
+app.get('/rotate', (req, res) => {
+    currentCountryIndex = (currentCountryIndex + 1) % COUNTRIES.length;
+    const newCountry = COUNTRIES[currentCountryIndex];
+    
+    console.log(`\n🔄 جاري تغيير Psiphon إلى دولة: ${newCountry}`);
+
+    exec('taskkill /F /IM psiphon3.exe', () => {
+        const regCmd = `reg add "HKCU\\Software\\Psiphon3" /v EgressRegion /t REG_SZ /d ${newCountry} /f`;
+        
+        exec(regCmd, (err) => {
+            if (err) {
+                console.error('خطأ في تعديل السجل:', err);
+                return res.status(500).send('Failed to change region');
+            }
+
+            exec(`start "" ${PSIPHON_PATH}`);
+            console.log(`✅ تم تشغيل Psiphon. الانتظار 12 ثانية للاتصال...`);
+
+            setTimeout(() => {
+                console.log(`🎉 Psiphon جاهز للعمل على ${newCountry}`);
+                res.json({ ok: true, country: newCountry });
+            }, 12000);
+        });
+    });
+});
+
+app.listen(3000, () => {
+    console.log('🚀 Bridge Server يعمل على http://127.0.0.1:3000');
+});
