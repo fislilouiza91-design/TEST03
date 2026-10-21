@@ -1,561 +1,460 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Smart Pages)
-   Version: v15 (improved matching)
+   Smart Shopper - Content Script (AI Integrated Sorting)
+   Version: v15 (basePrice support)
    ============================================ */
+(function () {
+  'use strict';
+  if (window.__smartShopper) return;
+  window.__smartShopper = true;
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000;
-const MAX_PAGES_TO_FETCH = 3;
-const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
+  const PANEL_ID = 'ss-panel';
+  const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
 
-// ★ NEW: براندات معروفة لتقليل الأخطاء
-const KNOWN_BRANDS = new Set([
-  'anker', 'samsung', 'apple', 'xiaomi', 'huawei', 'sony', 'philips', 'baseus',
-  'ugreen', 'essager', 'toocki', 'orico', 'dji', 'logitech', 'dyson', 'braun',
-  'oralb', 'redmi', 'poco', 'google', 'oneplus', 'oppo', 'vivo', 'realme',
-  'lenovo', 'dell', 'asus', 'acer', 'msi', 'razer', 'corsair', 'kingston',
-  'sandisk', 'seagate', 'toshiba', 'crucial', 'intel', 'amd', 'nvidia',
-  'canon', 'nikon', 'epson', 'brother', 'dymo', 'casio', 'garmin', 'fitbit',
-  'bose', 'jbl', 'sennheiser', 'beats', 'airpods', 'airtag', 'marshall',
-  'belkin', 'aukey', 'ravpower', 'verbatim', 'transcend', 'pny', 'lexar',
-  'netac', 'teclast', 'xraydisk', 'adata', 'niimbot', 'phomemo', 'vretti',
-  'nike', 'adidas', 'puma', 'zara', 'h&m'
-]);
+  let currentKey = '';
+  let currentSearchTitle = '';
+  let currentProductId = null;
 
-// ★ NEW: اختصارات لا تُعتبر براندات
-const NOT_BRANDS = new Set([
-  'usb', 'hdmi', 'rgb', 'led', 'lcd', 'oled', 'tws', 'gps', 'bt', 'wifi',
-  'ios', 'pc', 'tv', 'dvd', 'mp3', 'mp4', 'cd', 'diy', 'etc', 'xr', 'xl',
-  'xs', 'sos', 'otg', 'nfc', 'pd', 'qc', 'ip', 'uk', 'us', 'eu'
-]);
+  let allFetchedItems = [];
+  let cachedSortedItems = [];
+  let activeTab = 0;
+  let closed = false;
+  let imageObserver = null;
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
+  let currentProductPrice = 0;
+  let isBackgroundFetching = false;
+  let nextPageToFetch = 2;
+  let hasMoreResults = true;
+  const MAX_PAGES_TO_FETCH = 3;
+
+  let searchState = { running: false, complete: false, startTime: 0, totalItems: 0 };
+
+  const SVG_ICONS = {
+    all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
+    cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
+    rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
+    discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
+    selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
+    similar: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>',
+    minimize: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    close: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+    expand: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>'
+  };
+
+  let currentCurrencySymbol = '$';
+  (function detectCurrency() {
+    try {
+      const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+      if (ck) {
+        const params = new URLSearchParams(decodeURIComponent(ck[1]));
+        const cur = params.get('c_tp');
+        if (cur) currentCurrencySymbol = cur.toUpperCase();
+      }
+    } catch (e) {}
+  })();
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  const soldNum = s => { const t = String(s || '').toLowerCase().replace(/,/g, ''); const m = t.match(/(\d+(?:\.\d+)?)\s*(k)?/); if (!m) return 0; let v = parseFloat(m[1]); if (m[2]) v *= 1000; return v; };
+  const discNum = s => num(String(s || '').replace('-', ''));
+
+  function stars(rating) {
+    const r = parseFloat(rating) || 0; const full = Math.floor(r); const half = (r - full) >= 0.5; let out = '';
+    for (let i = 0; i < 5; i++) { if (i < full) out += '★'; else if (i === full && half) out += '★'; else out += '☆'; }
+    return out;
+  }
+
+  // ★ UPDATED: expose getCurrencySymbol for fullscreen.js
+  window.SS_Utils = {
+    esc, num, soldNum, discNum, stars,
+    getCurrencySymbol: () => currentCurrencySymbol
+  };
+
+  function isProductPage() {
+    if (location.href.includes('/punish') || location.href.includes('captcha')) return false;
+    return /aliexpress\.(com|us)\/(item|i)\/\d+/i.test(location.href);
+  }
+
+  function extractCurrentPrice() {
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const sc of scripts) {
+        const data = JSON.parse(sc.textContent); const arr = Array.isArray(data) ? data : [data];
+        for (const node of arr) {
+          const g = n => {
+            if (!n) return null; if (n['@type'] === 'Product') return n;
+            if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } }
+            if (n['@graph']) { const r = g(n['@graph']); if (r) return r; }
+            return null;
+          };
+          const p = g(node);
+          if (p && p.offers) {
+            const off = Array.isArray(p.offers) ? p.offers[0] : p.offers;
+            if (off && off.price) { const v = parseFloat(String(off.price).replace(/[^\d.]/g, '')); if (v > 0) return v; }
+          }
+        }
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  function detectProduct() {
+    if (!isProductPage()) return null;
+    const price = extractCurrentPrice();
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const sc of scripts) {
+        const data = JSON.parse(sc.textContent); const arr = Array.isArray(data) ? data : [data];
+        for (const node of arr) {
+          const g = n => {
+            if (!n) return null; if (n['@type'] === 'Product') return n;
+            if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } }
+            if (n['@graph']) { const r = g(n['@graph']); if (r) return r; }
+            return null;
+          };
+          const p = g(node);
+          if (p && p.name) return { title: String(p.name).slice(0, 160), price: price };
+        }
+      }
+    } catch (e) {}
+    const ogTitle = document.querySelector('meta[property="og:title"]');
+    if (ogTitle && ogTitle.content && ogTitle.content.trim().length > 8) return { title: ogTitle.content.trim().slice(0, 160), price: price };
+    const title = (document.title || '').replace(/[|\-–—].*$/, '').trim();
+    if (title.length > 8) return { title: title.slice(0, 160), price: price };
+    return null;
+  }
+
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="ss-header" id="ss-header">
+        <div class="ss-logo">S</div>
+        <div class="ss-titles"><div class="ss-title">${esc(T('panelTitle'))}</div><div class="ss-sub">${esc(T('panelSubtitle'))}</div></div>
+        <div class="ss-header-btns">
+          <button class="ss-wbtn" id="ss-expand">${SVG_ICONS.expand}</button>
+          <button class="ss-wbtn" id="ss-minimize">${SVG_ICONS.minimize}</button>
+          <button class="ss-wbtn ss-wbtn-close" id="ss-close">${SVG_ICONS.close}</button>
+        </div>
+      </div>
+      <div class="ss-body" id="ss-body">
+        <div class="ss-tabs" id="ss-tabs">
+          <span class="ss-tab active" data-i="0">${SVG_ICONS.all}<span>${esc(T('tabAll'))}</span></span>
+          <span class="ss-tab" data-i="1">${SVG_ICONS.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
+          <span class="ss-tab" data-i="2">${SVG_ICONS.rated}<span>${esc(T('tabBestRated'))}</span></span>
+          <span class="ss-tab" data-i="3">${SVG_ICONS.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
+          <span class="ss-tab" data-i="4">${SVG_ICONS.selling}<span>${esc(T('tabBestSelling'))}</span></span>
+          <span class="ss-tab" data-i="5">${SVG_ICONS.similar}<span>${esc(T('tabSimilar') || 'Similar')}</span></span>
+        </div>
+        <div class="ss-progress" id="ss-progress"></div>
+        <div class="ss-list" id="ss-list"></div>
+        <div class="ss-footer" id="ss-footer"></div>
+      </div>`;
+    document.documentElement.appendChild(panel);
+    document.getElementById('ss-close').onclick = () => { closed = true; panel.remove(); };
+    document.getElementById('ss-minimize').onclick = () => { const b = document.getElementById('ss-body'); b.style.display = b.style.display === 'none' ? '' : 'none'; };
+    document.getElementById('ss-expand').onclick = openFullscreen;
+    document.getElementById('ss-tabs').addEventListener('click', onTabClick);
+    makeDraggable(panel, document.getElementById('ss-header'));
+
+    document.getElementById('ss-list').addEventListener('scroll', (e) => {
+      const list = e.target;
+      if (list.scrollTop + list.clientHeight >= list.scrollHeight - 100) {
+        if (hasMoreResults && !isBackgroundFetching && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
+          prefetchBackgroundPages();
+        }
+      }
+    }, { passive: true });
+  }
+
+  function syncFullscreen() {
+    if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) {
+      window.SS_Fullscreen.updateItems(cachedSortedItems);
+      window.SS_Fullscreen.setState({ fetching: isBackgroundFetching, activeTab: activeTab });
+    }
+  }
+
+  function openFullscreen() {
+    if (!window.SS_Fullscreen) return;
+    const panel = document.getElementById(PANEL_ID);
+    if (panel) panel.style.display = 'none';
+    window.SS_Fullscreen.open({
+      items: cachedSortedItems, activeTab: activeTab, fetching: isBackgroundFetching, currentProductPrice: currentProductPrice,
+      onTabChange: (newTab) => { activeTab = newTab; document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', +x.dataset.i === newTab)); renderList(true); syncFullscreen(); },
+      onRefresh: () => { currentKey = ''; if (window.SS_Fullscreen) window.SS_Fullscreen.close(); const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; scan(); },
+      onClose: () => { const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; }
+    });
+  }
+
+  function updateProgress() {
+    const p = document.getElementById('ss-progress'); if (!p) return;
+    if (!searchState.running && !searchState.complete) { p.innerHTML = ''; return; }
+    if (searchState.complete) {
+      p.innerHTML = `<span class="ss-progress-done">${esc(T('resultsText', { n: allFetchedItems.length }))}</span>`;
+      setTimeout(() => { if (p) p.innerHTML = ''; }, 3000);
+      return;
+    }
+    p.innerHTML = `<span class="ss-progress-text">${esc(T('loading'))}</span>`;
+  }
+
+  function onTabClick(e) {
+    const t = e.target.closest('.ss-tab'); if (!t) return;
+    activateTab(t, +t.dataset.i);
+  }
+
+  function activateTab(t, newTab) {
+    activeTab = newTab;
+    document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x === t));
+    renderList(true); const list = document.getElementById('ss-list'); if (list) list.scrollTop = 0; syncFullscreen();
+  }
+
+  function makeDraggable(el, handle) {
+    let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
+    handle.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      drag = true; sx = e.clientX; sy = e.clientY;
+      const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+      el.style.right = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px'; el.style.bottom = 'auto';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => { if (!drag) return; el.style.left = Math.max(0, ox + e.clientX - sx) + 'px'; el.style.top = Math.max(0, oy + e.clientY - sy) + 'px'; });
+    window.addEventListener('mouseup', () => drag = false);
+  }
+
+  function skeleton() {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    l.innerHTML = Array.from({ length: 4 }, () => `<div class="ss-card"><div class="ss-thumb-wrapper skel"></div><div class="ss-card-content"><div class="skel line"></div><div class="skel line short"></div></div><div class="ss-discount-box skel"></div></div>`).join('');
+  }
+
+  function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
+
+  function applySort() {
+    const p = detectProduct();
+    const getOriginalProduct = () => {
+      if (!p) return [];
+      return [{
+        id: currentProductId || 'original',
+        title: p.title,
+        img: document.querySelector('meta[property="og:image"]')?.content || '',
+        price: p.price > 0 ? p.price.toString() : '',
+        rating: '0',
+        sold: '',
+        link: window.location.href,
+        isExact: true,
+        finalScore: 999
+      }];
     };
 
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
+    if (activeTab === 0) {
+      cachedSortedItems = [...allFetchedItems].sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));
+      if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
+      return;
+    }
 
+    if (activeTab === 5) {
+      cachedSortedItems = allFetchedItems.filter(it => !it.isExact);
+      if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
+      return;
+    }
+
+    const exactMatches = allFetchedItems.filter(it => it.isExact);
+    if (exactMatches.length === 0) {
+      cachedSortedItems = getOriginalProduct();
+      return;
+    }
+
+    const sorters = [
+      null,
+      (a, b) => num(a.price) - num(b.price),
+      (a, b) => num(b.rating) - num(a.rating),
+      (a, b) => discNum(b.discount) - discNum(a.discount),
+      (a, b) => soldNum(b.sold) - soldNum(a.sold)
+    ];
+    cachedSortedItems = [...exactMatches].sort(sorters[activeTab] || sorters[1]);
+  }
+
+  function buildCard(it, i) {
+    const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
+    const itemPrice = num(it.price);
+    const hasComparison = currentProductPrice > 0 && itemPrice > 0;
+    const isHigher = hasComparison && itemPrice > currentProductPrice;
+    const boxClass = isHigher ? 'ss-discount-box ss-higher-price' : 'ss-discount-box';
+
+    const discountBoxHtml = `<div class="${boxClass}"><div class="ss-price-main">${it.price ? esc(it.price) + ' ' + currentCurrencySymbol : '—'}</div>${discountValue ? `<div class="ss-discount-label">-${esc(discountValue)}%</div>` : ''}</div>`;
+
+    let metaHtml = '';
+    if (it.rating) metaHtml += `<span class="ss-stars">${stars(it.rating)}</span><span class="ss-rating-num">${esc(it.rating)}</span>`;
+    if (it.sold) metaHtml += `<span class="ss-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
+    if (!metaHtml) metaHtml = `<span class="ss-no-info">${esc(T('noReviews'))}</span>`;
+
+    return `<a class="ss-card" href="${esc(it.link)}" target="_blank" rel="noopener">
+        <div class="ss-thumb-wrapper">${it.img ? `<img class="ss-thumb" data-src="${esc(it.img)}" alt="">` : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}</div>
+        <div class="ss-card-content">
+            <div class="ss-card-title">${esc(it.title || 'Produit similaire')}</div>
+            <div class="ss-card-meta">${metaHtml}</div>
+        </div>
+        ${discountBoxHtml}
+    </a>`;
+  }
+
+  function setupImageObserver() {
+    if (imageObserver) imageObserver.disconnect();
+    imageObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) { const img = entry.target; if (img.dataset.src) { img.src = img.dataset.src; img.removeAttribute('data-src'); } imageObserver.unobserve(img); }
+      });
+    }, { root: document.getElementById('ss-list'), rootMargin: '300px' });
+  }
+
+  function renderList(reset) {
+    const l = document.getElementById('ss-list'); if (!l) return;
+    applySort();
+    if (reset) { if (cachedSortedItems.length === 0) { message(T('noResults')); return; } l.innerHTML = ''; setupImageObserver(); }
+    if (!cachedSortedItems.length) return;
+
+    const temp = document.createElement('div');
+    temp.innerHTML = cachedSortedItems.map((it, i) => buildCard(it, i)).join('');
+    l.innerHTML = '';
+    while (temp.firstChild) l.appendChild(temp.firstChild);
+
+    if (imageObserver) l.querySelectorAll('img[data-src]').forEach(img => imageObserver.observe(img));
+    updateFooter();
+  }
+
+  function updateFooter() {
+    const f = document.getElementById('ss-footer'); if (!f) return;
+    let html = '';
+    if (!searchState.running) {
+      if (isBackgroundFetching) {
+        html += `<div class="ss-loading-more" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:12px; padding:10px;">
+          <span class="ss-spinner" style="border-top-color:#ff4747;"></span>
+          <span>${esc(T('loading'))}</span>
+        </div>`;
+      } else if (!hasMoreResults && cachedSortedItems.length > 0) {
+        html += `<div class="ss-no-more" style="font-size:11px; color:#999; text-align:center; padding:10px;">${esc(T('noMoreResults'))}</div>`;
+      }
+    }
+    f.innerHTML = html;
+  }
+
+  function prefetchBackgroundPages() {
+    if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) return;
+
+    isBackgroundFetching = true; updateFooter(); syncFullscreen();
+    const existingIds = allFetchedItems.map(x => x.id);
+
+    // ★ UPDATED: تمرير basePrice
+    chrome.runtime.sendMessage({
+      type: 'SMART_LOAD_MORE',
+      title: currentSearchTitle,
+      startPage: nextPageToFetch,
+      existingIds: existingIds,
+      country: getAliExpressRegion(),
+      productId: currentProductId,
+      basePrice: currentProductPrice || 0
+    }, (resp) => {
+      isBackgroundFetching = false;
+
+      if (resp && resp.ok) {
+        if (resp.items) allFetchedItems = allFetchedItems.concat(resp.items);
+        nextPageToFetch++;
+        renderList(true); updateProgress(); syncFullscreen();
+
+        if (!resp.hasMore || nextPageToFetch > MAX_PAGES_TO_FETCH || resp.items.length === 0) {
+          hasMoreResults = false;
+        } else {
+          setTimeout(prefetchBackgroundPages, 2000);
+        }
+      } else {
+        hasMoreResults = false;
+      }
+      updateFooter(); syncFullscreen();
+    });
+  }
+
+  function getAliExpressRegion() {
     try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
-
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-          if (results && results.length > 0) {
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
-        }
-        const monthIndex = new Date().getUTCMonth();
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-
-        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
-
-        const statements = body.all_items.map(c => {
-          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET
-              price = excluded.price, seller_rating = excluded.seller_rating,
-              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount,
-              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD',
-            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null,
-            isRelevant, now
-          );
-        });
-        if (statements.length > 0) await env.DB.batch(statements);
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
-        return json({ success: true }, 201, corsHeaders);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
-        const q = url.searchParams.get('q');
-        const originalTitle = url.searchParams.get('originalTitle');
-        const originalImage = url.searchParams.get('originalImage') || ''; // ★ NEW
-        const basePrice = url.searchParams.get('basePrice') || '';         // ★ NEW
-        const page = parseInt(url.searchParams.get('page') || '1');
-        const country = (url.searchParams.get('country') || 'US').toUpperCase();
-
-        if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
-        if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
-
-        // ★ UPDATED: مفتاح الكاش يشمل العنوان والسعر لتجنّب التلوث
-        const hash = await hashUrl(q + '::' + (originalTitle || '') + '::' + (basePrice || ''));
-        const cacheKey = `search:v15:${hash}:${page}`;
-
-        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
-        if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
-
-        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `en-US,en;q=0.9`;
-        const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
-
-        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
-        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
-
-        const rawItems = parseItems(html);
-        const hasMore = rawItems.length > 5;
-
-        let items = rawItems;
-
-        if (originalTitle && items.length > 0 && env.AI) {
-          // ★ UPDATED: تمرير السعر والصورة
-          items = await fastAIFilter(originalTitle, items, env, basePrice, originalImage);
-        }
-
-        if (items.length > 0) {
-          // ★ UPDATED: TTL قصير إذا النتائج قليلة (قد تحتاج إعادة تحسين لاحقاً)
-          const ttl = items.length >= 3 ? CACHE_TTL : 3600;
-          await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: ttl });
-        }
-
-        return json({ ok: true, items, hasMore, source: 'network' }, 200, corsHeaders);
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
-  }
-};
-
-/* ═══════════════════════════════════════════════════════════
-   ★★★  AI FILTER (rewritten)  ★★★
-   ═══════════════════════════════════════════════════════════ */
-async function fastAIFilter(originalTitle, items, env, basePriceStr, originalImage) {
-  try {
-    const baseSignals = extractProductSignals(originalTitle);
-    const basePrice = parseNum(basePriceStr);
-
-    // ── 1) فلتر سعري (الأقوى والأرخص) ─────────────────
-    let candidates = items.filter(it => {
-      const p = parseNum(it.price);
-      if (!basePrice || !p) return true;
-      const ratio = p / basePrice;
-      return ratio >= 0.30 && ratio <= 3.0;
-    });
-
-    // ── 2) فلتر الإكسسوارات ────────────────────────────
-    candidates = candidates.filter(it => !isAccessory(baseSignals, it.title));
-
-    if (candidates.length === 0) return [];
-
-    // ── 3) Embeddings ──────────────────────────────────
-    const modelName = '@cf/baai/bge-m3';
-    const baseEmb = await env.AI.run(modelName, { text: [originalTitle] });
-    const baseVec = baseEmb.data[0];
-
-    const itemEmbs = await env.AI.run(modelName, { text: candidates.map(c => c.title) });
-
-    // ── 4) تسجيل مركّب ─────────────────────────────────
-    const scored = candidates.map((it, i) => {
-      const aiScore = cosineSimilarity(baseVec, itemEmbs.data[i]);
-      const sig = extractProductSignals(it.title);
-
-      let score = aiScore * 100;
-
-      const sameBrand = baseSignals.brand && sig.brand && baseSignals.brand === sig.brand;
-      const sameModel = baseSignals.model && sig.model && baseSignals.model === sig.model;
-      const sameCat = baseSignals.category && sig.category === baseSignals.category;
-
-      if (sameBrand) score += 25;
-      if (sameModel) score += 40;
-      if (sameCat) score += 15;
-
-      const modelConflict = baseSignals.model && sig.model && !sameModel;
-      if (modelConflict) score -= 40;
-
-      const p = parseNum(it.price);
-      if (basePrice && p) {
-        const diff = Math.abs(p - basePrice) / basePrice;
-        if (diff < 0.30) score += 10;
-        else if (diff > 1.0) score -= 10;
-      }
-
-      const isExact = sameModel || (sameBrand && aiScore > 0.60);
-
-      return { ...it, aiScore, finalScore: score, isExact, _signals: sig };
-    });
-
-    scored.sort((a, b) => b.finalScore - a.finalScore);
-
-    // ── 5) عتبة مزدوجة ─────────────────────────────────
-    let filtered = scored.filter(it => it.finalScore >= 50 || it.aiScore >= 0.62);
-
-    // ── 6) تحقق LLM للحالات الحدّية (50–68) ────────────
-    const borderline = filtered.filter(it => it.finalScore >= 50 && it.finalScore < 68);
-    if (env.AI && borderline.length > 0 && borderline.length <= 8) {
-      const verifications = await Promise.all(
-        borderline.map(it => llmVerify(originalTitle, it.title, env).catch(() => null))
-      );
-      const verdicts = new Map(borderline.map((it, i) => [it.id, verifications[i]]));
-      filtered = filtered
-        .map(it => {
-          const v = verdicts.get(it.id);
-          if (!v) return it;
-          if (v === 'SAME') return { ...it, finalScore: it.finalScore + 25, isExact: true, llm: v };
-          if (v === 'DIFFERENT') return { ...it, finalScore: -999, llm: v };
-          return it;
-        })
-        .filter(it => it.finalScore > 0);
-    }
-
-    // ── 7) مطابقة بصرية (Captioning) للحد الأعلى فقط ──
-    if (originalImage && env.AI && filtered.length > 0) {
-      try {
-        const baseCap = await imageCaption(originalImage, env);
-        if (baseCap) {
-          const baseCapEmb = await env.AI.run(modelName, { text: [baseCap] });
-          const baseCapVec = baseCapEmb.data[0];
-
-          const toCheck = filtered.slice(0, 8); // حد أقصى 8 لتجنّب timeout
-          const capVecs = await Promise.all(
-            toCheck.map(it => it.img
-              ? imageCaption(it.img, env)
-                  .then(c => c ? env.AI.run(modelName, { text: [c] }).then(e => e.data[0]) : null)
-                  .catch(() => null)
-              : null)
-          );
-          toCheck.forEach((it, i) => {
-            if (capVecs[i]) {
-              const imgScore = cosineSimilarity(baseCapVec, capVecs[i]);
-              it.finalScore += (imgScore - 0.5) * 30; // مكافأة/عقوبة بحد أقصى ±15
-              it.imgScore = Math.round(imgScore * 100) / 100;
-            }
-          });
-          filtered.sort((a, b) => b.finalScore - a.finalScore);
-        }
-      } catch (e) {
-        console.error('Image caption error:', e.message);
-      }
-    }
-
-    return filtered.slice(0, 40).map(({ _signals, ...rest }) => rest);
-  } catch (err) {
-    console.error('AI filter error:', err.message);
-    return items;
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════
-   ★ NEW HELPERS
-   ═══════════════════════════════════════════════════════════ */
-
-function extractProductSignals(title) {
-  const raw = title || '';
-  const lower = raw.toLowerCase();
-
-  // ── البراند ─────────────────────────────────────────
-  let brand = '';
-  // 1) براندات معروفة
-  for (const w of lower.split(/\s+/)) {
-    const c = w.replace(/[^a-z0-9&]/g, '');
-    if (c && KNOWN_BRANDS.has(c)) { brand = c; break; }
-  }
-  // 2) ALL CAPS
-  if (!brand) {
-    for (const w of raw.split(/\s+/)) {
-      const c = w.replace(/[^A-Za-z0-9]/g, '');
-      if (c.length >= 2 && c.length <= 10
-          && c === c.toUpperCase() && /^[A-Z]+$/.test(c)
-          && !NOT_BRANDS.has(c.toLowerCase())) {
-        brand = c.toLowerCase(); break;
-      }
-    }
-  }
-  // 3) MixedCase (iPhone, MacBook, AirPods)
-  if (!brand) {
-    for (const w of raw.split(/\s+/)) {
-      const c = w.replace(/[^A-Za-z0-9]/g, '');
-      if (/^[A-Z][a-z]+[A-Z]/.test(c) || /^[A-Z]{2,}[a-z]+/.test(c)) {
-        brand = c.toLowerCase(); break;
-      }
-    }
-  }
-
-  // ── الطراز ──────────────────────────────────────────
-  const modelRegex = /\b([A-Za-z]{1,5}[-]?\d{2,5}[A-Za-z0-9-]*|\d{2,5}[A-Za-z]{2,6})\b/;
-  const mm = raw.match(modelRegex);
-  const model = mm ? mm[1].toLowerCase().replace(/[-_\s]/g, '') : '';
-
-  // ── الفئة ───────────────────────────────────────────
-  const CATS = {
-    'usb flash drive': /flash drive|usb drive|usb flash|cle usb|флешка|usb stick|pen drive/i,
-    'multimeter':      /multimeter|voltmeter|мультиметр/i,
-    'label maker':     /label maker|dymo|принтер этикеток|label printer/i,
-    'label tape':      /label tape|ruban|label cartridge|sticker tape/i,
-    'case':            /phone case|coque|housse|чехол|حافظة|protective cover|back cover/i,
-    'vacuum':          /sweeper|vacuum|пилосос/i,
-    'earbuds':         /earbuds|earphone|headphone|casque|навушники|tws/i,
-    'phone':           /iphone|samsung galaxy|xiaomi|redmi|pixel|هاتف/i,
-    'laptop':          /laptop|notebook|macbook|لابتوب/i,
-    'watch':           /smartwatch|watch|montre|ساعة|reloj/i,
-    'bag':             /backpack|handbag|tote|sac|حقيبة/i,
-    'shoes':           /shoe|sneaker|chaussure|حذاء/i,
-    'dress':           /dress|robe|فستان/i,
-    'toy':             /toy|jouet|لعبة/i,
-    'charger':         /charger|charger cable|شاحن/i,
-    'cable':           /cable|كابل|usb cable|data cable/i,
-  };
-  let category = '';
-  for (const [cat, re] of Object.entries(CATS)) {
-    if (re.test(lower)) { category = cat; break; }
-  }
-
-  return { brand, model, category, original: raw };
-}
-
-function isAccessory(baseSignals, itemTitle) {
-  const lower = (itemTitle || '').toLowerCase();
-
-  const ACC = /\b(case|coque|housse|cover|protector|screen|film|cable|charger|adapter|bag|pouch|skin|sleeve|stand|holder|strap|band|keychain|sticker|decal|mount|bracket|replacement|spare|part|refill|tape|ruban|label|حافظة|غطاء|شاحن|كابل|حماية|حقيبة|ملصق|شريط|واقي)\b/i;
-  const baseMatch = ACC.exec(lower);
-  if (!baseMatch) return false;
-
-  // إذا المنتج الأصلي نفسه إكسسوار من نفس النوع، لا نستبعد
-  const baseLower = (baseSignals.original || '').toLowerCase();
-  const baseMatchOnBase = ACC.exec(baseLower);
-  if (baseMatchOnBase && baseMatchOnBase[1].toLowerCase() === baseMatch[1].toLowerCase()) {
-    return false; // نفس نوع الإكسسوار = ليس عقوبة
-  }
-
-  return true;
-}
-
-async function llmVerify(baseTitle, candidateTitle, env) {
-  try {
-    const prompt = `You match products between sellers. Two products are SAME if they are the identical model (even from different sellers). They are DIFFERENT if one is an accessory, a variant, or another product.
-
-A: "${baseTitle.slice(0, 160)}"
-B: "${candidateTitle.slice(0, 160)}"
-
-Answer with one word: SAME, DIFFERENT, or UNCERTAIN.`;
-
-    const res = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4,
-      temperature: 0.1
-    });
-    const ans = (res.response || '').trim().toUpperCase();
-    return ans.includes('SAME') ? 'SAME'
-         : ans.includes('DIFFERENT') ? 'DIFFERENT'
-         : 'UNCERTAIN';
-  } catch {
-    return null;
-  }
-}
-
-async function imageCaption(url, env) {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const buf = await r.arrayBuffer();
-    if (buf.byteLength > 1024 * 1024) return null; // تجاهل الصور الكبيرة (>1MB)
-    const bytes = Array.from(new Uint8Array(buf));
-    const res = await env.AI.run('@cf/unum/uform-gen2-qwen-500m', {
-      image: bytes,
-      prompt: 'Describe this product briefly: type, shape, color, material, key features.'
-    });
-    return (res.description || res.response || '').trim();
-  } catch {
-    return null;
-  }
-}
-
-function parseNum(v) {
-  if (v == null) return null;
-  const cleaned = String(v).replace(/[^\d.,]/g, '');
-  if (!cleaned) return null;
-  // European decimal "12,99"
-  let normalized;
-  if (/,\d{1,2}$/.test(cleaned)) {
-    normalized = cleaned.replace(/\./g, '').replace(',', '.');
-  } else {
-    normalized = cleaned.replace(/,/g, '');
-  }
-  const m = normalized.match(/\d+(\.\d+)?/);
-  return m ? parseFloat(m[0]) : null;
-}
-
-/* ═══════════════════════════════════════════════════════════
-   BASE UTILITIES (unchanged)
-   ═══════════════════════════════════════════════════════════ */
-
-function cosineSimilarity(vecA, vecB) {
-  let dotProduct = 0, normA = 0, normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-async function hashUrl(url) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
-}
-
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-      let img = '';
-      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
-      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {}; const sale = p.salePrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+      const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+      if (ck) { const params = new URLSearchParams(decodeURIComponent(ck[1])); const region = params.get('region'); if (region) return region.toUpperCase(); }
     } catch (e) {}
+    const lang = navigator.language || 'en-US';
+    return lang.includes('-') ? lang.split('-')[1].toUpperCase() : 'US';
   }
-  return out;
-}
 
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
-    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
-    return '';
+  function runSearch(title, productPrice, productId) {
+    currentSearchTitle = title; currentProductPrice = productPrice || 0;
+    allFetchedItems = []; cachedSortedItems = []; nextPageToFetch = 2;
+    isBackgroundFetching = false; hasMoreResults = true; activeTab = 0;
+
+    let originalImage = '';
+    const ogImage = document.querySelector('meta[property="og:image"]');
+    if (ogImage) originalImage = ogImage.content;
+
+    document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x.dataset.i === '0'));
+    searchState = { running: true, complete: false, startTime: Date.now(), totalItems: 0 };
+    skeleton(); updateProgress();
+
+    // ★ UPDATED: تمرير basePrice
+    chrome.runtime.sendMessage({
+      type: 'SMART_SEARCH',
+      title,
+      country: getAliExpressRegion(),
+      productId: productId,
+      originalImage: originalImage,
+      basePrice: productPrice || 0
+    }, resp => {
+      searchState.running = false; searchState.complete = true;
+      if (!resp || !document.getElementById(PANEL_ID)) { updateFooter(); return; }
+      if (!resp.ok) { message(T('errorContact')); updateFooter(); return; }
+
+      allFetchedItems = resp.items || [];
+      hasMoreResults = resp.hasMore !== false;
+      searchState.totalItems = allFetchedItems.length;
+
+      renderList(true); updateProgress(); updateFooter(); syncFullscreen();
+      if (allFetchedItems.length === 0) message(T('noResults'));
+
+      if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH && allFetchedItems.length > 0) {
+        setTimeout(prefetchBackgroundPages, 1000);
+      } else {
+        hasMoreResults = false;
+        updateFooter();
+      }
+    });
   }
-  return String(v);
-}
 
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker); if (i < 0) return null;
-  const j = html.indexOf('[', i); if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
-
-/* ═══════════════════════════════════════════════════════════
-   PROXY PROVIDERS (unchanged)
-   ═══════════════════════════════════════════════════════════ */
-
-async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
-
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (status.disabled) continue;
-
-    try {
-      const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
-      if (html && html.length > 5000) return { html, provider: provider.name };
-    } catch (e) {
-      if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); }
+  function scan() {
+    if (closed) return;
+    if (!isProductPage()) {
+      const existing = document.getElementById(PANEL_ID);
+      if (existing) existing.remove();
+      if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) window.SS_Fullscreen.close();
+      currentKey = ''; currentProductPrice = 0; searchState.running = false; searchState.complete = false;
+      return;
     }
+    const p = detectProduct(); if (!p || !p.title) return;
+    const key = location.host + location.pathname + '|' + p.title + '|' + p.price;
+    if (key === currentKey) return;
+    currentKey = key;
+    const match = window.location.pathname.match(/item\/(\d+)\.html/);
+    currentProductId = match ? match[1] : null;
+    buildPanel();
+    document.getElementById(PANEL_ID).style.display = '';
+    currentSearchTitle = p.title; currentProductPrice = p.price || 0; skeleton();
+
+    if (currentProductId) {
+      chrome.runtime.sendMessage({ type: 'CHECK_CACHE', productId: currentProductId }, (resp) => {
+        if (resp && resp.ok && resp.data && resp.data.length > 0) {
+          allFetchedItems = resp.data.map(c => ({ id: c.competitor_id, title: c.title, img: '', price: c.price, rating: c.seller_rating, link: c.product_url, sold: '', isExact: true, finalScore: 100 }));
+          searchState.complete = true; searchState.totalItems = allFetchedItems.length;
+          hasMoreResults = false;
+          renderList(true); updateProgress(); updateFooter(); syncFullscreen();
+        } else { runSearch(p.title, p.price || 0, currentProductId); }
+      });
+    } else { runSearch(p.title, p.price || 0, null); }
   }
-  return { html: null, provider: null };
-}
 
-async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', 'false');
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const text = await res.text();
-    if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country);
-  url.searchParams.set('render', 'false');
-  url.searchParams.set('keep_headers', 'true');
-  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    const text = await res.text();
-    if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-    throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function getProviderStatus(providerName, env) {
-  try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
-}
-
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = {
-    disabled: true,
-    permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES,
-    reason, consecutiveFailures,
-    disabledAt: currentStatus.disabledAt || new Date().toISOString(),
-    lastHealthCheck: new Date().toISOString()
-  };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
-}
-
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-}
+  let lastUrl = location.href;
+  new MutationObserver(() => { if (location.href !== lastUrl) { lastUrl = location.href; scan(); } }).observe(document.body, { childList: true, subtree: true });
+  setTimeout(scan, 800); setInterval(scan, 2500);
+})();
