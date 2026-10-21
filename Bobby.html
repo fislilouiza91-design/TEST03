@@ -1,16 +1,19 @@
 /* ============================================
-   Proxy Manager - v13.0 (Free List + Fast Filter)
+   Proxy Manager - v14.0 (Parallel Validation)
    ============================================ */
 
-// مصدر قائمة البروكسيات المجانية (Proxifly)
 const PROXY_LIST_URL = 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt';
 
 let proxyPool = [];
 let proxyIndex = 0;
 let currentProxy = null;
+let isPreparing = false; // ⭐ متغير لمنع تكرار التجهيز
 
 export async function refreshProxyPool() {
-  console.log('[Proxy] ⏳ جاري جلب قائمة البروكسيات المجانية...');
+  if (isPreparing) return proxyPool.length;
+  isPreparing = true;
+  
+  console.log('[Proxy] ⏳ 1. جاري جلب قائمة البروكسيات المجانية...');
   try {
     const res = await fetch(PROXY_LIST_URL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -18,65 +21,68 @@ export async function refreshProxyPool() {
     const text = await res.text();
     const lines = text.split('\n');
     
-    // نأخذ أول 100 بروكسي فقط لتجربتها (لتوفير الوقت)
-    const rawProxies = lines.slice(0, 100).map(line => {
+    // نأخذ أول 50 بروكسي للتجربة (لتسريع العملية)
+    const rawProxies = lines.slice(0, 50).map(line => {
       const parts = line.trim().split('://');
       if (parts.length === 2) {
         const scheme = parts[0];
         const [host, port] = parts[1].split(':');
-        if (host && port) {
-          return { scheme, host, port: parseInt(port, 10) };
-        }
+        if (host && port) return { scheme, host, port: parseInt(port, 10) };
       }
       return null;
     }).filter(p => p !== null);
 
-    console.log(`[Proxy] 🧪 جاري اختبار ${rawProxies.length} بروكسي...`);
+    console.log(`[Proxy] 🧪 2. جاري اختبار ${rawProxies.length} بروكسي (بشكل متوازي)...`);
     
-    // اختبار البروكسيات (فلترة الميتة)
     const validProxies = [];
-    for (const proxy of rawProxies) {
-      // اختبار سريع: هل يدعم HTTPS؟
-      try {
-        // نطبق البروكسي مؤقتاً للاختبار
-        const testPac = `function FindProxyForURL(url, host) {
-          if (url.indexOf("_ext_test=1") !== -1) {
-            return "PROXY ${proxy.host}:${proxy.port}";
-          }
-          return "DIRECT";
-        }`;
-        
-        await chrome.proxy.settings.set({
-          scope: 'regular',
-          value: { mode: 'pac_script', pacScript: { data: testPac } }
-        });
+    
+    // ⭐ الاختبار المتوازي (نختبر 10 بروكسيات في نفس الوقت لتوفير الوقت)
+    const chunkSize = 10;
+    for (let i = 0; i < rawProxies.length; i += chunkSize) {
+      const chunk = rawProxies.slice(i, i + chunkSize);
+      
+      await Promise.all(chunk.map(async (proxy) => {
+        try {
+          const testPac = `function FindProxyForURL(url, host) {
+            if (url.indexOf("_ext_test=1") !== -1) return "PROXY ${proxy.host}:${proxy.port}";
+            return "DIRECT";
+          }`;
+          
+          await chrome.proxy.settings.set({
+            scope: 'regular',
+            value: { mode: 'pac_script', pacScript: { data: testPac } }
+          });
 
-        const testRes = await fetch(`https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`, {
-          signal: AbortSignal.timeout(3000), // 3 ثوانٍ فقط
-          mode: 'no-cors'
-        });
-        
-        // إذا وصلنا هنا، فالبروكسي يعمل
-        validProxies.push(proxy);
-        console.log(`[Proxy] ✅ بروكسي صالح: ${proxy.host}:${proxy.port}`);
-      } catch (e) {
-        // البروكسي ميت، نتجاهله
-      } finally {
-        await chrome.proxy.settings.clear({ scope: 'regular' });
-      }
+          // وقت الاختبار 3 ثوانٍ فقط
+          await fetch(`https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`, {
+            signal: AbortSignal.timeout(3000),
+            mode: 'no-cors'
+          });
+          
+          validProxies.push(proxy); // إذا نجح، نضيفه
+        } catch (e) {
+          // البروكسي ميت، نتجاهله
+        }
+      }));
+      
+      await chrome.proxy.settings.clear({ scope: 'regular' }); // تنظيف بعد كل دفعة
     }
     
+    // ⭐ 3. التوقف عن التجهيز: حفظ البروكسيات الصالحة والانتهاء
     proxyPool = validProxies;
     proxyIndex = 0;
-    console.log(`[Proxy] 📦 تم تجهيز ${proxyPool.length} بروكسي صالح من أصل ${rawProxies.length}.`);
+    isPreparing = false;
+    
+    console.log(`[Proxy] ✅ 3. اكتمل التجهيز! تم العثور على ${proxyPool.length} بروكسي صالح.`);
     
     if (proxyPool.length === 0) {
-      console.warn('[Proxy] ⚠️ لم يتم العثور على أي بروكسي صالح في هذه الدفعة. جرب التحديث.');
+      console.warn('[Proxy] ⚠️ لم يتم العثور على أي بروكسي صالح. جرب التحديث.');
     }
     
     return proxyPool.length;
   } catch (e) {
     console.error('[Proxy] ❌ فشل جلب القائمة:', e);
+    isPreparing = false;
     return 0;
   }
 }
@@ -105,7 +111,9 @@ export async function clearProxy() {
   currentProxy = null;
 }
 
+// هذه الدالة لن تبدأ العمل حتى ينتهي refreshProxyPool تماماً
 export async function getNextProxyInQueue() {
+  // إذا كانت القائمة فارغة، سيتم التجهيز أولاً (مرة واحدة فقط)
   if (proxyPool.length === 0) {
     await refreshProxyPool();
   }
@@ -129,12 +137,7 @@ export function setupProxyAuth() {
   chrome.webRequest.onAuthRequired.addListener(
     (details, callback) => {
       if (details.isProxy && currentProxy && currentProxy.username) {
-        callback({ 
-          authCredentials: { 
-            username: currentProxy.username, 
-            password: currentProxy.password 
-          } 
-        });
+        callback({ authCredentials: { username: currentProxy.username, password: currentProxy.password } });
         return;
       }
       callback({});
