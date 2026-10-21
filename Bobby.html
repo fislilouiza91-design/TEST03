@@ -1,1 +1,60 @@
-npm install express@4.17.1 cors
+/* ============================================
+   Proxy Manager - v16.0 (Psiphon Local)
+   ============================================ */
+
+const PSIPHON_PROXY = {
+  scheme: 'http',
+  host: '127.0.0.1',
+  port: 8080 // تأكد أن هذا هو منفذ Psiphon
+};
+
+let proxyPool = [];
+let proxyIndex = 0;
+let currentProxy = null;
+
+export async function refreshProxyPool() {
+  proxyPool = [PSIPHON_PROXY];
+  proxyIndex = 0;
+  console.log('[Proxy] ✅ الإضافة متصلة بـ Psiphon المحلي.');
+  return 1;
+}
+
+export function buildPAC(proxy) {
+  return `function FindProxyForURL(url, host) {
+    if (url.indexOf("_ext_fetch=1") !== -1) {
+      return "PROXY ${proxy.host}:${proxy.port}";
+    }
+    return "DIRECT";
+  }`;
+}
+
+export async function applyProxy(proxy) {
+  if (!proxy) return await clearProxy();
+  currentProxy = proxy;
+  await chrome.proxy.settings.set({
+    scope: 'regular',
+    value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
+  });
+}
+
+export async function clearProxy() {
+  await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
+  currentProxy = null;
+}
+
+export async function getNextProxyInQueue() {
+  if (proxyPool.length === 0) await refreshProxyPool();
+  return proxyPool[0];
+}
+
+export function markProxyAsDead(proxy) {}
+
+export function setupProxyAuth() {
+  chrome.webRequest.onAuthRequired.addListener(
+    (details, callback) => {
+      callback({}); // Psiphon لا يحتاج مصادقة
+    },
+    { urls: ['<all_urls>'] },
+    ['asyncBlocking']
+  );
+}
