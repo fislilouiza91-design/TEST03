@@ -1,42 +1,220 @@
 /* ============================================
-   Proxy Manager - v10.0 (Psiphon Local)
+   Smart Shopper - Background v23.0 (Rotate -> Wait -> Fetch)
    ============================================ */
 
-const PSIPHON_PROXY = {
-  scheme: 'http',
-  host: '127.0.0.1',
-  port: 8080 // تأكد أن هذا هو منفذ Psiphon
-};
+import { applyProxy, clearProxy, setupProxyAuth } from './proxy-manager.js';
 
-let currentProxy = null;
+const BRIDGE_URL = 'http://127.0.0.1:3000/rotate';
+const PSIPHON_PROXY_PORT = 8080;
 
-export async function applyProxy() {
-  currentProxy = PSIPHON_PROXY;
+let currentAbortController = null;
+
+async function triggerRotation() {
+  console.log('[Bridge] 🔄 جاري طلب تغيير الـ VPN (الرجاء الانتظار 12 ثانية)...');
+  try {
+    const res = await fetch(BRIDGE_URL);
+    const data = await res.json();
+    console.log(`[Bridge] ✅ تم تغيير الـ IP بنجاح إلى: ${data.country}. الـ VPN جاهز.`);
+  } catch (e) {
+    console.error('[Bridge] ❌ فشل تغيير الـ VPN. هل نافذة الجسر السوداء مفتوحة؟', e);
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  setupProxyAuth();
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'SMART_SEARCH') return;
+  const tabId = sender.tab && sender.tab.id;
   
-  const pacScript = `function FindProxyForURL(url, host) {
-    if (url.indexOf("_ext_fetch=1") !== -1) {
-      return "PROXY ${PSIPHON_PROXY.host}:${PSIPHON_PROXY.port}";
+  // إيقاف أي عملية جلب سابقة إذا ضغطت على منتج جديد بسرعة
+  if (currentAbortController) {
+    currentAbortController.abort();
+  }
+  currentAbortController = new AbortController();
+  const signal = currentAbortController.signal;
+
+  (async () => {
+    try {
+      // ⭐ 1. تغيير الـ VPN والانتظار حتى ينتهي
+      await triggerRotation();
+      
+      // ⭐ 2. توقف الإضافة وانتظر (حماية إضافية لضمان استقرار الاتصال)
+      console.log('[Search] ⏳ انتظار إضافي 3 ثوانٍ لاستقرار الاتصال...');
+      await new Promise(r => setTimeout(r, 3000));
+      
+      if (signal.aborted) return; // إذا ضغط المستخدم منتجاً آخر، نلغي
+
+      const searchTitle = msg.title || '';
+      let page = 1, totalFetched = 0, firstBatchSent = false;
+      const seenIds = new Set(); 
+      
+      const q = encodeURIComponent(searchTitle.slice(0, 90));
+      const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0&_ext_fetch=1';
+
+      console.log(`[Search] 🚀 بدء جلب المنتج: ${searchTitle.slice(0, 30)}...`);
+
+      // ⭐ 3. جلب 10 صفحات
+      while (page <= 10) {
+        try {
+          if (signal.aborted) throw new Error('ABORTED');
+
+          await applyProxy();
+          await new Promise(r => setTimeout(r, 500));
+
+          console.log(`[Fetch] جلب صفحة ${page}...`);
+          const items = await fetchPage(baseUrl, page, 15000, signal); 
+          
+          if (items && items.length > 0) {
+            const newItems = items.filter(it => it && it.id && !seenIds.has(it.id));
+            newItems.forEach(it => seenIds.add(it.id));
+            
+            if (newItems.length > 0) {
+              totalFetched += newItems.length;
+              if (tabId) {
+                if (!firstBatchSent) {
+                  sendResponse({ ok: true, items: newItems, searchUrl: baseUrl.replace('&_ext_fetch=1', ''), done: false });
+                  firstBatchSent = true;
+                } else {
+                  chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_UPDATE', items: newItems }).catch(() => {});
+                }
+              }
+            }
+          }
+          
+          page++; 
+          await new Promise(r => setTimeout(r, 1500)); // تأخير بين الصفحات لتبدو حقيقية
+          
+        } catch (err) {
+          if (err.message === 'ABORTED' || err.name === 'AbortError') {
+            return; 
+          } else {
+            console.warn(`[Search] ⚠️ فشل في الصفحة ${page}. إيقاف الجلب لهذا المنتج.`);
+            break; // نكتفي بالصفحات التي نجحت
+          }
+        } finally {
+          await clearProxy(); 
+        }
+      }
+      
+      // ⭐ 4. التوقف النهائي (لا يوجد تغيير في الخلفية هنا)
+      if (!signal.aborted) {
+         console.log(`[Search] 🎉 اكتمل جلب المنتج (${totalFetched} منتج). بانتظار المنتج القادم...`);
+         if (tabId) chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }).catch(() => {});
+         if (!firstBatchSent) sendResponse({ ok: true, items: [], done: true });
+      }
+      
+    } catch (e) {
+      if (e.name !== 'AbortError') sendResponse({ ok: false, error: String(e) });
     }
-    return "DIRECT";
-  }`;
+  })();
   
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: { mode: 'pac_script', pacScript: { data: pacScript } }
-  });
+  return true;
+});
+
+async function fetchPage(baseUrl, page, timeoutMs, signal) {
+  try {
+    const url = baseUrl + '&page=' + page;
+    
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': 'https://www.aliexpress.com/'
+      },
+      signal: signal 
+    });
+    
+    if (!res.ok) {
+      if ([403, 407, 429].includes(res.status)) throw new Error('PROXY_FAILED'); 
+      return [];
+    }
+    
+    const html = await res.text();
+    if (html.includes('captcha') || html.includes('punish') || html.includes('slide to verify')) {
+      throw new Error('PROXY_FAILED'); 
+    }
+    
+    let items = parseItems(html);
+    if (!items.length) items = fallbackIds(html);
+    return items;
+  } catch (e) {
+    if (e.name === 'AbortError') throw e; 
+    throw new Error('PROXY_FAILED');
+  }
 }
 
-export async function clearProxy() {
-  await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
-  currentProxy = null;
+// ============================================
+// دوال استخراج البيانات
+// ============================================
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr;
+  try { arr = JSON.parse(arrText); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const title = clean(o.title?.displayTitle || o.title || '');
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const price = sale.formatedActivityPrice || sale.formatedPrice || p.formatedPrice || '';
+      const discount = o.discount || sale.discount || '';
+      const rating = (o.evaluation && o.evaluation.starRating) || o.averageStarRate || '';
+      const sold = o.tradeDesc || o.sold || '';
+      out.push({ id: String(id), title: title || 'Produit', img, price, discount, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
+    } catch {}
+  }
+  return out;
 }
 
-export function setupProxyAuth() {
-  chrome.webRequest.onAuthRequired.addListener(
-    (details, callback) => {
-      callback({}); // Psiphon لا يحتاج مصادقة
-    },
-    { urls: ['<all_urls>'] },
-    ['asyncBlocking']
-  );
+function fallbackIds(html) {
+  const re = /"productId"\s*:\s*"(\d{6,})"/g;
+  const seen = new Set(); const out = [];
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ id: m[1], title: 'Produit', img: '', price: '', link: 'https://www.aliexpress.com/item/' + m[1] + '.html' });
+  }
+  return out;
 }
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
