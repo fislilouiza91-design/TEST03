@@ -340,8 +340,22 @@
         runSearch(p.title);
       }
     
-      chrome.runtime.onMessage.addListener((msg) => {
+      chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!msg) return;
+
+        // ⭐ الكود الجديد: استقبال أمر الجلب من الخلفية لتجاوز الكابتشا
+        if (msg.type === 'FETCH_HTML_FROM_PAGE') {
+          fetch(msg.url, {
+            credentials: 'include',
+            headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8' }
+          })
+          .then(res => res.text())
+          .then(html => sendResponse({ html }))
+          .catch(err => sendResponse({ error: String(err) }));
+          
+          return true; // مهم جداً لكي تنتظر الخلفية الرد
+        }
+
         if (msg.type === 'SMART_SEARCH_UPDATE') {
           const newItems = msg.items || [];
           if (!newItems.length) return;
