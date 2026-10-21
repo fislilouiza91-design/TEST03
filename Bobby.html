@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Background v21.0 (Diagnostic & Safe)
+   Smart Shopper - Background v22.0 (Anti-Bot & Automation)
    ============================================ */
 
 const BRIDGE_URL = 'http://127.0.0.1:3000/rotate';
@@ -8,6 +8,7 @@ const PSIPHON_PROXY_PORT = 8080;
 let currentAbortController = null;
 let rotationPromise = null;
 
+// دالة تطبيق بروكسي Psiphon
 async function applyProxy() {
   const pacScript = `function FindProxyForURL(url, host) {
     if (url.indexOf("_ext_fetch=1") !== -1) {
@@ -25,8 +26,9 @@ async function clearProxy() {
   await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
 }
 
+// دالة تغيير الـ VPN (تتصل بسكريبت الجسر المحلي)
 function triggerRotation() {
-  if (rotationPromise) return rotationPromise;
+  if (rotationPromise) return rotationPromise; // إذا كان يتغير بالفعل، لا تطلبه مرتين
   
   console.log('[Bridge] 🔄 جاري طلب تغيير الـ VPN...');
   rotationPromise = fetch(BRIDGE_URL)
@@ -49,6 +51,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'SMART_SEARCH') return;
   const tabId = sender.tab && sender.tab.id;
   
+  // ⭐ 1. إيقاف أي عملية جلب سابقة فوراً
   if (currentAbortController) {
     currentAbortController.abort();
     console.log('\n🛑 [Search] تم إيقاف جلب المنتج السابق فوراً بسبب فتح منتج جديد.');
@@ -59,15 +62,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   (async () => {
     try {
+      // ⭐ 2. انتظار تغيير الـ VPN
       if (rotationPromise) {
         await rotationPromise;
       } else {
         await triggerRotation();
       }
 
-      // ⭐ انتظار إضافي 3 ثواني لضمان استقرار الاتصال بعد تغيير الـ VPN
+      // انتظار إضافي 3 ثواني لضمان استقرار الاتصال بعد تغيير الـ VPN
       await new Promise(r => setTimeout(r, 3000)); 
-      if (signal.aborted) return;
+      if (signal.aborted) return; 
 
       const searchTitle = msg.title || '';
       let page = 1, totalFetched = 0, firstBatchSent = false;
@@ -76,8 +80,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const q = encodeURIComponent(searchTitle.slice(0, 90));
       const baseUrl = 'https://www.aliexpress.com/wholesale?SearchText=' + q + '&catId=0&_ext_fetch=1';
 
-      let failCount = 0; // ⭐ عداد الفشل
-      const MAX_FAILS = 3;
+      let failCount = 0;
+      const MAX_FAILS = 3; // عدد المحاولات قبل التوقف
 
       console.log(`[Search] 🚀 بدء جلب المنتج: ${searchTitle.slice(0, 30)}...`);
 
@@ -116,16 +120,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (err.message === 'ABORTED' || err.name === 'AbortError') {
             return; 
           } else if (err.message === 'PROXY_FAILED') {
-            console.warn(`[Search] ⚠️ حظر أو فشل في الصفحة ${page}! (محاولة ${failCount + 1}/${MAX_FAILS})`);
+            console.warn(`[Search] ⚠️ كابتشا أو حظر في الصفحة ${page}! (محاولة ${failCount + 1}/${MAX_FAILS})`);
             failCount++;
             
             if (failCount >= MAX_FAILS) {
               console.error(`[Search] ❌ فشل جلب المنتج بعد ${MAX_FAILS} محاولات. توقف.`);
               if (tabId) chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }).catch(() => {});
-              return; // إيقاف المحاولات
+              return; 
             }
 
-            // تغيير الـ VPN والانتظار
             await triggerRotation(); 
             await new Promise(r => setTimeout(r, 5000)); // انتظار 5 ثواني بعد التغيير
           } else break;
@@ -134,8 +137,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       }
       
+      // ⭐ 3. تغيير الـ VPN الاستباقي بعد الانتهاء
       if (!signal.aborted) {
-         console.log(`[Search] 🎉 اكتمل أو توقف الجلب. (${totalFetched} منتج).`);
+         console.log(`[Search] 🎉 اكتمل أو توقف الجلب. (${totalFetched} منتج). جاري تغيير IP للمنتج القادم...`);
          triggerRotation(); 
          if (tabId) chrome.tabs.sendMessage(tabId, { type: 'SMART_SEARCH_DONE', total: totalFetched }).catch(() => {});
          if (!firstBatchSent) sendResponse({ ok: true, items: [], done: true });
@@ -149,16 +153,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-// ⭐ دالة الجلب المعدلة لطباعة سبب الفشل بدقة
+// ⭐ 4. دالة الجلب المحدثة (لتجاوز الكابتشا)
 async function fetchPage(baseUrl, page, timeoutMs, signal) {
   try {
     const url = baseUrl + '&page=' + page;
+    
     const res = await fetch(url, {
-      credentials: 'omit',
+      credentials: 'include', // إرسال الكوكيز
       headers: { 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': 'https://www.aliexpress.com/'
       },
       signal: signal 
     });
@@ -170,6 +181,7 @@ async function fetchPage(baseUrl, page, timeoutMs, signal) {
     }
     
     const html = await res.text();
+    
     if (html.includes('captcha') || html.includes('punish') || html.includes('slide to verify')) {
       console.warn(`[Fetch Debug] صفحة ${page} طلبت كابتشا (Captcha Detected).`);
       throw new Error('PROXY_FAILED'); 
@@ -184,7 +196,9 @@ async function fetchPage(baseUrl, page, timeoutMs, signal) {
   }
 }
 
-// (دوال الاستخراج parseItems, fallbackIds, extractJsonArray, clean تبقى كما هي)
+// ============================================
+// دوال استخراج البيانات (لا تغيرها)
+// ============================================
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
