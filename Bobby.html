@@ -1,155 +1,42 @@
-/* ============================================
-   Proxy Manager - v15.0 (Sequential & Cached)
-   ============================================ */
+const express = require('express');
+const cors = require('cors');
+const { exec } = require('child_process');
+const app = express();
 
-// قائمة أفضل من سابقتها
-const PROXY_LIST_URL = 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt';
+app.use(cors());
 
-let proxyPool = [];
-let proxyIndex = 0;
-let currentProxy = null;
-let isPreparing = false;
+const COUNTRIES = ['US', 'DE', 'GB', 'FR', 'NL', 'CA', 'JP', 'SG'];
+let currentCountryIndex = 0;
 
-export async function refreshProxyPool() {
-  if (isPreparing) return proxyPool.length;
-  isPreparing = true;
-  
-  // 1. هل لدينا بروكسيات صالحة محفوظة مسبقاً في الذاكرة؟
-  const stored = await chrome.storage.local.get('valid_proxies');
-  if (stored.valid_proxies && stored.valid_proxies.length > 0) {
-    console.log(`[Proxy] ⚡ تم تحميل ${stored.valid_proxies.length} بروكسي صالح من الذاكرة السابقة.`);
-    proxyPool = stored.valid_proxies;
-    proxyIndex = 0;
-    isPreparing = false;
-    return proxyPool.length;
-  }
+// تأكد من مسار Psiphon على جهازك
+const PSIPHON_PATH = `"C:\\Program Files\\Psiphon3\\psiphon3.exe"`; 
 
-  console.log('[Proxy] ⏳ 1. جاري جلب قائمة البروكسيات الجديدة...');
-  try {
-    const res = await fetch(PROXY_LIST_URL);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+app.get('/rotate', (req, res) => {
+    currentCountryIndex = (currentCountryIndex + 1) % COUNTRIES.length;
+    const newCountry = COUNTRIES[currentCountryIndex];
     
-    const text = await res.text();
-    const lines = text.split('\n').filter(l => l.trim().includes(':'));
-    
-    // ⭐ نأخذ عينة عشوائية من منتصف القائمة (لأن الأوائل غالباً ميتون)
-    const startIndex = Math.floor(lines.length / 2);
-    const sampleLines = lines.slice(startIndex, startIndex + 30); // نختبر 30 بروكسي فقط
-    
-    const rawProxies = sampleLines.map(line => {
-      const [host, port] = line.trim().split(':');
-      if (host && port) return { scheme: 'http', host, port: parseInt(port, 10) };
-      return null;
-    }).filter(p => p !== null);
+    console.log(`\n🔄 جاري تغيير Psiphon إلى دولة: ${newCountry}`);
 
-    console.log(`[Proxy] 🧪 2. جاري اختبار ${rawProxies.length} بروكسي (تسلسلياً)...`);
-    
-    const validProxies = [];
-    
-    // ⭐ الاختبار التسلسلي (واحداً تلو الآخر) لمنع تداخل إعدادات المتصفح
-    for (const proxy of rawProxies) {
-      try {
-        const testPac = `function FindProxyForURL(url, host) {
-          if (url.indexOf("_ext_test=1") !== -1) return "PROXY ${proxy.host}:${proxy.port}";
-          return "DIRECT";
-        }`;
+    exec('taskkill /F /IM psiphon3.exe', () => {
+        const regCmd = `reg add "HKCU\\Software\\Psiphon3" /v EgressRegion /t REG_SZ /d ${newCountry} /f`;
         
-        await chrome.proxy.settings.set({
-          scope: 'regular',
-          value: { mode: 'pac_script', pacScript: { data: testPac } }
+        exec(regCmd, (err) => {
+            if (err) {
+                console.error('خطأ في تعديل السجل:', err);
+                return res.status(500).send('Failed to change region');
+            }
+
+            exec(`start "" ${PSIPHON_PATH}`);
+            console.log(`✅ تم تشغيل Psiphon. الانتظار 12 ثانية للاتصال...`);
+
+            setTimeout(() => {
+                console.log(`🎉 Psiphon جاهز للعمل على ${newCountry}`);
+                res.json({ ok: true, country: newCountry });
+            }, 12000);
         });
+    });
+});
 
-        // ننتظر 3 ثوانٍ كحد أقصى للاختبار
-        await fetch(`https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`, {
-          signal: AbortSignal.timeout(3000),
-          mode: 'no-cors'
-        });
-        
-        // إذا نجح، نضيفه للقائمة
-        validProxies.push(proxy);
-        console.log(`[Proxy] ✅ بروكسي صالح: ${proxy.host}:${proxy.port}`);
-      } catch (e) {
-        // فشل، نتجاهله ونكمل
-      } finally {
-        await chrome.proxy.settings.clear({ scope: 'regular' });
-      }
-    }
-    
-    // 3. حفظ البروكسيات الصالحة في الذاكرة لتسريع المرات القادمة
-    await chrome.storage.local.set({ valid_proxies: validProxies });
-    
-    proxyPool = validProxies;
-    proxyIndex = 0;
-    isPreparing = false;
-    
-    console.log(`[Proxy] 🎉 3. اكتمل التجهيز! تم العثور على ${proxyPool.length} بروكسي صالح.`);
-    
-    if (proxyPool.length === 0) {
-      console.warn('[Proxy] ⚠️ لم يتم العثور على أي بروكسي صالح في هذه الدفعة. سيتم المحاولة لاحقاً.');
-    }
-    
-    return proxyPool.length;
-  } catch (e) {
-    console.error('[Proxy] ❌ فشل جلب القائمة:', e);
-    isPreparing = false;
-    return 0;
-  }
-}
-
-export function buildPAC(proxy) {
-  return `function FindProxyForURL(url, host) {
-    if (url.indexOf("_ext_fetch=1") !== -1) {
-      return "PROXY ${proxy.host}:${proxy.port}";
-    }
-    return "DIRECT";
-  }`;
-}
-
-export async function applyProxy(proxy) {
-  if (!proxy) return await clearProxy();
-  currentProxy = proxy;
-  
-  await chrome.proxy.settings.set({
-    scope: 'regular',
-    value: { mode: 'pac_script', pacScript: { data: buildPAC(proxy) } }
-  });
-}
-
-export async function clearProxy() {
-  await chrome.proxy.settings.clear({ scope: 'regular' }).catch(() => {});
-  currentProxy = null;
-}
-
-export async function getNextProxyInQueue() {
-  if (proxyPool.length === 0) {
-    await refreshProxyPool();
-  }
-  if (proxyPool.length === 0) return null;
-  
-  const proxy = proxyPool[proxyIndex];
-  proxyIndex++;
-  
-  if (proxyIndex >= proxyPool.length) {
-    proxyIndex = 0; 
-  }
-  
-  return proxy;
-}
-
-export function markProxyAsDead(proxy) {
-  console.log(`[Proxy] ⚠️ فشل البروكسي ${proxy.host}، سيتم تخطيه.`);
-}
-
-export function setupProxyAuth() {
-  chrome.webRequest.onAuthRequired.addListener(
-    (details, callback) => {
-      if (details.isProxy && currentProxy && currentProxy.username) {
-        callback({ authCredentials: { username: currentProxy.username, password: currentProxy.password } });
-        return;
-      }
-      callback({});
-    },
-    { urls: ['<all_urls>'] },
-    ['asyncBlocking']
-  );
-}
+app.listen(3000, () => {
+    console.log('🚀 Bridge Server يعمل على http://127.0.0.1:3000');
+});
