@@ -1,318 +1,316 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Smart Pages)
+   Smart Shopper - Content Styles (Modern UI)
    ============================================ */
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; 
-const MAX_PAGES_TO_FETCH = 3; 
-const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
+* { box-sizing: border-box; }
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
-    };
-
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
-
-    try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-        const cached = await env.COMPETITOR_CACHE.get(`comp:${productId}`, 'json');
-        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
-
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-          if (results && results.length > 0) {
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
-        }
-        const monthIndex = new Date().getUTCMonth(); 
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-        
-        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
-
-        const statements = body.all_items.map(c => {
-          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
-              price = excluded.price, seller_rating = excluded.seller_rating, 
-              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
-              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
-            isRelevant, now
-          );
-        });
-        if (statements.length > 0) await env.DB.batch(statements);
-        await env.COMPETITOR_CACHE.put(`comp:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
-        return json({ success: true }, 201, corsHeaders);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
-        const q = url.searchParams.get('q');
-        const originalTitle = url.searchParams.get('originalTitle'); 
-        const page = parseInt(url.searchParams.get('page') || '1');
-        const country = (url.searchParams.get('country') || 'US').toUpperCase();
-        
-        if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
-        if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
-
-        const hash = await hashUrl(q);
-        const cacheKey = `search:v12:${hash}:${page}`;
-        
-        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
-        if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
-
-        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `en-US,en;q=0.9`;
-        const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
-        
-        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
-        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
-
-        const rawItems = parseItems(html);
-        // إذا أعاد الموقع 5 منتجات أو أكثر، نعتبر أن هناك صفحات أخرى
-        const hasMore = rawItems.length > 5; 
-        
-        let items = rawItems;
-        
-        if (originalTitle && items.length > 0 && env.AI) {
-            items = await fastAIFilter(originalTitle, items, env);
-        }
-        
-        if (items.length > 0) {
-            await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: CACHE_TTL });
-        }
-
-        return json({ ok: true, items, hasMore, source: 'network' }, 200, corsHeaders);
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
-  }
-};
-
-async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
-
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (status.disabled) continue;
-
-    try {
-        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
-        if (html && html.length > 5000) return { html, provider: provider.name };
-    } catch (e) {
-        if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); }
-    }
-  }
-  return { html: null, provider: null };
+#ss-panel {
+    position: fixed;
+    top: 80px;
+    right: 20px;
+    width: 400px;
+    max-width: calc(100vw - 40px);
+    max-height: calc(100vh - 100px);
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.05);
+    z-index: 999999;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    direction: ltr;
+    user-select: none;
+    border: 1px solid rgba(0, 0, 0, 0.05);
 }
 
-async function fastAIFilter(originalTitle, items, env) {
-    try {
-        const cleanTitle = originalTitle.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-        const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
-        const originalWords = originalTitle.split(/\s+/);
-        let brand = '';
-        for (let w of originalWords) {
-            let cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-            if (cleanW.length >= 2 && cleanW.length <= 8 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
-                brand = cleanW.toLowerCase();
-                break;
-            }
-        }
-        const models = words.filter(w => {
-            const hasLetters = /[a-z]/.test(w);
-            const hasNumbers = /[0-9]/.test(w);
-            return hasLetters && hasNumbers;
-        });
-        const model = models[0] || '';
+/* ============================================
+   Header
+   ============================================ */
+.ss-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    background: #0f172a; /* لون كحلي داكن احترافي */
+    cursor: grab;
+    flex-shrink: 0;
+    color: white;
+}
+.ss-header:active { cursor: grabbing; }
 
-        const modelName = '@cf/baai/bge-m3';
-        const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
-        const baseVector = originalEmbedding.data[0];
-        const itemTitles = items.map(it => it.title);
-        const itemsEmbedding = await env.AI.run(modelName, { text: itemTitles });
-        
-        const scoredItems = items.map((it, index) => {
-            const itemVector = itemsEmbedding.data[index];
-            const aiScore = cosineSimilarity(baseVector, itemVector);
-            const itemTitleLower = it.title.toLowerCase();
-            
-            const isAccessory = 
-                (!/case|coque|housse/i.test(cleanTitle) && /case|coque|housse/i.test(itemTitleLower)) ||
-                (!/tape|ruban/i.test(cleanTitle) && /tape|ruban/i.test(itemTitleLower)) ||
-                /protector|cable|charger|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitleLower);
-
-            const hasModel = model ? itemTitleLower.includes(model) : false;
-            const hasBrand = brand ? itemTitleLower.includes(brand) : false;
-
-            let finalScore = (aiScore * 100);
-            if (hasModel) finalScore += 50; 
-            if (hasBrand) finalScore += 30;
-
-            const isExact = !isAccessory && (hasModel || (hasBrand && aiScore > 0.60));
-
-            return { ...it, aiScore, finalScore, isExact, isAccessory };
-        });
-
-        const filteredItems = scoredItems.filter(it => !it.isAccessory && (it.isExact || it.aiScore >= 0.50));
-        filteredItems.sort((a, b) => b.finalScore - a.finalScore);
-        return filteredItems;
-    } catch (err) {
-        return items; 
-    }
+.ss-logo {
+    background: linear-gradient(135deg, #ff4757, #ff6b81);
+    color: white;
+    font-weight: 900;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    margin-right: 10px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(255, 71, 87, 0.3);
 }
 
-function cosineSimilarity(vecA, vecB) {
-    let dotProduct = 0, normA = 0, normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        dotProduct += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
-    }
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+.ss-titles { flex-grow: 1; min-width: 0; overflow: hidden; }
+.ss-header .ss-title { font-size: 14px; font-weight: 700; color: #f8fafc; line-height: 1.2; letter-spacing: 0.3px; }
+.ss-sub { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+
+/* ============================================
+   Window Control Buttons
+   ============================================ */
+.ss-header-btns {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
 }
 
-async function hashUrl(url) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+.ss-wbtn {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: rgba(255, 255, 255, 0.08);
+    color: #cbd5e1;
+    cursor: pointer;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: all 0.2s ease;
+    font-family: inherit;
+    flex-shrink: 0;
 }
 
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
+.ss-wbtn svg { display: block; pointer-events: none; }
 
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-      let img = '';
-      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
-      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
-      if (img && img.startsWith('//')) img = 'https:' + img;
+.ss-wbtn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.ss-wbtn:active { transform: scale(0.92); }
+.ss-wbtn-close:hover { background: #ef4444; color: #fff; }
 
-      const p = o.prices || {}; const sale = p.salePrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
-    } catch (e) {}
-  }
-  return out;
+/* ============================================
+   Body
+   ============================================ */
+.ss-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-grow: 1;
+    background: #f8fafc;
+    min-height: 0;
 }
 
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
-    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
-    return '';
-  }
-  return String(v);
+/* ============================================
+   Tabs
+   ============================================ */
+.ss-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    padding: 12px 12px 8px;
+    gap: 8px;
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+    flex-shrink: 0;
 }
 
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker); if (i < 0) return null;
-  const j = html.indexOf('[', i); if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
+.ss-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    font-size: 11.5px;
+    color: #64748b;
+    cursor: pointer;
+    border-radius: 20px;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    font-weight: 600;
+    background: #f1f5f9;
+    border: 1px solid transparent;
+    white-space: nowrap;
 }
 
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+.ss-tab svg { flex-shrink: 0; display: block; color: #94a3b8; transition: color 0.2s; }
+.ss-tab span { line-height: 1; }
 
-async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', 'false');
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
+.ss-tab:hover:not(.active) { background: #e2e8f0; color: #334155; }
+.ss-tab:hover:not(.active) svg { color: #475569; }
+
+.ss-tab.active {
+    color: #ffffff;
+    background: #0f172a;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.2);
+    transform: translateY(-1px);
 }
 
-async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country);
-  url.searchParams.set('render', 'false');
-  url.searchParams.set('keep_headers', 'true');
-  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
+.ss-tab.active svg { color: #ffffff; }
+
+/* ============================================
+   List
+   ============================================ */
+.ss-list {
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: calc(100vh - 280px);
+    min-height: 200px;
+    overscroll-behavior: contain;
+    flex-grow: 1;
+}
+.ss-list::-webkit-scrollbar { width: 6px; }
+.ss-list::-webkit-scrollbar-track { background: transparent; }
+.ss-list::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 10px; }
+.ss-list::-webkit-scrollbar-thumb:hover { background-color: #94a3b8; }
+
+/* ============================================
+   Product Card
+   ============================================ */
+.ss-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 10px;
+    position: relative;
+    text-decoration: none;
+    color: inherit;
+    transition: all 0.2s ease;
+    min-height: 80px;
+    cursor: pointer;
+    width: 100%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.02);
 }
 
-async function getProviderStatus(providerName, env) {
-  try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
+.ss-card:hover { 
+    border-color: #cbd5e1; 
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.06); 
+    transform: translateY(-2px);
 }
 
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
+.ss-thumb-wrapper {
+    flex-shrink: 0;
+    width: 70px;
+    height: 70px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #f8fafc;
+    border: 1px solid #f1f5f9;
+}
+.ss-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ss-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: 28px; color: #cbd5e1; }
+
+.ss-card-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    overflow: hidden;
 }
 
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+.ss-card-title {
+    font-size: 12px;
+    color: #1e293b;
+    line-height: 1.4;
+    font-weight: 500;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+
+.ss-card-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #64748b; overflow: hidden; white-space: nowrap; }
+.ss-stars { color: #f59e0b; font-size: 12px; letter-spacing: -0.5px; flex-shrink: 0; }
+.ss-rating-num { color: #334155; font-weight: 700; font-size: 11px; flex-shrink: 0; }
+.ss-sold { color: #94a3b8; font-size: 10.5px; flex-shrink: 0; }
+.ss-no-info { color: #cbd5e1; font-size: 10.5px; font-style: italic; }
+
+/* ============================================
+   Price Boxes (Modern Pastel)
+   ============================================ */
+.ss-discount-box {
+    flex-shrink: 0;
+    background: #ecfdf5; /* أخضر ناعم */
+    border: 1px solid #a7f3d0;
+    border-radius: 10px;
+    padding: 8px 10px;
+    min-width: 80px;
+    max-width: 95px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+}
+
+.ss-price-main {
+    font-size: 14px;
+    font-weight: 800;
+    color: #059669; /* أخضر غامق للقراءة */
+    line-height: 1.1;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ss-discount-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #10b981;
+    line-height: 1.1;
+}
+
+.ss-discount-box.ss-higher-price {
+    background: #fef2f2; /* أحمر ناعم */
+    border-color: #fecaca;
+}
+.ss-discount-box.ss-higher-price .ss-price-main { color: #dc2626; }
+.ss-discount-box.ss-higher-price .ss-discount-label { color: #ef4444; }
+
+/* ============================================
+   Footer & Messages
+   ============================================ */
+.ss-msg { text-align: center; padding: 40px 20px; font-size: 13px; color: #64748b; font-weight: 500; }
+.ss-msg-icon { font-size: 40px; margin-bottom: 12px; display: block; opacity: 0.4; }
+
+.ss-footer {
+    padding: 12px;
+    text-align: center;
+    border-top: 1px solid #e2e8f0;
+    background: #ffffff;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: center;
+}
+
+.ss-loading-more { font-size: 11px; color: #64748b; font-weight: 500; }
+
+/* Skeleton Loader */
+.skel {
+    background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+    background-size: 200% 100%;
+    animation: ss-skel 1.5s infinite;
+    border-radius: 6px;
+    pointer-events: none;
+}
+.skel.line { height: 10px; width: 100%; margin-bottom: 6px; }
+.skel.line.short { width: 60%; }
+.skel.ss-thumb-wrapper { width: 70px; height: 70px; }
+.skel.ss-discount-box { width: 80px; height: 44px; }
+
+@keyframes ss-skel {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
 }
