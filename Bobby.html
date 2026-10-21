@@ -1,626 +1,144 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Smart Pages)
-   Version: v16 Final (Strict Filtering + Fake Review Detector)
+   Smart Shopper - Background Service Worker
+   Version: v16 Final (Strict filtering)
    ============================================ */
 
-const MAX_CONSECUTIVE_FAILURES = 10;
-const CACHE_TTL = 432000; 
+const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
 const MAX_PAGES_TO_FETCH = 3; 
-const SUPPORTED_COUNTRIES = ['us', 'gb', 'de', 'fr', 'ca', 'au', 'it', 'es', 'nl'];
+const CACHE_VERSION = '16'; // ★ ارفع هذا الرقم عند أي تعديل مستقبلي لتدمير الكاش القديم
 
-const KNOWN_BRANDS = new Set([
-  'anker', 'samsung', 'apple', 'xiaomi', 'huawei', 'sony', 'philips', 'baseus',
-  'ugreen', 'essager', 'toocki', 'orico', 'dji', 'logitech', 'dyson', 'braun',
-  'oralb', 'redmi', 'poco', 'google', 'oneplus', 'oppo', 'vivo', 'realme',
-  'lenovo', 'dell', 'asus', 'acer', 'msi', 'razer', 'corsair', 'kingston',
-  'sandisk', 'seagate', 'toshiba', 'crucial', 'intel', 'amd', 'nvidia',
-  'canon', 'nikon', 'epson', 'brother', 'dymo', 'casio', 'garmin', 'fitbit',
-  'bose', 'jbl', 'sennheiser', 'beats', 'airpods', 'airtag', 'marshall',
-  'belkin', 'aukey', 'ravpower', 'verbatim', 'transcend', 'pny', 'lexar',
-  'netac', 'teclast', 'xraydisk', 'adata', 'niimbot', 'phomemo', 'vretti',
-  'nike', 'adidas', 'puma', 'zara', 'yonson', 'ysn', 'ls2', 'hjc', 'shoei',
-  'arai', 'agv', 'bell', 'scorpion'
+const STOP_WORDS = new Set([
+  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
+  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
+  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
+  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
+  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
+  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
+  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
+  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
 ]);
 
-const NOT_BRANDS = new Set([
-  'usb', 'hdmi', 'rgb', 'led', 'lcd', 'oled', 'tws', 'gps', 'bt', 'wifi',
-  'ios', 'pc', 'tv', 'dvd', 'mp3', 'mp4', 'cd', 'diy', 'etc', 'xr', 'xl',
-  'xs', 'sos', 'otg', 'nfc', 'pd', 'qc', 'ip', 'uk', 'us', 'eu', 'sd', 'tf',
-  'abs', 'pvc', 'tpu'
-]);
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
 
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Max-Age': '86400'
-    };
-
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
-
-    try {
-      const url = new URL(request.url);
-      const productId = url.searchParams.get('productId');
-      const clientVersion = url.searchParams.get('v');
-
-      // ── GET /api/competitors ────────────────────────────
-      if (request.method === 'GET' && url.pathname === '/api/competitors') {
-        if (!productId) return json({ error: 'Missing productId' }, 400, corsHeaders);
-
-        // إصدار الكاش: إذا جاء الإصدار القديم، تجاهل البيانات المحفوظة
-        if (clientVersion !== '16') {
-          return json({ status: 'not_found' }, 404, corsHeaders);
-        }
-
-        const cached = await env.COMPETITOR_CACHE.get(`comp:v16:${productId}`, 'json');
-        if (cached) return json({ source: 'kv', data: cached }, 200, corsHeaders);
-
-        try {
-          const { results } = await env.DB.prepare(`
-            SELECT * FROM scraped_products_odd WHERE base_product_id = ? AND is_relevant = 1
-            UNION ALL
-            SELECT * FROM scraped_products_even WHERE base_product_id = ? AND is_relevant = 1
-          `).bind(productId, productId).all();
-          if (results && results.length > 0) {
-            ctx.waitUntil(env.COMPETITOR_CACHE.put(`comp:v16:${productId}`, JSON.stringify(results), { expirationTtl: CACHE_TTL }));
-            return json({ source: 'd1', data: results }, 200, corsHeaders);
-          }
-        } catch (e) { return json({ error: e.message }, 500, corsHeaders); }
-        return json({ status: 'not_found' }, 404, corsHeaders);
-      }
-
-      // ── POST /api/competitors ───────────────────────────
-      if (request.method === 'POST' && url.pathname === '/api/competitors') {
-        const body = await request.json();
-        if (!body.base_product_id || !body.all_items || !Array.isArray(body.all_items)) {
-          return json({ error: 'Invalid data' }, 400, corsHeaders);
-        }
-        const monthIndex = new Date().getUTCMonth(); 
-        const tableName = monthIndex % 2 === 0 ? 'scraped_products_even' : 'scraped_products_odd';
-        const now = Math.floor(Date.now() / 1000);
-        
-        const relevantIds = new Set((body.relevant_items || []).map(r => r.competitor_id || r.id));
-
-        const statements = body.all_items.map(c => {
-          const isRelevant = relevantIds.has(c.competitor_id || c.id) ? 1 : 0;
-          return env.DB.prepare(`
-            INSERT INTO ${tableName} (base_product_id, competitor_id, title, price, currency, seller_rating, product_url, coupon_code, coupon_discount, is_relevant, scraped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(base_product_id, competitor_id) DO UPDATE SET 
-              price = excluded.price, seller_rating = excluded.seller_rating, 
-              coupon_code = excluded.coupon_code, coupon_discount = excluded.coupon_discount, 
-              is_relevant = excluded.is_relevant, scraped_at = excluded.scraped_at
-          `).bind(
-            body.base_product_id, c.competitor_id || c.id, c.title, c.price, c.currency || 'USD', 
-            c.seller_rating || 0, c.product_url || c.link, c.coupon_code || null, c.coupon_discount || null, 
-            isRelevant, now
-          );
-        });
-        if (statements.length > 0) await env.DB.batch(statements);
-        await env.COMPETITOR_CACHE.put(`comp:v16:${body.base_product_id}`, JSON.stringify(body.relevant_items), { expirationTtl: CACHE_TTL });
-        return json({ success: true }, 201, corsHeaders);
-      }
-
-      // ── GET /api/fetch-page ─────────────────────────────
-      if (request.method === 'GET' && url.pathname === '/api/fetch-page') {
-        const q = url.searchParams.get('q');
-        const originalTitle = url.searchParams.get('originalTitle'); 
-        const originalImage = url.searchParams.get('originalImage') || '';
-        const basePrice = url.searchParams.get('basePrice') || '';
-        const page = parseInt(url.searchParams.get('page') || '1');
-        const country = (url.searchParams.get('country') || 'US').toUpperCase();
-        
-        if (!q) return json({ error: 'Missing query' }, 400, corsHeaders);
-        if (page > MAX_PAGES_TO_FETCH) return json({ ok: true, items: [], hasMore: false }, 200, corsHeaders);
-
-        const hash = await hashUrl(q + '::' + (originalTitle || '') + '::' + (basePrice || ''));
-        const cacheKey = `search:v16:${hash}:${page}`;
-        
-        const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
-        if (cached) return json({ ok: true, items: cached, hasMore: true, source: 'kv' }, 200, corsHeaders);
-
-        const proxyCountry = SUPPORTED_COUNTRIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
-        const acceptLanguage = `en-US,en;q=0.9`;
-        const targetUrl = `https://www.aliexpress.com/w/wholesale-${q.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
-        
-        const { html } = await fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env);
-        if (!html) return json({ ok: false, error: 'Fetch failed' }, 502, corsHeaders);
-
-        const rawItems = parseItems(html);
-        const hasMore = rawItems.length > 5; 
-        
-        let items = rawItems;
-        
-        if (originalTitle && items.length > 0 && env.AI) {
-            items = await fastAIFilter(originalTitle, items, env, basePrice, originalImage);
-        }
-        
-        if (items.length > 0) {
-            const ttl = items.length >= 3 ? CACHE_TTL : 3600;
-            await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(items), { expirationTtl: ttl });
-        }
-
-        return json({ ok: true, items, hasMore, source: 'network' }, 200, corsHeaders);
-      }
-
-      // ── POST /api/review-analysis (★ NEW) ───────────────
-      if (request.method === 'POST' && url.pathname === '/api/review-analysis') {
-        try {
-          const body = await request.json();
-          const { productId, title, reviews } = body;
-
-          if (!productId || !Array.isArray(reviews) || reviews.length < 2) {
-            return json({ ok: false, error: 'reviews_too_few', message: 'Need at least 2 reviews to analyze' }, 400, corsHeaders);
-          }
-
-          const reviewCacheKey = `reviews:v1:${productId}`;
-          const cachedReview = await env.COMPETITOR_CACHE.get(reviewCacheKey, 'json');
-          if (cachedReview) return json({ ok: true, ...cachedReview, source: 'kv' }, 200, corsHeaders);
-
-          const reviewsText = reviews.slice(0, 15).map((r, i) =>
-            `${i + 1}. [${r.rating || '?'}★] ${String(r.text || '(no text)').slice(0, 200)}`
-          ).join('\n');
-
-          const prompt = `You are an expert fake review detector for AliExpress. Analyze these reviews and return ONLY a valid JSON object (no markdown, no explanation).
-
-Product: "${String(title || '').slice(0, 120)}"
-
-Reviews (${reviews.length} total, showing up to 15):
-${reviewsText}
-
-Return JSON exactly like this:
-{
-  "score": <number 0-100, higher = more authentic>,
-  "verdict": "<TRUSTWORTHY | SUSPICIOUS | FAKE | UNCERTAIN>",
-  "redFlags": ["short flag 1", "short flag 2"],
-  "summary": "<one sentence in English, max 15 words>"
-}
-
-Rules:
-- score 80-100 = TRUSTWORTHY
-- score 50-79 = SUSPICIOUS
-- score 0-49 = FAKE
-- Fewer than 5 reviews = cap score at 70
-- All reviews 5★ + generic text = -20 points
-- Detailed text mentioning specific features = +10 points
-- Mixed ratings (3-4★) usually authentic = +5 points
-- Flag: "All 5 stars", "Generic text", "Too few reviews", "No negative feedback", "Same review date"
-- Return ONLY the JSON object.`;
-
-          const aiRes = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: 300,
-            temperature: 0.1
-          });
-
-          let analysis;
-          try {
-            const text = aiRes.response || '';
-            const match = text.match(/\{[\s\S]*\}/);
-            if (!match) throw new Error('No JSON in response');
-            analysis = JSON.parse(match[0]);
-          } catch (e) {
-            analysis = { score: 50, verdict: 'UNCERTAIN', redFlags: ['ai_parse_error'], summary: 'Analysis could not be completed' };
-          }
-
-          analysis.score = Math.max(0, Math.min(100, parseInt(analysis.score) || 50));
-          if (!Array.isArray(analysis.redFlags)) analysis.redFlags = [];
-          if (typeof analysis.summary !== 'string') analysis.summary = '';
-          if (!analysis.verdict) analysis.verdict = analysis.score >= 80 ? 'TRUSTWORTHY' : analysis.score >= 50 ? 'SUSPICIOUS' : 'FAKE';
-
-          await env.COMPETITOR_CACHE.put(reviewCacheKey, JSON.stringify(analysis), { expirationTtl: 604800 });
-
-          return json({ ok: true, ...analysis, source: 'ai' }, 200, corsHeaders);
-        } catch (e) {
-          return json({ ok: false, error: e.message }, 500, corsHeaders);
-        }
-      }
-
-      return json({ error: 'Not found' }, 404, corsHeaders);
-    } catch (e) {
-      return json({ error: e.message }, 500, corsHeaders);
-    }
+  if (msg.type === 'CHECK_CACHE') {
+    // ★ إرسال رقم الإصدار لتدمير الكاش القديم
+    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}&v=${CACHE_VERSION}`)
+      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
+      .then(data => sendResponse({ ok: true, data: data.data }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
   }
-};
 
-/* ═══════════════════════════════════════════════════════════
-   AI FILTER — v16 Strict
-   ═══════════════════════════════════════════════════════════ */
-async function fastAIFilter(originalTitle, items, env, basePriceStr, originalImage) {
-  try {
-    const baseSignals = extractProductSignals(originalTitle);
-    const basePrice = parseNum(basePriceStr);
-    const baseCapacity = extractCapacity(originalTitle);
-
-    const FORBIDDEN_WORDS = /\b(mirror|rearview|rear view|side mirror|for kia|for toyota|for honda|for bmw|for ford|for chevrolet|for nissan|replacement part|spare part|charging cable|usb cable|data cable|screen protector|tempered glass|wall charger|car charger)\b/i;
-
-    let candidates = items.filter(it => {
-      if (FORBIDDEN_WORDS.test(it.title) && !FORBIDDEN_WORDS.test(originalTitle)) return false;
-
-      const p = parseNum(it.price);
-      if (!basePrice || !p) return true;
-      const ratio = p / basePrice;
-      if (ratio < 0.30 || ratio > 3.0) return false;
-
-      if (baseCapacity) {
-        const itemCapacity = extractCapacity(it.title);
-        if (itemCapacity) {
-          const capRatio = itemCapacity / baseCapacity;
-          if (capRatio < 0.5 || capRatio > 2.0) return false;
-        }
-      }
-      return true;
-    });
-
-    if (baseSignals.category) {
-      candidates = candidates.filter(it => {
-        const t = it.title.toLowerCase();
-        if (baseSignals.category === 'motorcycle helmet') return /helmet|casque|casco|capacete|خوذة/i.test(t);
-        if (baseSignals.category === 'memory card') return /micro sd|sd card|memory card|tf card/i.test(t);
-        if (baseSignals.category === 'phone') return /iphone|samsung|xiaomi|pixel|phone|smartphone|galaxy|redmi/i.test(t);
-        if (baseSignals.category === 'usb flash drive') return /flash drive|usb drive|usb flash|usb stick|pen drive|cle usb|флешка/i.test(t);
-        if (baseSignals.category === 'earbuds') return /earbud|earphone|headphone|casque|навушники|tws/i.test(t);
-        if (baseSignals.category === 'label maker') return /label maker|label printer|принтер этикеток/i.test(t);
-        if (baseSignals.category === 'multimeter') return /multimeter|voltmeter|мультиметр/i.test(t);
-        if (baseSignals.category === 'vacuum') return /sweeper|vacuum|пилосос/i.test(t);
-        return true;
-      });
-    }
-
-    candidates = candidates.filter(it => !isAccessory(baseSignals, it.title));
-    if (candidates.length === 0) return [];
-
-    const modelName = '@cf/baai/bge-m3';
-    const baseEmb = await env.AI.run(modelName, { text: [originalTitle] });
-    const baseVec = baseEmb.data[0];
-    const itemEmbs = await env.AI.run(modelName, { text: candidates.map(c => c.title) });
-
-    const scored = candidates.map((it, i) => {
-      const aiScore = cosineSimilarity(baseVec, itemEmbs.data[i]);
-      const sig = extractProductSignals(it.title);
-      let score = aiScore * 100;
-
-      const sameBrand = baseSignals.brand && sig.brand && baseSignals.brand === sig.brand;
-      const sameModel = baseSignals.model && sig.model && baseSignals.model === sig.model;
-
-      if (sameBrand) score += 25;
-      if (sameModel) score += 40;
-
-      if (baseSignals.brand && sig.brand && !sameBrand) {
-        if (KNOWN_BRANDS.has(baseSignals.brand) && !KNOWN_BRANDS.has(sig.brand)) {
-          score -= 100; 
-        } else {
-          score -= 30;
-        }
-      }
-
-      const p = parseNum(it.price);
-      if (basePrice && p) {
-        const diff = Math.abs(p - basePrice) / basePrice;
-        if (diff < 0.30) score += 10;
-        else if (diff > 1.0) score -= 10;
-      }
-
-      const isExact = sameModel || (sameBrand && aiScore > 0.60);
-      return { ...it, aiScore, finalScore: score, isExact, _signals: sig };
-    });
-
-    scored.sort((a, b) => b.finalScore - a.finalScore);
-    let filtered = scored.filter(it => it.finalScore >= 60 || it.aiScore >= 0.70);
-
-    const borderline = filtered.filter(it => it.finalScore >= 60 && it.finalScore < 75);
-    if (env.AI && borderline.length > 0 && borderline.length <= 8) {
-      const verifications = await Promise.all(
-        borderline.map(it => llmVerify(originalTitle, it.title, env).catch(() => null))
-      );
-      const verdicts = new Map(borderline.map((it, i) => [it.id, verifications[i]]));
-      filtered = filtered.map(it => {
-        const v = verdicts.get(it.id);
-        if (!v) return it;
-        if (v === 'SAME') return { ...it, finalScore: it.finalScore + 25, isExact: true, llm: v };
-        if (v === 'DIFFERENT') return { ...it, finalScore: -999, llm: v };
-        return it;
-      }).filter(it => it.finalScore > 0);
-    }
-
-    if (originalImage && env.AI && filtered.length > 0) {
-      try {
-        const baseCap = await imageCaption(originalImage, env);
-        if (baseCap) {
-          const baseCapVec = (await env.AI.run(modelName, { text: [baseCap] })).data[0];
-          const toCheck = filtered.slice(0, 8);
-          const capVecs = await Promise.all(
-            toCheck.map(it => it.img
-              ? imageCaption(it.img, env)
-                  .then(c => c ? env.AI.run(modelName, { text: [c] }).then(e => e.data[0]) : null)
-                  .catch(() => null)
-              : null)
-          );
-          toCheck.forEach((it, i) => {
-            if (capVecs[i]) {
-              const imgScore = cosineSimilarity(baseCapVec, capVecs[i]);
-              it.finalScore += (imgScore - 0.5) * 30;
-              it.imgScore = Math.round(imgScore * 100) / 100;
-            }
-          });
-          filtered.sort((a, b) => b.finalScore - a.finalScore);
-        }
-      } catch (e) { console.error('Image caption error:', e.message); }
-    }
-
-    return filtered.slice(0, 40).map(({ _signals, ...rest }) => rest);
-  } catch (err) {
-    console.error('AI filter error:', err.message);
-    return items;
+  if (msg.type === 'SMART_SEARCH') {
+    const searchQuery = buildSmartSearchQuery(msg.title);
+    const q = encodeURIComponent(searchQuery);
+    const originalTitle = encodeURIComponent(msg.title);
+    const originalImage = encodeURIComponent(msg.originalImage || '');
+    const basePrice = encodeURIComponent(msg.basePrice || ''); // ★ NEW
+    
+    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&basePrice=${basePrice}&page=1&country=${msg.country}`)
+      .then(res => res.json())
+      .then(data => {
+         if (data.ok) {
+            sendResponse({ ok: true, items: data.items, hasMore: data.hasMore });
+            if (msg.productId && data.items.length > 0) saveToCloudflare(msg.productId, data.items);
+         } else {
+            sendResponse({ ok: false, error: data.error });
+         }
+      }).catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
   }
-}
 
-/* ═══════════════════════════════════════════════════════════
-   HELPERS
-   ═══════════════════════════════════════════════════════════ */
-function extractProductSignals(title) {
-  const raw = title || '';
-  const lower = raw.toLowerCase();
+  if (msg.type === 'SMART_LOAD_MORE') {
+    const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
+    if (nextPage > MAX_PAGES_TO_FETCH) return sendResponse({ ok: true, items: [], hasMore: false }); 
 
+    const searchQuery = buildSmartSearchQuery(msg.title);
+    const q = encodeURIComponent(searchQuery);
+    const originalTitle = encodeURIComponent(msg.title);
+    const originalImage = encodeURIComponent(msg.originalImage || '');
+    const basePrice = encodeURIComponent(msg.basePrice || ''); // ★ NEW
+
+    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&basePrice=${basePrice}&page=${nextPage}&country=${msg.country}`)
+      .then(res => res.json())
+      .then(data => {
+         if (data.ok) {
+            let existingIds = new Set(msg.existingIds);
+            let unique = data.items.filter(i => !existingIds.has(i.id));
+            sendResponse({ ok: true, items: unique, hasMore: data.hasMore });
+            if (msg.productId && unique.length > 0) saveToCloudflare(msg.productId, unique);
+         } else {
+            sendResponse({ ok: false, error: data.error, hasMore: false });
+         }
+      }).catch(err => sendResponse({ ok: false, error: err.message, hasMore: false }));
+    return true;
+  }
+});
+
+function buildSmartSearchQuery(title) {
+  if (!title) return '';
+  const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s\-]/g, ' ');
+  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
+  
+  const originalWords = title.split(/\s+/);
   let brand = '';
-  for (const w of lower.split(/\s+/)) {
-    const c = w.replace(/[^a-z0-9&]/g, '');
-    if (c && KNOWN_BRANDS.has(c)) { brand = c; break; }
-  }
-  if (!brand) {
-    for (const w of raw.split(/\s+/)) {
-      const c = w.replace(/[^A-Za-z0-9]/g, '');
-      if (c.length >= 2 && c.length <= 10 && c === c.toUpperCase() && /^[A-Z]+$/.test(c) && !NOT_BRANDS.has(c.toLowerCase())) {
-        brand = c.toLowerCase(); break;
+  for (let w of originalWords) {
+      let cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
+      if (cleanW.length >= 2 && cleanW.length <= 8 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
+          brand = cleanW.toLowerCase();
+          break;
       }
-    }
-  }
-  if (!brand) {
-    for (const w of raw.split(/\s+/)) {
-      const c = w.replace(/[^A-Za-z0-9]/g, '');
-      if (/^[A-Z][a-z]+[A-Z]/.test(c) || /^[A-Z]{2,}[a-z]+/.test(c)) {
-        brand = c.toLowerCase(); break;
-      }
-    }
   }
 
-  const modelRegex = /\b([A-Za-z]{1,5}[-]?\d{2,5}[A-Za-z0-9-]*|\d{2,5}[A-Za-z]{2,6})\b/;
-  const mm = raw.match(modelRegex);
-  const model = mm ? mm[1].toLowerCase().replace(/[-_\s]/g, '') : '';
+  const models = words.filter(w => {
+      const hasLetters = /[a-z]/.test(w);
+      const hasNumbers = /[0-9]/.test(w);
+      return hasLetters && hasNumbers;
+  });
+  const model = models[0] || '';
 
-  const CATS = {
-    'usb flash drive': /flash drive|usb drive|usb flash|cle usb|флешка|usb stick|pen drive/i,
-    'multimeter':      /multimeter|voltmeter|мультиметр/i,
-    'label maker':     /label maker|dymo|принтер этикеток|label printer/i,
-    'label tape':      /label tape|ruban|label cartridge|sticker tape/i,
-    'case':            /phone case|coque|housse|чехол|حافظة|protective cover|back cover/i,
-    'vacuum':          /sweeper|vacuum|пилосос/i,
-    'earbuds':         /earbuds|earphone|headphone|casque|навушники|tws/i,
-    'phone':           /iphone|samsung galaxy|xiaomi|redmi|pixel|هاتف/i,
-    'laptop':          /laptop|notebook|macbook|لابتوب/i,
-    'watch':           /smartwatch|watch|montre|ساعة|reloj/i,
-    'bag':             /backpack|handbag|tote|sac|حقيبة/i,
-    'shoes':           /shoe|sneaker|chaussure|حذاء/i,
-    'dress':           /dress|robe|فستان/i,
-    'toy':             /toy|jouet|لعبة/i,
-    'charger':         /charger|charger cable|شاحن/i,
-    'cable':           /cable|كابل|usb cable|data cable/i,
-    'memory card':     /micro sd|sd card|memory card|tf card/i,
-    'motorcycle helmet': /helmet|casque|casco|capacete|خوذة/i,
-  };
   let category = '';
-  for (const [cat, re] of Object.entries(CATS)) {
-    if (re.test(lower)) { category = cat; break; }
+  if (/flash drive|usb drive|usb flash|cle usb|флешка/i.test(cleanTitle)) category = 'usb flash drive';
+  else if (/multimeter|voltmeter|мультиметр/i.test(cleanTitle)) category = 'multimeter';
+  else if (/label maker|dymo|принтер этикеток/i.test(cleanTitle)) category = 'label maker';
+  else if (/case|cover|coque|housse|чехол|حافظة/i.test(cleanTitle)) category = 'case';
+  else if (/tape|label tape|ruban|sticker|etiquette/i.test(cleanTitle)) category = 'label tape';
+  else if (/sweeper|vacuum|пилосос/i.test(cleanTitle)) category = 'vacuum cleaner';
+  else if (/earbuds|headphone|casque|навушки/i.test(cleanTitle)) category = 'earbuds';
+  else if (/micro sd|sd card|memory card|tf card/i.test(cleanTitle)) category = 'memory card'; // ★ NEW
+  else if (/helmet|casco|capacete|خوذة/i.test(cleanTitle)) category = 'motorcycle helmet'; // ★ NEW
+
+  // ★ تجاهل الكلمات المشتتة إذا كانت الفئة واضحة
+  let searchWords = words;
+  if (category === 'motorcycle helmet') {
+    searchWords = words.filter(w => !/mirror|car|auto|kia|toyota|honda|bmw|rearview|side|light|led/i.test(w));
+  } else if (category === 'memory card') {
+    searchWords = words.filter(w => !/adapter|reader|case|holder/i.test(w));
   }
 
-  return { brand, model, category, original: raw };
+  let queryParts = [];
+  if (brand) queryParts.push(brand);
+  if (model && model !== brand) queryParts.push(model);
+  if (category) queryParts.push(category);
+
+  if (queryParts.length > 0) return queryParts.join(' ');
+  return searchWords.slice(0, 3).join(' ');
 }
 
-function extractCapacity(title) {
-  const m = (title || '').match(/\b(\d+)\s*(GB|TB|MB|Go|To|Mo|G|T)\b/i);
-  if (!m) return null;
-  let val = parseInt(m[1], 10);
-  let unit = m[2].toUpperCase();
-  if (unit === 'TB' || unit === 'TO' || unit === 'T') val *= 1024;
-  if (unit === 'MB' || unit === 'MO') val /= 1024;
-  return val;
-}
-
-function isAccessory(baseSignals, itemTitle) {
-  const lower = (itemTitle || '').toLowerCase();
-  const ACC = /\b(case|coque|housse|cover|protector|screen|film|cable|charger|adapter|bag|pouch|skin|sleeve|stand|holder|strap|band|keychain|sticker|decal|mount|bracket|replacement|spare|part|refill|tape|ruban|label|حافظة|غطاء|شاحن|كابل|حماية|حقيبة|ملصق|شريط|واقي)\b/i;
-  const baseMatch = ACC.exec(lower);
-  if (!baseMatch) return false;
-
-  const baseLower = (baseSignals.original || '').toLowerCase();
-  const baseMatchOnBase = ACC.exec(baseLower);
-  if (baseMatchOnBase && baseMatchOnBase[1].toLowerCase() === baseMatch[1].toLowerCase()) {
-    return false; 
-  }
-  return true;
-}
-
-async function llmVerify(baseTitle, candidateTitle, env) {
-  try {
-    const prompt = `You match products between sellers. Two products are SAME if they are the identical model (even from different sellers). They are DIFFERENT if one is an accessory, a variant, or another product.\n\nA: "${baseTitle.slice(0, 160)}"\nB: "${candidateTitle.slice(0, 160)}"\n\nAnswer with one word: SAME, DIFFERENT, or UNCERTAIN.`;
-    const res = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4, temperature: 0.1
-    });
-    const ans = (res.response || '').trim().toUpperCase();
-    return ans.includes('SAME') ? 'SAME' : ans.includes('DIFFERENT') ? 'DIFFERENT' : 'UNCERTAIN';
-  } catch { return null; }
-}
-
-async function imageCaption(url, env) {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    const buf = await r.arrayBuffer();
-    if (buf.byteLength > 1024 * 1024) return null; 
-    const bytes = Array.from(new Uint8Array(buf));
-    const res = await env.AI.run('@cf/unum/uform-gen2-qwen-500m', {
-      image: bytes, prompt: 'Describe this product briefly: type, shape, color, material, key features.'
-    });
-    return (res.description || res.response || '').trim();
-  } catch { return null; }
-}
-
-function parseNum(v) {
-  if (v == null) return null;
-  const cleaned = String(v).replace(/[^\d.,]/g, '');
-  if (!cleaned) return null;
-  let normalized;
-  if (/,\d{1,2}$/.test(cleaned)) {
-    normalized = cleaned.replace(/\./g, '').replace(',', '.');
-  } else {
-    normalized = cleaned.replace(/,/g, '');
-  }
-  const m = normalized.match(/\d+(\.\d+)?/);
-  return m ? parseFloat(m[0]) : null;
-}
-
-function cosineSimilarity(vecA, vecB) {
-  let dotProduct = 0, normA = 0, normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-async function hashUrl(url) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
-}
-
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      if (!o || typeof o !== 'object') continue;
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = clean(extractText(rawTitle));
-      let img = '';
-      if (o.image) { if (typeof o.image === 'string') img = o.image; else img = o.image.imgUrl || o.image.imageUrl || o.image.url || ''; }
-      if (!img && o.picUrl) { if (typeof o.picUrl === 'string') img = o.picUrl; else img = o.picUrl.imgUrl || o.picUrl.url || ''; }
-      if (img && img.startsWith('//')) img = 'https:' + img;
-
-      const p = o.prices || {}; const sale = p.salePrice || {};
-      const price = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-      out.push({ id: String(id), title: title || 'Produit similaire', img, price, rating, sold, link: 'https://www.aliexpress.com/item/' + id + '.html' });
-    } catch (e) {}
-  }
-  return out;
-}
-
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price', 'desc', 'label'];
-    for (const k of keys) { if (v[k] != null && typeof v[k] !== 'object') return String(v[k]); }
-    return '';
-  }
-  return String(v);
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker); if (i < 0) return null;
-  const j = html.indexOf('[', i); if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function clean(s) { return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
-
-async function fetchWithFallback(targetUrl, proxyCountry, acceptLanguage, env) {
-  const providers = [
-    { name: 'scrapingant', key: env.SCRAPINGANT_KEY, fn: fetchFromScrapingAnt },
-    { name: 'scraperapi', key: env.SCRAPERAPI_KEY, fn: fetchFromScraperAPI }
-  ].filter(p => p.key);
-
-  for (const provider of providers) {
-    const status = await getProviderStatus(provider.name, env);
-    if (status.disabled) continue;
-
-    try {
-        const html = await provider.fn(targetUrl, provider.key, proxyCountry, acceptLanguage);
-        if (html && html.length > 5000) return { html, provider: provider.name };
-    } catch (e) {
-        if (e.message.includes('QUOTA')) { await disableProvider(provider.name, e.message, status, env); }
-    }
-  }
-  return { html: null, provider: null };
-}
-
-async function fetchFromScrapingAnt(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scrapingant.com/v2/general');
-  url.searchParams.set('x-api-key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('proxy_country', country);
-  url.searchParams.set('browser', 'false');
-  url.searchParams.set('headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function fetchFromScraperAPI(targetUrl, apiKey, country, acceptLanguage) {
-  const url = new URL('https://api.scraperapi.com/');
-  url.searchParams.set('api_key', apiKey);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('country_code', country);
-  url.searchParams.set('render', 'false');
-  url.searchParams.set('keep_headers', 'true');
-  url.searchParams.set('custom_headers', JSON.stringify({ 'Accept-Language': acceptLanguage }));
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-      const text = await res.text();
-      if (res.status === 423 || text.includes('CAPTCHA')) throw new Error('CAPTCHA');
-      throw new Error(`HTTP ${res.status}`);
-  }
-  return await res.text();
-}
-
-async function getProviderStatus(providerName, env) {
-  try {
-    const raw = await env.COMPETITOR_CACHE.get(`provider:${providerName}`);
-    return raw ? JSON.parse(raw) : { disabled: false };
-  } catch (e) { return { disabled: false }; }
-}
-
-async function disableProvider(providerName, reason, currentStatus, env) {
-  const consecutiveFailures = (currentStatus.consecutiveFailures || 0) + 1;
-  const status = { disabled: true, permanent: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES, reason, consecutiveFailures, disabledAt: currentStatus.disabledAt || new Date().toISOString(), lastHealthCheck: new Date().toISOString() };
-  await env.COMPETITOR_CACHE.put(`provider:${providerName}`, JSON.stringify(status), { expirationTtl: 86400 * 30 });
-}
-
-function json(data, status, corsHeaders) {
-  return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+function saveToCloudflare(productId, items) {
+  const payload = {
+    base_product_id: productId,
+    all_items: items.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    })),
+    relevant_items: items.map(c => ({
+      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
+      seller_rating: c.rating, product_url: c.link
+    }))
+  };
+  fetch(`${WORKER_URL}/api/competitors`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }).then(res => res.json()).then(data => console.log('💾 Saved:', data)).catch(console.error);
 }
