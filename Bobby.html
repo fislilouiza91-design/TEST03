@@ -1,48 +1,82 @@
 /* ============================================
-   Proxy Manager - v10.1 (Webshare API Integration)
+   Proxy Manager - v13.0 (Free List + Fast Filter)
    ============================================ */
 
-// ⚠️ ضع رابط الـ API الذي يظهر في صورتك هنا (الذي يبدأ بـ https://proxy.webshare.io/...)
-const WEBSHARE_API_URL = "YOUR_API_URL";
+// مصدر قائمة البروكسيات المجانية (Proxifly)
+const PROXY_LIST_URL = 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt';
 
 let proxyPool = [];
 let proxyIndex = 0;
 let currentProxy = null;
 
 export async function refreshProxyPool() {
-  console.log(`[Proxy] ⏳ جاري جلب قائمة البروكسيات من Webshare...`);
-  
+  console.log('[Proxy] ⏳ جاري جلب قائمة البروكسيات المجانية...');
   try {
-    // الرابط يعيد ملف نصي (CSV) بكل البيانات
-    const res = await fetch(WEBSHARE_API_URL);
+    const res = await fetch(PROXY_LIST_URL);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     
     const text = await res.text();
     const lines = text.split('\n');
     
-    proxyPool = [];
+    // نأخذ أول 100 بروكسي فقط لتجربتها (لتوفير الوقت)
+    const rawProxies = lines.slice(0, 100).map(line => {
+      const parts = line.trim().split('://');
+      if (parts.length === 2) {
+        const scheme = parts[0];
+        const [host, port] = parts[1].split(':');
+        if (host && port) {
+          return { scheme, host, port: parseInt(port, 10) };
+        }
+      }
+      return null;
+    }).filter(p => p !== null);
+
+    console.log(`[Proxy] 🧪 جاري اختبار ${rawProxies.length} بروكسي...`);
     
-    // تحليل كل سطر في الملف واستخراج الـ IP والمنفذ والمستخدم وكلمة المرور
-    for (const line of lines) {
-      const parts = line.trim().split(':');
-      if (parts.length >= 4) {
-        proxyPool.push({
-          scheme: 'http',
-          host: parts[0],
-          port: parseInt(parts[1], 10),
-          username: parts[2],
-          password: parts[3]
+    // اختبار البروكسيات (فلترة الميتة)
+    const validProxies = [];
+    for (const proxy of rawProxies) {
+      // اختبار سريع: هل يدعم HTTPS؟
+      try {
+        // نطبق البروكسي مؤقتاً للاختبار
+        const testPac = `function FindProxyForURL(url, host) {
+          if (url.indexOf("_ext_test=1") !== -1) {
+            return "PROXY ${proxy.host}:${proxy.port}";
+          }
+          return "DIRECT";
+        }`;
+        
+        await chrome.proxy.settings.set({
+          scope: 'regular',
+          value: { mode: 'pac_script', pacScript: { data: testPac } }
         });
+
+        const testRes = await fetch(`https://www.aliexpress.com/robots.txt?_ext_test=1&t=${Date.now()}`, {
+          signal: AbortSignal.timeout(3000), // 3 ثوانٍ فقط
+          mode: 'no-cors'
+        });
+        
+        // إذا وصلنا هنا، فالبروكسي يعمل
+        validProxies.push(proxy);
+        console.log(`[Proxy] ✅ بروكسي صالح: ${proxy.host}:${proxy.port}`);
+      } catch (e) {
+        // البروكسي ميت، نتجاهله
+      } finally {
+        await chrome.proxy.settings.clear({ scope: 'regular' });
       }
     }
     
-    proxyPool.sort(() => Math.random() - 0.5); // خلط عشوائي
+    proxyPool = validProxies;
     proxyIndex = 0;
-    console.log(`[Proxy] ✅ تم بنجاح تحميل ${proxyPool.length} بروكسي من Webshare.`);
+    console.log(`[Proxy] 📦 تم تجهيز ${proxyPool.length} بروكسي صالح من أصل ${rawProxies.length}.`);
+    
+    if (proxyPool.length === 0) {
+      console.warn('[Proxy] ⚠️ لم يتم العثور على أي بروكسي صالح في هذه الدفعة. جرب التحديث.');
+    }
     
     return proxyPool.length;
   } catch (e) {
-    console.error(`[Proxy] ❌ فشل جلب البروكسيات من Webshare:`, e.message);
+    console.error('[Proxy] ❌ فشل جلب القائمة:', e);
     return 0;
   }
 }
@@ -81,7 +115,7 @@ export async function getNextProxyInQueue() {
   proxyIndex++;
   
   if (proxyIndex >= proxyPool.length) {
-    proxyIndex = 0; 
+    proxyIndex = 0; // العودة للبداية
   }
   
   return proxy;
