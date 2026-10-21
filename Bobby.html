@@ -1,144 +1,200 @@
 /* ============================================
-   Smart Shopper - Background Service Worker
-   Version: v16 Final (Strict filtering)
+   Smart Shopper - Fullscreen Page Module
+   Version: v16
    ============================================ */
-
-const WORKER_URL = 'https://competitors-api.smailsuit11.workers.dev';
-const MAX_PAGES_TO_FETCH = 3; 
-const CACHE_VERSION = '16'; // ★ ارفع هذا الرقم عند أي تعديل مستقبلي لتدمير الكاش القديم
-
-const STOP_WORDS = new Set([
-  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
-  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
-  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
-  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
-  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
-  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
-  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
-]);
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  if (msg.type === 'CHECK_CACHE') {
-    // ★ إرسال رقم الإصدار لتدمير الكاش القديم
-    fetch(`${WORKER_URL}/api/competitors?productId=${msg.productId}&v=${CACHE_VERSION}`)
-      .then(res => { if(res.ok) return res.json(); throw new Error('Not found'); })
-      .then(data => sendResponse({ ok: true, data: data.data }))
-      .catch(() => sendResponse({ ok: false }));
-    return true;
-  }
-
-  if (msg.type === 'SMART_SEARCH') {
-    const searchQuery = buildSmartSearchQuery(msg.title);
-    const q = encodeURIComponent(searchQuery);
-    const originalTitle = encodeURIComponent(msg.title);
-    const originalImage = encodeURIComponent(msg.originalImage || '');
-    const basePrice = encodeURIComponent(msg.basePrice || ''); // ★ NEW
-    
-    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&basePrice=${basePrice}&page=1&country=${msg.country}`)
-      .then(res => res.json())
-      .then(data => {
-         if (data.ok) {
-            sendResponse({ ok: true, items: data.items, hasMore: data.hasMore });
-            if (msg.productId && data.items.length > 0) saveToCloudflare(msg.productId, data.items);
-         } else {
-            sendResponse({ ok: false, error: data.error });
-         }
-      }).catch(err => sendResponse({ ok: false, error: err.message }));
-    return true;
-  }
-
-  if (msg.type === 'SMART_LOAD_MORE') {
-    const nextPage = Math.max(2, parseInt(msg.startPage) || 2);
-    if (nextPage > MAX_PAGES_TO_FETCH) return sendResponse({ ok: true, items: [], hasMore: false }); 
-
-    const searchQuery = buildSmartSearchQuery(msg.title);
-    const q = encodeURIComponent(searchQuery);
-    const originalTitle = encodeURIComponent(msg.title);
-    const originalImage = encodeURIComponent(msg.originalImage || '');
-    const basePrice = encodeURIComponent(msg.basePrice || ''); // ★ NEW
-
-    fetch(`${WORKER_URL}/api/fetch-page?q=${q}&originalTitle=${originalTitle}&originalImage=${originalImage}&basePrice=${basePrice}&page=${nextPage}&country=${msg.country}`)
-      .then(res => res.json())
-      .then(data => {
-         if (data.ok) {
-            let existingIds = new Set(msg.existingIds);
-            let unique = data.items.filter(i => !existingIds.has(i.id));
-            sendResponse({ ok: true, items: unique, hasMore: data.hasMore });
-            if (msg.productId && unique.length > 0) saveToCloudflare(msg.productId, unique);
-         } else {
-            sendResponse({ ok: false, error: data.error, hasMore: false });
-         }
-      }).catch(err => sendResponse({ ok: false, error: err.message, hasMore: false }));
-    return true;
-  }
-});
-
-function buildSmartSearchQuery(title) {
-  if (!title) return '';
-  const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s\-]/g, ' ');
-  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
+   (function () {
+    'use strict';
   
-  const originalWords = title.split(/\s+/);
-  let brand = '';
-  for (let w of originalWords) {
-      let cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && cleanW.length <= 8 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
-          brand = cleanW.toLowerCase();
-          break;
+    const FS_ID = 'ss-fullscreen';
+    let isOpen = false;
+    let items = [];
+    let activeTab = 0;
+    let fetching = false;
+    let currentProductPrice = 0;
+    let callbacks = {};
+  
+    const SVG = {
+      back: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
+      close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+      all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
+      cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
+      rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
+      discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
+      selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
+      similar: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>'
+    };
+  
+    const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
+    const U = () => window.SS_Utils || {};
+  
+    const esc = (s) => U().esc ? U().esc(s) : String(s || '');
+    const num = (s) => U().num ? U().num(s) : 0;
+    const stars = (r) => U().stars ? U().stars(r) : '';
+  
+    function getCurrency() {
+        const u = U();
+        return u.getCurrencySymbol ? u.getCurrencySymbol() : '$';
+    }
+  
+    function buildDOM() {
+      let el = document.getElementById(FS_ID);
+      if (el) el.remove();
+  
+      el = document.createElement('div');
+      el.id = FS_ID;
+      el.innerHTML = `
+        <div class="ss-fs-header">
+          <div class="ss-fs-header-left">
+            <div class="ss-fs-logo">S</div>
+            <div class="ss-fs-titles">
+              <div class="ss-fs-title">${esc(T('panelTitle'))}</div>
+              <div class="ss-fs-sub">${esc(T('panelSubtitle'))}</div>
+            </div>
+          </div>
+          <div class="ss-fs-header-btns">
+            <button class="ss-fs-btn ss-fs-back" id="ss-fs-back" title="${esc(T('back') || 'Back')}">
+              ${SVG.back} <span>${esc(T('back') || 'Retour')}</span>
+            </button>
+            <button class="ss-fs-btn ss-fs-close" id="ss-fs-close" title="${esc(T('close'))}">${SVG.close}</button>
+          </div>
+        </div>
+        <div class="ss-fs-tabs" id="ss-fs-tabs">
+          <span class="ss-fs-tab" data-i="0">${SVG.all}<span>${esc(T('tabAll'))}</span></span>
+          <span class="ss-fs-tab" data-i="1">${SVG.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
+          <span class="ss-fs-tab" data-i="2">${SVG.rated}<span>${esc(T('tabBestRated'))}</span></span>
+          <span class="ss-fs-tab" data-i="3">${SVG.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
+          <span class="ss-fs-tab" data-i="4">${SVG.selling}<span>${esc(T('tabBestSelling'))}</span></span>
+          <span class="ss-fs-tab" data-i="5">${SVG.similar}<span>${esc(T('tabSimilar') || 'Similar')}</span></span>
+        </div>
+        <div class="ss-fs-list" id="ss-fs-list"></div>
+        <div class="ss-fs-footer" id="ss-fs-footer"></div>
+      `;
+      document.documentElement.appendChild(el);
+  
+      document.getElementById('ss-fs-back').onclick = () => close();
+      document.getElementById('ss-fs-close').onclick = () => close();
+      document.getElementById('ss-fs-tabs').addEventListener('click', (e) => {
+        const tab = e.target.closest('.ss-fs-tab');
+        if (!tab) return;
+        const newTab = +tab.dataset.i;
+        if (newTab === activeTab) return;
+        activeTab = newTab;
+        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => x.classList.toggle('active', x === tab));
+        if (callbacks.onTabChange) callbacks.onTabChange(newTab);
+      });
+  
+      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => {
+        x.classList.toggle('active', +x.dataset.i === activeTab);
+      });
+    }
+  
+    function buildCard(it) {
+      const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
+      const itemPrice = num(it.price);
+      const hasComparison = currentProductPrice > 0 && itemPrice > 0;
+      const isHigher = hasComparison && itemPrice > currentProductPrice;
+      const boxClass = isHigher ? 'ss-fs-price-box ss-fs-higher' : 'ss-fs-price-box';
+  
+      const priceBox = `
+        <div class="${boxClass}">
+          <div class="ss-fs-price">${it.price ? esc(it.price) + ' ' + getCurrency() : '—'}</div>
+          ${discountValue ? `<div class="ss-fs-discount">-${esc(discountValue)}%</div>` : ''}
+        </div>`;
+  
+      let metaHtml = '';
+      if (it.rating) metaHtml += `<span class="ss-fs-stars">${stars(it.rating)}</span><span class="ss-fs-rating">${esc(it.rating)}</span>`;
+      if (it.sold) metaHtml += `<span class="ss-fs-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
+      if (!metaHtml) metaHtml = `<span class="ss-fs-no-info">${esc(T('noReviews'))}</span>`;
+  
+      return `
+        <a class="ss-fs-card" href="${esc(it.link)}" target="_blank" rel="noopener">
+          <div class="ss-fs-thumb-wrapper">
+            ${it.img ? `<img class="ss-fs-thumb" src="${esc(it.img)}" alt="">` : `<div class="ss-fs-thumb ss-fs-thumb-empty">🛍</div>`}
+          </div>
+          <div class="ss-fs-card-content">
+            <div class="ss-fs-card-title">${esc(it.title || 'Produit similaire')}</div>
+            <div class="ss-fs-card-meta">${metaHtml}</div>
+          </div>
+          ${priceBox}
+        </a>`;
+    }
+  
+    function renderList() {
+      const l = document.getElementById('ss-fs-list'); if (!l) return;
+  
+      if (items.length === 0) {
+        l.innerHTML = `<div class="ss-fs-msg">${esc(T('noResults'))}</div>`;
+        updateFooter();
+        return;
       }
-  }
-
-  const models = words.filter(w => {
-      const hasLetters = /[a-z]/.test(w);
-      const hasNumbers = /[0-9]/.test(w);
-      return hasLetters && hasNumbers;
-  });
-  const model = models[0] || '';
-
-  let category = '';
-  if (/flash drive|usb drive|usb flash|cle usb|флешка/i.test(cleanTitle)) category = 'usb flash drive';
-  else if (/multimeter|voltmeter|мультиметр/i.test(cleanTitle)) category = 'multimeter';
-  else if (/label maker|dymo|принтер этикеток/i.test(cleanTitle)) category = 'label maker';
-  else if (/case|cover|coque|housse|чехол|حافظة/i.test(cleanTitle)) category = 'case';
-  else if (/tape|label tape|ruban|sticker|etiquette/i.test(cleanTitle)) category = 'label tape';
-  else if (/sweeper|vacuum|пилосос/i.test(cleanTitle)) category = 'vacuum cleaner';
-  else if (/earbuds|headphone|casque|навушки/i.test(cleanTitle)) category = 'earbuds';
-  else if (/micro sd|sd card|memory card|tf card/i.test(cleanTitle)) category = 'memory card'; // ★ NEW
-  else if (/helmet|casco|capacete|خوذة/i.test(cleanTitle)) category = 'motorcycle helmet'; // ★ NEW
-
-  // ★ تجاهل الكلمات المشتتة إذا كانت الفئة واضحة
-  let searchWords = words;
-  if (category === 'motorcycle helmet') {
-    searchWords = words.filter(w => !/mirror|car|auto|kia|toyota|honda|bmw|rearview|side|light|led/i.test(w));
-  } else if (category === 'memory card') {
-    searchWords = words.filter(w => !/adapter|reader|case|holder/i.test(w));
-  }
-
-  let queryParts = [];
-  if (brand) queryParts.push(brand);
-  if (model && model !== brand) queryParts.push(model);
-  if (category) queryParts.push(category);
-
-  if (queryParts.length > 0) return queryParts.join(' ');
-  return searchWords.slice(0, 3).join(' ');
-}
-
-function saveToCloudflare(productId, items) {
-  const payload = {
-    base_product_id: productId,
-    all_items: items.map(c => ({
-      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
-      seller_rating: c.rating, product_url: c.link
-    })),
-    relevant_items: items.map(c => ({
-      competitor_id: c.id, title: c.title, price: c.price, currency: 'USD',
-      seller_rating: c.rating, product_url: c.link
-    }))
-  };
-  fetch(`${WORKER_URL}/api/competitors`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  }).then(res => res.json()).then(data => console.log('💾 Saved:', data)).catch(console.error);
-}
+  
+      const fragment = document.createDocumentFragment();
+      const temp = document.createElement('div');
+      temp.innerHTML = items.map(it => buildCard(it)).join('');
+      while (temp.firstChild) fragment.appendChild(temp.firstChild);
+      
+      l.innerHTML = '';
+      l.appendChild(fragment);
+      updateFooter();
+    }
+  
+    function updateFooter() {
+      const f = document.getElementById('ss-fs-footer'); if (!f) return;
+      let html = '';
+  
+      if (fetching) {
+        html += `<div class="ss-fs-loading" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:13px; padding:15px;">
+          <span class="ss-fs-spinner"></span>
+          <span>${esc(T('loading'))}</span>
+        </div>`;
+      } else if (items.length > 0) {
+        html += `<div class="ss-fs-counter">${items.length} ${esc(T('soldSuffix')) === 'vendus' ? 'produits' : 'items'}</div>`;
+      }
+  
+      f.innerHTML = html;
+    }
+  
+    function open(opts) {
+      opts = opts || {};
+      items = opts.items || [];
+      activeTab = opts.activeTab || 0;
+      fetching = !!opts.fetching;
+      currentProductPrice = opts.currentProductPrice || 0;
+      callbacks = {
+        onTabChange: opts.onTabChange || null,
+        onRefresh: opts.onRefresh || null,
+        onClose: opts.onClose || null
+      };
+  
+      buildDOM();
+      renderList();
+      isOpen = true;
+      document.documentElement.style.overflow = 'hidden';
+    }
+  
+    function close() {
+      const el = document.getElementById(FS_ID);
+      if (el) el.remove();
+      isOpen = false;
+      document.documentElement.style.overflow = '';
+      if (callbacks.onClose) callbacks.onClose();
+    }
+  
+    function updateItems(newItems) {
+      items = newItems || [];
+      if (isOpen) renderList();
+    }
+  
+    function setState(state) {
+      if (state.fetching !== undefined) fetching = state.fetching;
+      if (state.activeTab !== undefined) {
+        activeTab = state.activeTab;
+        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x =>
+          x.classList.toggle('active', +x.dataset.i === activeTab)
+        );
+      }
+      if (isOpen) updateFooter();
+    }
+  
+    window.SS_Fullscreen = { open, close, updateItems, setState, isOpen: () => isOpen };
+  })();
