@@ -1,23 +1,56 @@
-name: 2. Import Keywords (Run Once)
+import { createClient } from '@libsql/client';
+import dotenv from 'dotenv';
+dotenv.config();
 
-on:
-  workflow_dispatch: # زر التشغيل اليدوي
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  import-keywords:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install Dependencies
-        run: npm install @libsql/client
-      - name: Run Import Script
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-          CATEGORIES_FILE: './config/master_categories.json'
-        run: node import-categories.js
+async function setupDatabase() {
+  console.log('🔧 جاري إعداد قاعدة البيانات الشاملة...\n');
+  
+  try {
+    await db.execute('PRAGMA foreign_keys = ON;');
+
+    // 1. المنتجات
+    await db.execute(`CREATE TABLE IF NOT EXISTS products (product_id TEXT PRIMARY KEY, title TEXT, product_url TEXT, main_image TEXT, category TEXT, created_at INTEGER, updated_at INTEGER)`);
+    
+    // 2. البائعين
+    await db.execute(`CREATE TABLE IF NOT EXISTS sellers (seller_id TEXT PRIMARY KEY, seller_name TEXT, seller_rating REAL, store_url TEXT)`);
+    
+    // 3. التفاصيل
+    await db.execute(`CREATE TABLE IF NOT EXISTS product_details (product_id TEXT PRIMARY KEY, seller_id TEXT, current_price REAL, original_price REAL, discount_percentage REAL, currency TEXT, shipping_cost REAL, shipping_days INTEGER, is_free_shipping INTEGER, rating REAL, reviews_count INTEGER, orders_count INTEGER, last_updated INTEGER, FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE)`);
+    
+    // 4. الكوبونات
+    await db.execute(`CREATE TABLE IF NOT EXISTS coupons (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, coupon_code TEXT, discount_amount TEXT, min_spend TEXT, FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE)`);
+    
+    // 5. المواصفات
+    await db.execute(`CREATE TABLE IF NOT EXISTS specifications (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, spec_name TEXT, spec_value TEXT, FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE)`);
+    
+    // 6. ربط الكلمات
+    await db.execute(`CREATE TABLE IF NOT EXISTS keywords_mapping (product_id TEXT, keyword TEXT, language TEXT, PRIMARY KEY (product_id, keyword, language), FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE)`);
+    
+    // 7. تاريخ الأسعار
+    await db.execute(`CREATE TABLE IF NOT EXISTS price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, price REAL, recorded_at INTEGER, FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE)`);
+
+    // 8. الفئات
+    await db.execute(`CREATE TABLE IF NOT EXISTS categories (name_en TEXT PRIMARY KEY, full_path TEXT, level INTEGER, created_at INTEGER, updated_at INTEGER)`);
+
+    // 9. طابور الكلمات
+    await db.execute(`CREATE TABLE IF NOT EXISTS keywords_pipeline (keyword TEXT PRIMARY KEY, category TEXT, source TEXT, priority INTEGER DEFAULT 4, enabled INTEGER DEFAULT 1, run_count INTEGER DEFAULT 0, success_count INTEGER DEFAULT 0, fail_count INTEGER DEFAULT 0, last_run_at INTEGER DEFAULT 0, created_at INTEGER)`);
+
+    // 10. حالة النظام
+    await db.execute(`CREATE TABLE IF NOT EXISTS system_state (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)`);
+
+    // الفهارس
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_title ON products(title)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_detail_price ON product_details(current_price)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_kw_pipeline ON keywords_pipeline(category, last_run_at)');
+
+    console.log('🎉 اكتمل بناء قاعدة البيانات بنجاح! جميع الجداول جاهزة.');
+  } catch (error) {
+    console.error('❌ خطأ:', error);
+  }
+}
+setupDatabase();
