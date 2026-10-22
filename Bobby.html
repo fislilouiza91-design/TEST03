@@ -1,5 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
+    // 1. معالجة CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -13,7 +14,7 @@ export default {
     const url = new URL(request.url);
     const keyword = url.searchParams.get("q");
     const page = url.searchParams.get("page") || 1;
-    const cookie = url.searchParams.get("cookie"); // 🔥 استلام كوكيز المتجر
+    const cookie = url.searchParams.get("cookie"); // الكوكيز الخاصة بإعدادات متجرك
 
     if (!keyword) {
       return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
@@ -22,23 +23,19 @@ export default {
     }
 
     try {
-      const targetUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
-
-      // 🔥 إرسال الترويسات + الكوكيز (التي تحتوي على إعدادات اللغة والعملة الخاصة بك)
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-      };
-
-      if (cookie) {
-        headers['Cookie'] = cookie; // تمرير إعدادات المتجر الخاصة بك
-      }
-
-      const response = await fetch(targetUrl, { headers });
-      if (!response.ok) throw new Error(`AliExpress returned ${response.status}`);
+      // 2. تجهيز رابط البحث في AliExpress
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-      const html = await response.text();
+      // 3. بناء رابط ScrapingAnt (الذي سيقوم بالزحف نيابة عنك)
+      const scrapingAntUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&browser=true&return_page_source=true`;
+      
+      // 4. الاتصال بـ ScrapingAnt (Cloudflare سيقوم بهذا الطلب)
+      const antResponse = await fetch(scrapingAntUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
+      
+      const html = await antResponse.text(); // الحصول على كود HTML للصفحة
+
+      // 5. استخراج المنتجات (نفس الدالة الموجودة في كودك)
       const products = parseItems(html);
 
       if (products.length === 0) {
@@ -48,11 +45,12 @@ export default {
         }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
+      // 6. إرجاع النتائج إلى إضافتك
       return new Response(JSON.stringify({ success: true, data: products }), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "s-maxage=3600" 
+          "Cache-Control": "s-maxage=3600" // تخزين مؤقت لمدة ساعة
         }
       });
 
@@ -65,7 +63,7 @@ export default {
 };
 
 // ==========================================
-// دوال الاستخراج
+// دوال الاستخراج (نفس دوال الكود الخاص بك)
 // ==========================================
 function extractText(v) {
   if (v == null) return '';
@@ -78,14 +76,6 @@ function extractText(v) {
     return '';
   }
   return String(v);
-}
-
-// دالة استخراج الرقم الصافي (تتجاهل رمز العملة)
-function extractPriceNumber(s) {
-  if (!s) return 0;
-  const str = String(s).replace(/,/g, '');
-  const m = str.match(/(\d+(?:\.\d+)?)/);
-  return m ? parseFloat(m[1]) : 0;
 }
 
 function extractJsonArray(html, marker) {
@@ -140,4 +130,11 @@ function parseItems(html) {
     } catch (e) {}
   }
   return out;
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const str = String(s).replace(/,/g, '');
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
 }
