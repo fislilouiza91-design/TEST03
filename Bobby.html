@@ -26,31 +26,25 @@ export default {
       });
     }
 
-    try {
-      // 🧠 السر الأول: التخزين المؤقت (KV Cache) - يقلل الاستهلاك بنسبة 80%
-      const cacheKey = `search:${keyword.toLowerCase()}:${page}`;
-      if (env.COMPETITOR_CACHE) {
-          const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
-          if (cached) {
-              return new Response(JSON.stringify({ success: true, data: cached }), {
-                  headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-              });
-          }
-      }
+    // 🧠 السر الوحيد: فحص الذاكرة المؤقتة قبل طلب ScrapingAnt
+    const cacheUrl = new URL(request.url);
+    cacheUrl.searchParams.set("q", keyword.toLowerCase());
+    const cacheKey = new Request(cacheUrl.toString(), request);
+    const cache = caches.default;
 
-      // 🧠 السر الثاني: الرابط الذكي (يجلب نتائج أكثر بكثير)
-      const searchUrl = `https://www.aliexpress.com/w/wholesale-${keyword.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
+    let response = await cache.match(cacheKey);
+    if (response) {
+        console.log("✅ تم الجلب من الكاش (لم يتم استهلاك ScrapingAnt)");
+        return response;
+    }
+
+    // إذا لم تكن في الكاش، نذهب إلى ScrapingAnt (بنفس الكود القديم الذي يعمل)
+    try {
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-      // 🧠 السر الثالث: إعدادات ScrapingAnt (بدون متصفح + تحديد الدولة لتجنب الحظر)
-      const antUrl = new URL('https://api.scrapingant.com/v2/general');
-      antUrl.searchParams.set('url', searchUrl);
-      antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
-      antUrl.searchParams.set('return_page_source', 'true');
-      antUrl.searchParams.set('proxy_country', 'us'); // ضروري جداً
-      antUrl.searchParams.set('browser', 'false'); // 🔥 يوفر نصف الرصيد
-      antUrl.searchParams.set('headers', JSON.stringify({'Accept-Language': 'en-US,en;q=0.9'}));
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter`;
       
-      const antResponse = await fetch(antUrl.toString());
+      const antResponse = await fetch(antUrl);
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
       
       const html = await antResponse.text();
@@ -63,7 +57,6 @@ export default {
           }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // استخدام دالة الاستخراج الخاصة بك (التي تعمل 100%)
       const products = parseItems(html);
 
       if (products.length === 0) {
@@ -73,18 +66,19 @@ export default {
         }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // 🧠 حفظ النتائج في الكاش لمدة 5 أيام لتوفير الرصيد للزيارات القادمة
-      if (env.COMPETITOR_CACHE) {
-          await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(products), { expirationTtl: 432000 });
-      }
-
-      return new Response(JSON.stringify({ success: true, data: products }), {
+      // تجهيز الرد وحفظه في الكاش لمدة ساعة (أو 24 ساعة)
+      response = new Response(JSON.stringify({ success: true, data: products }), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "s-maxage=3600" 
+          "Cache-Control": "s-maxage=86400" // حفظ في الكاش لمدة 24 ساعة
         }
       });
+
+      // حفظ الاستجابة في الكاش
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+
+      return response;
 
     } catch (error) {
       return new Response(JSON.stringify({ success: false, error: error.message }), {
