@@ -45,7 +45,6 @@ export default {
 
       let products = parseItems(html);
 
-      // 🔥 تطبيق البحث الذكي مع تقارب الأسعار
       if (originalTitle && products.length > 0) {
           products = smartFilterAndSort(originalTitle, originalPrice, products);
       }
@@ -72,7 +71,7 @@ export default {
 };
 
 // ==========================================
-// 🧠 دالة البحث الذكي وتقارب الأسعار
+// 🧠 دالة البحث الذكي وتقارب الأسعار (المطورة)
 // ==========================================
 function smartFilterAndSort(originalTitle, originalPrice, items) {
     if (!items || items.length === 0) return items;
@@ -80,7 +79,6 @@ function smartFilterAndSort(originalTitle, originalPrice, items) {
     const cleanTitle = originalTitle.toLowerCase().replace(/[^\w\s]/g, ' ');
     const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
     
-    // استخراج البراند
     let brand = '';
     for (let w of originalTitle.split(/\s+/)) {
         const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
@@ -90,11 +88,17 @@ function smartFilterAndSort(originalTitle, originalPrice, items) {
         }
     }
     
-    // استخراج الموديل
     const model = words.find(w => /[a-z]/.test(w) && /[0-9]/.test(w));
-    
-    // هل المنتج الأصلي إكسسوار؟
-    const isAccessory = /case|cover|coque|housse|protector|film|screen|cable|charger|adapter|strap|band|bag|pouch|skin|sleeve|stand|holder/i.test(cleanTitle);
+
+    // 🔥 إضافة: تحديد الاسم الأساسي للمنتج (Core Noun)
+    const coreNouns = ['mirror', 'mirrors', 'case', 'cover', 'earbuds', 'headphone', 'charger', 'cable', 'watch', 'strap', 'bag', 'lamp', 'light', 'holder', 'stand', 'keyboard', 'mouse', 'controller', 'pad', 'fan', 'cooler', 'gloves', 'helmet', 'jacket', 'pants', 'shoes'];
+    let originalCoreNoun = '';
+    for (let noun of coreNouns) {
+        if (cleanTitle.includes(noun)) {
+            originalCoreNoun = noun;
+            break;
+        }
+    }
     
     const stopWords = new Set(['the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best','pcs','set','pack','piece','items','item','wholesale','dropshipping','compatible','fits','fit','suitable','accessories']);
     const essentialWords = words.filter(w => !stopWords.has(w) && w.length > 2);
@@ -104,42 +108,45 @@ function smartFilterAndSort(originalTitle, originalPrice, items) {
         let score = 0;
         let reject = false;
         
-        // 1. فلترة البراند
+        // 1. التحقق من الاسم الأساسي (صارم جداً)
+        if (originalCoreNoun) {
+            const hasCore = itemTitle.includes(originalCoreNoun) || itemTitle.includes(originalCoreNoun.replace(/s$/, ''));
+            if (!hasCore) reject = true; // رفض فوري إذا لم يكن به مرايا مثلاً
+            else score += 100; // مكافأة ضخمة
+        }
+
+        // 2. فلترة البراند
         if (brand && !itemTitle.includes(brand)) reject = true;
         else if (brand) score += 30;
         
-        // 2. فلترة الموديل
+        // 3. فلترة الموديل
         if (model && !itemTitle.includes(model)) reject = true;
         else if (model) score += 40;
         
-        // 3. فلترة الإكسسوارات
+        // 4. فلترة الإكسسوارات
+        const isAccessory = /case|cover|coque|housse|protector|film|screen|cable|charger|adapter|strap|band|bag|pouch|skin|sleeve|stand|holder/i.test(cleanTitle);
         if (!isAccessory) {
             const itemIsAccessory = /case|cover|coque|housse|protector|film|screen|cable|charger|adapter|strap|band|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitle);
             if (itemIsAccessory) reject = true;
         }
         
-        // 4. 🔥 تقارب الأسعار (Price Proximity) 🔥
+        // 5. تقارب الأسعار
         if (originalPrice > 0 && item.price > 0) {
             const ratio = item.price / originalPrice;
-            // رفض المنتجات البعيدة جداً في السعر
             if (ratio < 0.25 || ratio > 4) reject = true;
-            // مكافأة السعر القريب جداً
             if (ratio >= 0.7 && ratio <= 1.3) score += 20;
-            // مكافأة السعر الأرخص
             if (ratio < 1 && ratio >= 0.5) score += 15;
-            // عقوبة السعر الأغلى بكثير
             if (ratio > 1.5) score -= 10;
         }
         
-        // 5. تطابق الكلمات الجوهرية
+        // 6. تطابق الكلمات
         const matchedWords = essentialWords.filter(w => itemTitle.includes(w)).length;
         score += matchedWords * 5;
-        if (essentialWords.length >= 3 && matchedWords < 2) reject = true;
         
         return reject ? null : { ...item, score };
     })
     .filter(item => item !== null)
-    .sort((a, b) => b.score - a.score); // ترتيب حسب الأكثر دقة
+    .sort((a, b) => b.score - a.score);
 }
 
 // ==========================================
