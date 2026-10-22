@@ -1,154 +1,77 @@
 import { createClient } from '@libsql/client';
-import dotenv from 'dotenv';
-dotenv.config();
+import fs from 'fs';
 
 const db = createClient({
   url: process.env.TURSO_URL,
   authToken: process.env.TURSO_TOKEN,
 });
 
-async function setupDatabase() {
-  console.log('🔧 جاري إعداد قاعدة البيانات الشاملة...\n');
-  
-  try {
-    await db.execute('PRAGMA foreign_keys = ON;');
+const FILE = process.env.CATEGORIES_FILE || './config/master_categories.json';
 
-    // 1. جدول المنتجات الأساسي
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS products (
-        product_id TEXT PRIMARY KEY,
-        title TEXT,
-        product_url TEXT,
-        main_image TEXT,
-        category TEXT,
-        created_at INTEGER,
-        updated_at INTEGER
-      )
-    `);
+async function main() {
+  console.log('📥 استيراد الفئات والكلمات المفتاحية إلى Turso\n');
 
-    // 2. جدول البائعين (يُملأ لاحقاً عند فتح رابط المنتج)
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS sellers (
-        seller_id TEXT PRIMARY KEY,
-        seller_name TEXT,
-        seller_rating REAL,
-        store_url TEXT
-      )
-    `);
-
-    // 3. جدول التفاصيل (السعر، التقييم، الطلبات)
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS product_details (
-        product_id TEXT PRIMARY KEY,
-        seller_id TEXT,
-        current_price REAL,
-        original_price REAL,
-        discount_percentage REAL,
-        currency TEXT,
-        shipping_cost REAL,
-        shipping_days INTEGER,
-        is_free_shipping INTEGER,
-        rating REAL,
-        reviews_count INTEGER,
-        orders_count INTEGER,
-        last_updated INTEGER,
-        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
-      )
-    `);
-
-    // 4. جدول الكوبونات
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS coupons (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id TEXT,
-        coupon_code TEXT,
-        discount_amount TEXT,
-        min_spend TEXT,
-        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
-      )
-    `);
-
-    // 5. جدول المواصفات
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS specifications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id TEXT,
-        spec_name TEXT,
-        spec_value TEXT,
-        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
-      )
-    `);
-
-    // 6. جدول الكلمات المفتاحية وربطها بالمنتجات
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS keywords_mapping (
-        product_id TEXT,
-        keyword TEXT,
-        language TEXT,
-        PRIMARY KEY (product_id, keyword, language),
-        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
-      )
-    `);
-
-    // 7. جدول تاريخ الأسعار
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS price_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        product_id TEXT,
-        price REAL,
-        recorded_at INTEGER,
-        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
-      )
-    `);
-
-    // ==========================================
-    // جداول النظام الذكي (Smart Pipeline)
-    // ==========================================
-    
-    // 8. جدول الفئات
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS categories (
-        name_en TEXT PRIMARY KEY,
-        full_path TEXT,
-        level INTEGER,
-        created_at INTEGER,
-        updated_at INTEGER
-      )
-    `);
-
-    // 9. جدول طابور الكلمات المفتاحية
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS keywords_pipeline (
-        keyword TEXT PRIMARY KEY,
-        category TEXT,
-        source TEXT,
-        priority INTEGER DEFAULT 4,
-        enabled INTEGER DEFAULT 1,
-        run_count INTEGER DEFAULT 0,
-        success_count INTEGER DEFAULT 0,
-        fail_count INTEGER DEFAULT 0,
-        last_run_at INTEGER DEFAULT 0,
-        created_at INTEGER
-      )
-    `);
-
-    // 10. جدول حالة النظام (لتذكر الفئة النشطة)
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS system_state (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        updated_at INTEGER
-      )
-    `);
-
-    // الفهارس
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_title ON products(title)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_detail_price ON product_details(current_price)');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_kw_pipeline ON keywords_pipeline(category, last_run_at)');
-
-    console.log('🎉 اكتمل بناء قاعدة البيانات بنجاح!');
-  } catch (error) {
-    console.error('❌ خطأ:', error);
+  if (!fs.existsSync(FILE)) {
+    console.error(`❌ الملف غير موجود: ${FILE}`);
+    process.exit(1);
   }
+
+  let content = fs.readFileSync(FILE, 'utf8').replace(/^\uFEFF/, '');
+  // إصلاح تلقائي للأخطاء في ملف JSON (مثل الخطأ الموجود في ملفك)
+  content = content.replace(/"id"\s*\{\s*"id"\s*:\s*(\d+)/g, '"id": $1');
+
+  let data;
+  try {
+    data = JSON.parse(content);
+  } catch (e) {
+    console.error(`❌ فشل قراءة JSON: ${e.message}`);
+    process.exit(1);
+  }
+
+  const categories = data.categories || [];
+  if (categories.length === 0) {
+    console.error('❌ لا توجد فئات');
+    process.exit(1);
+  }
+
+  let insertedKw = 0, totalKw = 0, counter = 0;
+  const now = Date.now();
+
+  for (const cat of categories) {
+    const catName = String(cat.name || '').trim();
+    if (!catName) continue;
+
+    // 1. إضافة الفئة
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO categories (name_en, full_path, level, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`,
+      args: [catName, catName, now, now]
+    });
+
+    // 2. إضافة الكلمات
+    for (const sub of cat.subcategories || []) {
+      for (const kw of (sub.keywords || [])) {
+        const keyword = String(kw).trim().toLowerCase();
+        if (!keyword || keyword.length < 3) continue;
+        totalKw++;
+        counter++;
+        try {
+          const r = await db.execute({
+            sql: `INSERT OR IGNORE INTO keywords_pipeline
+                  (keyword, category, source, priority, enabled, run_count, success_count, fail_count, last_run_at, created_at)
+                  VALUES (?, ?, 'master_category', 4, 1, 0, 0, 0, 0, ?)`,
+            args: [keyword, catName, now + counter],
+          });
+          if (Number(r.rowsAffected) > 0) insertedKw++;
+        } catch (err) {
+          console.error(`   ⚠️ "${keyword}": ${err.message}`);
+        }
+      }
+    }
+    console.log(`  ✅ [${catName}]: تمت المعالجة`);
+  }
+
+  console.log('\n📊 ملخص:');
+  console.log(`  📚 إجمالي الكلمات في الملف: ${totalKw}`);
+  console.log(`  ✅ كلمات مضافة للقاعدة: ${insertedKw}`);
 }
-setupDatabase();
+main().catch(console.error);
