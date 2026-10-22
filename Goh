@@ -1,10 +1,1 @@
-{
-  "name": "aliexpress-core",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "Private Core Scraper using ScrapingAnt & Turso",
-  "dependencies": {
-    "@libsql/client": "^0.14.0",
-    "dotenv": "^16.3.1"
-  }
-}
+libsql://aliexpress-v3-fslbot.aws-us-east-1.turso.io
