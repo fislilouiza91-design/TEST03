@@ -1,1 +1,42 @@
-GRGRGR
+name: Auto Runner for EX-001
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # يعمل تلقائياً كل 6 ساعات
+  workflow_dispatch: # يتيح لك تشغيله يدوياً للتجربة
+
+jobs:
+  run-private-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    steps:
+      # 1. سحب الكود من المستودع الخاص EX-001
+      - name: Checkout Private Repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'FSLBOT/EX-001' # اسم مستخدمك ومستودعك الخاص
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: './core-code'
+
+      # 2. إعداد Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 3. تثبيت المكتبات
+      - name: Install Dependencies
+        run: |
+          cd ./core-code
+          npm install
+
+      # 4. تشغيل السكريبت الأساسي
+      - name: Run Scraper
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
+        run: |
+          cd ./core-code
+          node fetch-trending.js
