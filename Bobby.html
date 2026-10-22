@@ -1,10 +1,115 @@
-{
-  "name": "aliexpress-core",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "Private Core Scraper using ScrapingAnt & Turso",
-  "dependencies": {
-    "@libsql/client": "^0.14.0",
-    "dotenv": "^16.3.1"
+import { createClient } from '@libsql/client';
+import dotenv from 'dotenv';
+dotenv.config();
+
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
+
+async function setupDatabase() {
+  console.log('🔧 جاري إعداد قاعدة البيانات الشاملة...\n');
+  
+  try {
+    await db.execute('PRAGMA foreign_keys = ON;');
+
+    // 1. المنتجات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS products (
+        product_id TEXT PRIMARY KEY,
+        title TEXT,
+        product_url TEXT,
+        main_image TEXT,
+        category TEXT,
+        created_at INTEGER,
+        updated_at INTEGER
+      )
+    `);
+
+    // 2. البائعين
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS sellers (
+        seller_id TEXT PRIMARY KEY,
+        seller_name TEXT,
+        seller_rating REAL,
+        store_url TEXT
+      )
+    `);
+
+    // 3. التفاصيل
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS product_details (
+        product_id TEXT PRIMARY KEY,
+        seller_id TEXT,
+        current_price REAL,
+        original_price REAL,
+        discount_percentage REAL,
+        currency TEXT,
+        shipping_cost REAL,
+        shipping_days INTEGER,
+        is_free_shipping INTEGER,
+        rating REAL,
+        reviews_count INTEGER,
+        orders_count INTEGER,
+        last_updated INTEGER,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE,
+        FOREIGN KEY (seller_id) REFERENCES sellers(seller_id) ON DELETE SET NULL
+      )
+    `);
+
+    // 4. الكوبونات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS coupons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        coupon_code TEXT,
+        discount_amount TEXT,
+        min_spend TEXT,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+
+    // 5. المواصفات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS specifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        spec_name TEXT,
+        spec_value TEXT,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+
+    // 6. الكلمات المفتاحية (للبحث والمنتجات المشابهة)
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS keywords_mapping (
+        product_id TEXT,
+        keyword TEXT,
+        language TEXT,
+        PRIMARY KEY (product_id, keyword, language),
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+
+    // 7. تاريخ الأسعار
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        price REAL,
+        recorded_at INTEGER,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+
+    // الفهارس
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_title ON products(title)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_detail_price ON product_details(current_price)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_kw_search ON keywords_mapping(keyword, language)');
+
+    console.log('🎉 اكتمل بناء قاعدة البيانات بنجاح!');
+  } catch (error) {
+    console.error('❌ خطأ:', error);
   }
 }
+setupDatabase();
