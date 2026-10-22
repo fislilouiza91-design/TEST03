@@ -34,11 +34,11 @@ export default {
         });
       }
 
-      // 🔥 التعديل الأول: استخدام نطاق .us لضمان النتائج الأمريكية بدون تكلفة إضافية
-      const searchUrl = `https://www.aliexpress.us/w/wholesale-${keyword.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
+      // 🔥 العودة إلى aliexpress.com (لأن .us يغير هيكل الصفحة)
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-      // 🔥 التعديل الثاني: حذف proxy_country=us (لإلغاء النقطتين)، وإضافة Accept-Language لفرض اللغة الإنجليزية
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&browser=false&headers=${encodeURIComponent(JSON.stringify({"Accept-Language": "en-US,en;q=0.9"}))}`;
+      // 🔥 إزالة proxy_country=us (لتوفير النقطة الثانية) وإضافة Accept-Language لضمان اللغة الإنجليزية
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&headers=${encodeURIComponent(JSON.stringify({"Accept-Language": "en-US,en;q=0.9"}))}`;
       
       const antResponse = await fetch(antUrl);
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
@@ -177,7 +177,7 @@ function parseItems(html) {
           price: priceNum, 
           rating: parseFloat(rating) || 0, 
           soldStr: sold,
-          url: `https://www.aliexpress.us/item/${id}.html`
+          url: `https://www.aliexpress.com/item/${id}.html`
       });
     } catch (e) {}
   }
