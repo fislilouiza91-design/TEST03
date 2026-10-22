@@ -26,7 +26,7 @@ export default {
       });
     }
 
-    // 🧠 السر الوحيد: فحص الذاكرة المؤقتة قبل طلب ScrapingAnt
+    // 1. التخزين المؤقت (يحمي رصيدك من التكرار)
     const cacheUrl = new URL(request.url);
     cacheUrl.searchParams.set("q", keyword.toLowerCase());
     const cacheKey = new Request(cacheUrl.toString(), request);
@@ -34,15 +34,14 @@ export default {
 
     let response = await cache.match(cacheKey);
     if (response) {
-        console.log("✅ تم الجلب من الكاش (لم يتم استهلاك ScrapingAnt)");
         return response;
     }
 
-    // إذا لم تكن في الكاش، نذهب إلى ScrapingAnt (بنفس الكود القديم الذي يعمل)
     try {
       const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter`;
+      // 🔥 التعديل الوحيد: إضافة &browser=false (لتقليل التكلفة للنصف) و &proxy_country=us (لتجنب الحظر)
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&proxy_country=us`;
       
       const antResponse = await fetch(antUrl);
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
@@ -62,22 +61,19 @@ export default {
       if (products.length === 0) {
         return new Response(JSON.stringify({ 
             success: false, 
-            message: "لم يتم العثور على منتجات في هذه الصفحة." 
+            message: "لم يتم العثور على منتجات في هذه الصفحة (قد يكون الموقع يحتاج لمتصفح)." 
         }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // تجهيز الرد وحفظه في الكاش لمدة ساعة (أو 24 ساعة)
       response = new Response(JSON.stringify({ success: true, data: products }), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "s-maxage=86400" // حفظ في الكاش لمدة 24 ساعة
+          "Cache-Control": "s-maxage=86400" 
         }
       });
 
-      // حفظ الاستجابة في الكاش
       ctx.waitUntil(cache.put(cacheKey, response.clone()));
-
       return response;
 
     } catch (error) {
