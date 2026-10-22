@@ -1,172 +1,148 @@
-/* ============================================
-   Smart Shopper - Background Service Worker (Smart Keyword Extractor)
-   ============================================ */
-
-const WORKER_URL = 'https://ali-scraper.your-username.workers.dev'; 
-const MAX_PAGES_TO_FETCH = 3; 
-
-// قائمة الكلمات الدعائية والحشو التي يجب تجاهلها
-const STOP_WORDS = new Set([
-  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
-  'dropshipping', 'fast', 'delivery', 'cheap', 'best', 'top', 'high', 'good', 'perfect',
-  '2023', '2024', '2025', '2026', 'pcs', 'set', 'pack', 'piece', 'pieces', 'lot', 'items',
-  'for', 'and', 'with', 'the', 'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
-  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'no', 'yes', 'you', 'your', 'our',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par', 'et', 'est', 'un', 'le', 'la',
-  'для', 'и', 'в', 'на', 'с', 'по', 'из', 'double', 'door', 'enclosed', 'large', 'angle', 'flip', 
-  'cover', 'removable', 'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
-]);
-
-// قاموس العلامات التجارية الشهيرة
-const KNOWN_BRANDS = [
-  'apple', 'samsung', 'xiaomi', 'redmi', 'poco', 'huawei', 'honor', 'oppo', 'vivo', 
-  'oneplus', 'realme', 'lenovo', 'hp', 'dell', 'asus', 'acer', 'msi', 'sony', 'lg', 
-  'panasonic', 'philips', 'anker', 'baseus', 'ugreen', 'romoss', 'logitech', 'razer', 
-  'corsair', 'nike', 'adidas', 'puma', 'dyson', 'ecovacs', 'roborock'
-];
-
-// قاموس الفئات الأساسية (للبحث عن المنتج الأساسي وليس الصفة)
-const CATEGORIES = {
-  'earbuds': ['earbuds', 'headphone', 'headset', 'airpods', 'casque', 'навушники'],
-  'watch': ['watch', 'smartwatch', 'montre', 'часы', 'strap', 'watchband'],
-  'case': ['case', 'cover', 'coque', 'housse', 'чехол', 'حافظة'],
-  'charger': ['charger', 'charging', 'adapter', 'chargeur', 'зарядка'],
-  'cable': ['cable', 'cord', 'câble', 'кабель'],
-  'powerbank': ['powerbank', 'power bank', 'battery', 'batterie', 'аккумулятор'],
-  'mouse': ['mouse', 'souris', 'мышь'],
-  'keyboard': ['keyboard', 'clavier', 'клавиатура'],
-  'lamp': ['lamp', 'light', 'led', 'lampe', 'лампа', 'светильник'],
-  'vacuum': ['vacuum', 'sweeper', 'aspirateur', 'пилосос'],
-  'drone': ['drone', 'дрон'],
-  'camera': ['camera', 'cam', 'caméra', 'камера'],
-  'speaker': ['speaker', 'soundbar', 'haut-parleur', 'колонка'],
-  'tool': ['tool', 'screwdriver', 'wrench', 'plier', 'drill', 'multimeter', 'voltmeter']
-};
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  if (msg.type === 'CHECK_CACHE') {
-    sendResponse({ ok: false });
-    return true;
-  }
-
-  if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
-    const searchQuery = buildSmartSearchQuery(msg.title);
-    const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
-    
-    if (page > MAX_PAGES_TO_FETCH) {
-        return sendResponse({ ok: true, items: [], hasMore: false });
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
     }
 
-    console.log(`🎯 الكلمات المفتاحية المستخرجة للبحث: [${searchQuery}]`);
+    const url = new URL(request.url);
+    const keyword = url.searchParams.get("q");
+    const page = parseInt(url.searchParams.get("page") || "1");
 
-    const q = encodeURIComponent(searchQuery);
-    const cookieParam = msg.cookie ? `&cookie=${encodeURIComponent(msg.cookie)}` : '';
-    
-    fetch(`${WORKER_URL}?q=${q}&page=${page}${cookieParam}`)
-      .then(res => res.json())
-      .then(data => {
-         if (data.success && data.data) {
-            const items = data.data.map(item => ({
-               id: item.id,
-               title: item.title,
-               img: item.img,
-               price: item.price, 
-               rating: item.rating,
-               sold: item.soldStr,
-               link: item.url,
-               isExact: true,    
-               finalScore: 100
-            }));
-
-            let hasMore = items.length >= 20;
-            if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
-            
-            sendResponse({ ok: true, items: items, hasMore: hasMore });
-         } else {
-            sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
-         }
-      }).catch(err => {
-         sendResponse({ ok: false, error: err.message, hasMore: false });
+    if (!keyword) {
+      return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
+        status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
       });
+    }
+
+    if (page > 3) {
+      return new Response(JSON.stringify({ success: true, data: [], hasMore: false }), { 
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+      });
+    }
+
+    try {
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-    return true;
+      // 🔥 إزالة browser=true لتقليل التكلفة (جلب HTML خام)
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter`;
+      
+      const antResponse = await fetch(antUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
+      
+      const html = await antResponse.text();
+
+      // التحقق من وجود كابتشا (لأننا لم نستخدم متصفحاً)
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
+          return new Response(JSON.stringify({ 
+              success: false, 
+              message: "تم حظر الطلب من AliExpress (كابتشا). يرجى المحاولة لاحقاً." 
+          }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      }
+
+      const products = parseItems(html);
+
+      if (products.length === 0) {
+        return new Response(JSON.stringify({ 
+            success: false, 
+            message: "لم يتم العثور على منتجات في هذه الصفحة." 
+        }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      }
+
+      return new Response(JSON.stringify({ success: true, data: products }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "s-maxage=3600" 
+        }
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false, error: error.message }), {
+        status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
   }
-});
+};
 
 // ==========================================
-// 🔥 محرك استخراج الكلمات المفتاحية الذكي
+// دوال الاستخراج
 // ==========================================
-function buildSmartSearchQuery(title) {
-  if (!title) return '';
-  
-  // 1. تنظيف العنوان من الرموز والإيموجي
-  const cleanTitle = title.replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ').replace(/\s+/g, ' ').trim();
-  const lowerTitle = cleanTitle.toLowerCase();
-  const words = cleanTitle.split(' ');
-  
-  // 2. استخراج البراند (Brand)
-  let brand = '';
-  for (let w of words) {
-      const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && cleanW.length <= 10) {
-          if (KNOWN_BRANDS.includes(cleanW.toLowerCase())) {
-              brand = cleanW.toLowerCase();
-              break;
-          }
-          // إذا كانت الكلمة كلها أحرف كبيرة (وكانت ضمن أول 3 كلمات)
-          if (w === w.toUpperCase() && /^[A-Z]+$/.test(cleanW) && words.indexOf(w) < 3) {
-              brand = cleanW.toLowerCase();
-              break;
-          }
-      }
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    return '';
   }
-  
-  // 3. استخراج الموديل (Model) - كلمة تحتوي على حروف وأرقام
-  let model = '';
-  for (let w of words) {
-      const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && cleanW.length <= 12) {
-          const hasLetters = /[a-zA-Z]/.test(cleanW);
-          const hasNumbers = /[0-9]/.test(cleanW);
-          if (hasLetters && hasNumbers && !KNOWN_BRANDS.includes(cleanW.toLowerCase()) && cleanW !== brand) {
-              model = cleanW.toLowerCase();
-              break;
-          }
-      }
+  return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const str = String(s).replace(/,/g, '');
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++; else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
   }
-  
-  // 4. استخراج الفئة الأساسية (Category)
-  let category = '';
-  for (const [catKey, keywords] of Object.entries(CATEGORIES)) {
-      if (keywords.some(k => lowerTitle.includes(k))) {
-          category = catKey;
-          break;
-      }
-  }
-  
-  // 5. تجميع الكلمات المفتاحية النهائية
-  let parts = [];
-  if (brand) parts.push(brand);
-  if (model && model !== brand) parts.push(model);
-  if (category) parts.push(category);
-  
-  // إذا لم نجد فئة معروفة، نأخذ أطول كلمتين متبقيتين
-  if (!category) {
-      const remainWords = words
-          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
-          .filter(w => w.length > 2 && !STOP_WORDS.has(w) && w !== brand && w !== model)
-          .sort((a, b) => b.length - a.length); 
+  return null;
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
       
-      parts.push(...remainWords.slice(0, 2));
+      const p = o.prices || {}; const sale = p.salePrice || {}; 
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({ 
+          id: String(id), 
+          title: title || 'Produit', 
+          img: img, 
+          price: priceNum, 
+          rating: parseFloat(rating) || 0, 
+          soldStr: sold,
+          url: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
   }
-  
-  // إذا كان الناتج فارغاً، نأخذ أول 3 كلمات من العنوان الأصلي
-  if (parts.length === 0) {
-      return words.slice(0, 3).join(' ');
-  }
-  
-  // إزالة التكرار وإرجاع النتيجة النهائية (مثلاً: "xiaomi earbuds" أو "iphone 15 case")
-  return [...new Set(parts)].join(' ');
+  return out;
 }
