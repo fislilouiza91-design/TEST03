@@ -1,25 +1,172 @@
-name: 1. Initialize Database (Run Once)
+import { createClient } from '@libsql/client';
+import dotenv from 'dotenv';
+dotenv.config();
 
-on:
-  workflow_dispatch: # يعمل فقط عند الضغط على الزر يدوياً
+const db = createClient({
+  url: process.env.TURSO_URL,
+  authToken: process.env.TURSO_TOKEN,
+});
 
-jobs:
-  init-db:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+async function setupDatabase() {
+  console.log('🔧 جاري إعداد قاعدة البيانات الشاملة...\n');
+  
+  try {
+    // تفعيل العلاقات بين الجداول
+    await db.execute('PRAGMA foreign_keys = ON;');
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+    // 1. جدول المنتجات الأساسي
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS products (
+        product_id TEXT PRIMARY KEY,
+        title TEXT,
+        product_url TEXT,
+        main_image TEXT,
+        category TEXT,
+        created_at INTEGER,
+        updated_at INTEGER
+      )
+    `);
+    console.log('✅ جدول products جاهز');
 
-      - name: Install Dependencies
-        run: npm install @libsql/client dotenv
+    // 2. جدول البائعين
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS sellers (
+        seller_id TEXT PRIMARY KEY,
+        seller_name TEXT,
+        seller_rating REAL,
+        store_url TEXT
+      )
+    `);
+    console.log('✅ جدول sellers جاهز');
 
-      - name: Run Database Initialization
-        env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node check-db.js
+    // 3. جدول التفاصيل (السعر، الشحن، التقييم)
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS product_details (
+        product_id TEXT PRIMARY KEY,
+        seller_id TEXT,
+        current_price REAL,
+        original_price REAL,
+        discount_percentage REAL,
+        currency TEXT,
+        shipping_cost REAL,
+        shipping_days INTEGER,
+        is_free_shipping INTEGER,
+        rating REAL,
+        reviews_count INTEGER,
+        orders_count INTEGER,
+        last_updated INTEGER,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+    console.log('✅ جدول product_details جاهز');
+
+    // 4. جدول الكوبونات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS coupons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        coupon_code TEXT,
+        discount_amount TEXT,
+        min_spend TEXT,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+    console.log('✅ جدول coupons جاهز');
+
+    // 5. جدول المواصفات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS specifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        spec_name TEXT,
+        spec_value TEXT,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+    console.log('✅ جدول specifications جاهز');
+
+    // 6. جدول ربط المنتجات بالكلمات المفتاحية (للبحث عن منتجات مشابهة)
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS keywords_mapping (
+        product_id TEXT,
+        keyword TEXT,
+        language TEXT,
+        PRIMARY KEY (product_id, keyword, language),
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+    console.log('✅ جدول keywords_mapping جاهز');
+
+    // 7. جدول تاريخ الأسعار
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT,
+        price REAL,
+        recorded_at INTEGER,
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+      )
+    `);
+    console.log('✅ جدول price_history جاهز');
+
+    // ==========================================
+    // جداول نظام التدوير (Smart Pipeline)
+    // ==========================================
+
+    // 8. جدول الفئات
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS categories (
+        name_en TEXT PRIMARY KEY,
+        full_path TEXT,
+        level INTEGER,
+        created_at INTEGER,
+        updated_at INTEGER
+      )
+    `);
+    console.log('✅ جدول categories جاهز');
+
+    // 9. جدول طابور الكلمات المفتاحية
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS keywords_pipeline (
+        keyword TEXT PRIMARY KEY,
+        category TEXT,
+        source TEXT,
+        priority INTEGER DEFAULT 4,
+        enabled INTEGER DEFAULT 1,
+        run_count INTEGER DEFAULT 0,
+        success_count INTEGER DEFAULT 0,
+        fail_count INTEGER DEFAULT 0,
+        last_run_at INTEGER DEFAULT 0,
+        created_at INTEGER
+      )
+    `);
+    console.log('✅ جدول keywords_pipeline جاهز');
+
+    // 10. جدول حالة النظام (لتذكر الفئة النشطة)
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS system_state (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at INTEGER
+      )
+    `);
+    console.log('✅ جدول system_state جاهز');
+
+    // ==========================================
+    // إنشاء الفهارس (Indexes) لتسريع البحث
+    // ==========================================
+    console.log('\n⏳ إنشاء الفهارس لتسريع البحث...');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_title ON products(title)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_detail_price ON product_details(current_price)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_kw_pipeline ON keywords_pipeline(category, last_run_at)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_kw_search ON keywords_mapping(keyword, language)');
+    console.log('✅ تم إنشاء الفهارس.');
+
+    console.log('\n🎉 اكتمل بناء قاعدة البيانات بنجاح! جميع الجداول العشرة جاهزة للعمل.');
+  } catch (error) {
+    console.error('❌ حدث خطأ أثناء إعداد القاعدة:', error);
+    process.exit(1); // إيقاف السكريبت بخطأ
+  }
+}
+
+setupDatabase();
