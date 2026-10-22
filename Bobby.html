@@ -1,36 +1,46 @@
-name: AliExpress Continuous Scraper
+name: Auto Runner for EX-001
 
 on:
   schedule:
-    # يعمل 4 مرات يومياً (الساعة 00:00، 06:00، 12:00، 18:00 بتوقيت UTC)
-    # السكريبت سيعمل لمدة 5:55 ثم يغلق نفسه لتأتي الدورة التالية
-    - cron: '0 0,6,12,18 * * *' 
-  workflow_dispatch: # خيار للتشغيل اليدوي لتجربة الكود
-
-permissions:
-  actions: read
+    # يعمل تلقائياً كل 3 ساعات (الساعة 00:00، 03:00، 06:00... إلخ بتوقيت UTC)
+    - cron: '0 */3 * * *'
+  workflow_dispatch: # يتيح لك تشغيله يدوياً من زر في GitHub للتجربة
 
 jobs:
-  scrape:
+  run-private-scraper:
     runs-on: ubuntu-latest
-    # الحد الأقصى الذي يسمح به GitHub هو 6 ساعات كأمان أخير
-    timeout-minutes: 360 
+    # مهلة 90 دقيقة، لأن السكريبت مصمم ليعمل داخلياً لمدة 25-30 دقيقة ثم يتوقف بأمان
+    timeout-minutes: 90
     
     steps:
-      - name: Checkout code
+      # 1. سحب الكود من المستودع الخاص EX-001
+      - name: Checkout Private Repository
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          # ⚠️ تأكد أن هذا هو اسم مستخدمك واسم مستودعك الخاص
+          repository: 'FSLBOT/EX-001' 
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: './core-code' # يتم وضع الكود في مجلد فرعي
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      # 2. إعداد Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
+      # 3. تثبيت المكتبات
+      - name: Install Dependencies
+        run: |
+          cd ./core-code
+          npm install
+
+      # 4. تشغيل السكريبت الأساسي (محرك التدوير)
       - name: Run Scraper
         env:
-          # استدعاء المتغيرات السرية من إعدادات GitHub
+          # تمرير المفاتيح السرية التي أضفتها في إعدادات هذا المستودع العام
           TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: python main.py
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
+        run: |
+          cd ./core-code
+          node fetch-trending.js
