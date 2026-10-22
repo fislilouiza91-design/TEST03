@@ -1,77 +1,26 @@
-import { createClient } from '@libsql/client';
-import fs from 'fs';
+name: Import Keywords to Database
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  workflow_dispatch: # يعمل فقط عند الضغط على الزر يدوياً
 
-const FILE = process.env.CATEGORIES_FILE || './config/master_categories.json';
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-async function main() {
-  console.log('📥 استيراد الفئات والكلمات المفتاحية إلى Turso\n');
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-  if (!fs.existsSync(FILE)) {
-    console.error(`❌ الملف غير موجود: ${FILE}`);
-    process.exit(1);
-  }
+      - name: Install Dependencies
+        run: npm install @libsql/client
 
-  let content = fs.readFileSync(FILE, 'utf8').replace(/^\uFEFF/, '');
-  // إصلاح تلقائي للأخطاء في ملف JSON (مثل الخطأ الموجود في ملفك)
-  content = content.replace(/"id"\s*\{\s*"id"\s*:\s*(\d+)/g, '"id": $1');
-
-  let data;
-  try {
-    data = JSON.parse(content);
-  } catch (e) {
-    console.error(`❌ فشل قراءة JSON: ${e.message}`);
-    process.exit(1);
-  }
-
-  const categories = data.categories || [];
-  if (categories.length === 0) {
-    console.error('❌ لا توجد فئات');
-    process.exit(1);
-  }
-
-  let insertedKw = 0, totalKw = 0, counter = 0;
-  const now = Date.now();
-
-  for (const cat of categories) {
-    const catName = String(cat.name || '').trim();
-    if (!catName) continue;
-
-    // 1. إضافة الفئة
-    await db.execute({
-      sql: `INSERT OR IGNORE INTO categories (name_en, full_path, level, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`,
-      args: [catName, catName, now, now]
-    });
-
-    // 2. إضافة الكلمات
-    for (const sub of cat.subcategories || []) {
-      for (const kw of (sub.keywords || [])) {
-        const keyword = String(kw).trim().toLowerCase();
-        if (!keyword || keyword.length < 3) continue;
-        totalKw++;
-        counter++;
-        try {
-          const r = await db.execute({
-            sql: `INSERT OR IGNORE INTO keywords_pipeline
-                  (keyword, category, source, priority, enabled, run_count, success_count, fail_count, last_run_at, created_at)
-                  VALUES (?, ?, 'master_category', 4, 1, 0, 0, 0, 0, ?)`,
-            args: [keyword, catName, now + counter],
-          });
-          if (Number(r.rowsAffected) > 0) insertedKw++;
-        } catch (err) {
-          console.error(`   ⚠️ "${keyword}": ${err.message}`);
-        }
-      }
-    }
-    console.log(`  ✅ [${catName}]: تمت المعالجة`);
-  }
-
-  console.log('\n📊 ملخص:');
-  console.log(`  📚 إجمالي الكلمات في الملف: ${totalKw}`);
-  console.log(`  ✅ كلمات مضافة للقاعدة: ${insertedKw}`);
-}
-main().catch(console.error);
+      - name: Run Import Script
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          CATEGORIES_FILE: './config/master_categories.json' # تأكد من مسار الملف
+        run: node import-categories.js
