@@ -1,6 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
-    // 1. معالجة CORS
+    // 1. معالجة CORS (ضروري للإضافة)
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: {
@@ -13,8 +13,8 @@ export default {
 
     const url = new URL(request.url);
     const keyword = url.searchParams.get("q");
-    const page = url.searchParams.get("page") || 1;
-    const cookie = url.searchParams.get("cookie"); // الكوكيز الخاصة بإعدادات متجرك
+    const page = parseInt(url.searchParams.get("page") || "1");
+    const cookie = url.searchParams.get("cookie");
 
     if (!keyword) {
       return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
@@ -22,35 +22,47 @@ export default {
       });
     }
 
+    // 🔥 شرط الحد الأقصى: 3 صفحات فقط
+    if (page > 3) {
+      return new Response(JSON.stringify({ 
+        success: true, 
+        data: [], 
+        hasMore: false,
+        message: "تم الوصول للحد الأقصى (3 صفحات)." 
+      }), { 
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+      });
+    }
+
     try {
       // 2. تجهيز رابط البحث في AliExpress
       const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       
-      // 3. بناء رابط ScrapingAnt (الذي سيقوم بالزحف نيابة عنك)
-      const scrapingAntUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&browser=true&return_page_source=true`;
+      // 3. بناء رابط ScrapingAnt
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&browser=true&return_page_source=true`;
       
-      // 4. الاتصال بـ ScrapingAnt (Cloudflare سيقوم بهذا الطلب)
-      const antResponse = await fetch(scrapingAntUrl);
+      // 4. طلب البيانات من ScrapingAnt
+      const antResponse = await fetch(antUrl);
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
       
-      const html = await antResponse.text(); // الحصول على كود HTML للصفحة
+      const html = await antResponse.text();
 
-      // 5. استخراج المنتجات (نفس الدالة الموجودة في كودك)
+      // 5. استخراج المنتجات
       const products = parseItems(html);
 
       if (products.length === 0) {
         return new Response(JSON.stringify({ 
             success: false, 
-            message: "لم يتم العثور على منتجات. (احتمال كابتشا أو نهاية النتائج)." 
+            message: "لم يتم العثور على منتجات في هذه الصفحة." 
         }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // 6. إرجاع النتائج إلى إضافتك
+      // 6. إرجاع النتائج
       return new Response(JSON.stringify({ success: true, data: products }), {
         headers: {
           "Content-Type": "application/json",
           "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "s-maxage=3600" // تخزين مؤقت لمدة ساعة
+          "Cache-Control": "s-maxage=3600" // كاش لمدة ساعة (يحمي رصيد ScrapingAnt)
         }
       });
 
@@ -63,7 +75,7 @@ export default {
 };
 
 // ==========================================
-// دوال الاستخراج (نفس دوال الكود الخاص بك)
+// دوال الاستخراج (لا تغيير فيها)
 // ==========================================
 function extractText(v) {
   if (v == null) return '';
@@ -76,6 +88,13 @@ function extractText(v) {
     return '';
   }
   return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const str = String(s).replace(/,/g, '');
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
 }
 
 function extractJsonArray(html, marker) {
@@ -130,11 +149,4 @@ function parseItems(html) {
     } catch (e) {}
   }
   return out;
-}
-
-function extractPriceNumber(s) {
-  if (!s) return 0;
-  const str = String(s).replace(/,/g, '');
-  const m = str.match(/(\d+(?:\.\d+)?)/);
-  return m ? parseFloat(m[1]) : 0;
 }
