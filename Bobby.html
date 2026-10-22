@@ -27,7 +27,7 @@ export default {
     }
 
     try {
-      // 1. التحقق من الكاش (توفير الرصيد)
+      // 1. الكاش (توفير هائل للرصيد)
       const cacheKey = `search:${keyword}:${page}`;
       if (env.COMPETITOR_CACHE) {
           const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
@@ -38,34 +38,41 @@ export default {
           }
       }
 
-      // 2. الرابط الذكي
+      // 2. الرابط الذكي (نتائج كثيرة)
       const targetUrl = `https://www.aliexpress.com/w/wholesale-${keyword.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
       
-      // 3. إعداد رابط ScrapingAnt (مع إرجاع proxy_country)
+      // 3. إعداد ScrapingAnt (توفير الرصيد للنصف)
       const antUrl = new URL('https://api.scrapingant.com/v2/general');
       antUrl.searchParams.set('url', targetUrl);
       antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
+      antUrl.searchParams.set('proxy_country', 'us');
+      antUrl.searchParams.set('browser', 'false'); // 🔥 نصف التكلفة
       antUrl.searchParams.set('return_page_source', 'true');
-      antUrl.searchParams.set('proxy_country', 'us'); // 🔥 هذا هو السر الذي كان ناقصاً
-      antUrl.searchParams.set('browser', 'false');
       antUrl.searchParams.set('headers', JSON.stringify({'Accept-Language': 'en-US,en;q=0.9'}));
 
       const antResponse = await fetch(antUrl.toString());
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
       
       const html = await antResponse.text();
-      const products = parseItems(html);
 
-      if (products.length === 0) {
-          // 🔥 ميزة التصحيح: إذا لم يجد منتجات، نرسل أول 300 حرف من الـ HTML لنعرف السبب
+      // 4. فحص الكابتشا (كان موجوداً في كودك القديم)
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
           return new Response(JSON.stringify({ 
               success: false, 
-              message: "لم يتم العثور على منتجات. قد يكون AliExpress قد حظر الطلب أو غير هيكل الصفحة.",
-              debug_html: html.substring(0, 300)
+              message: "تم حظر الطلب من AliExpress (كابتشا). جرب كلمة أخرى أو انتظر." 
           }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // 4. حفظ النتائج في الكاش لمدة 5 أيام
+      const products = parseItems(html);
+
+      if (products.length === 0) {
+        return new Response(JSON.stringify({ 
+            success: false, 
+            message: "لم يتم العثور على منتجات في هذه الصفحة." 
+        }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      }
+
+      // حفظ في الكاش
       if (env.COMPETITOR_CACHE) {
           await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(products), { expirationTtl: 432000 });
       }
@@ -86,7 +93,7 @@ export default {
 };
 
 // ==========================================
-// دوال الاستخراج
+// دوال الاستخراج (من كودك القديم)
 // ==========================================
 function extractText(v) {
   if (v == null) return '';
