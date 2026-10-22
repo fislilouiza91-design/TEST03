@@ -1,10 +1,10 @@
-name: 1. Initialize Database (Run Once)
+name: 2. Import Keywords (Run Once)
 
 on:
   workflow_dispatch: # زر التشغيل اليدوي
 
 jobs:
-  init-db:
+  import-keywords:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -14,9 +14,10 @@ jobs:
         with:
           node-version: '20'
       - name: Install Dependencies
-        run: npm install @libsql/client dotenv
-      - name: Run Database Initialization
+        run: npm install @libsql/client
+      - name: Run Import Script
         env:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
-        run: node check-db.js
+          CATEGORIES_FILE: './config/master_categories.json'
+        run: node import-categories.js
