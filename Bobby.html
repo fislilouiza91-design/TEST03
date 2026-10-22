@@ -11,8 +11,8 @@ export default {
     }
 
     const url = new URL(request.url);
-    let keyword = url.searchParams.get("q"); // كلمة البحث الاحتياطية
-    const originalTitle = url.searchParams.get("originalTitle") || ""; // العنوان الأصلي
+    let keyword = url.searchParams.get("q"); 
+    const originalTitle = url.searchParams.get("originalTitle") || ""; 
     const page = parseInt(url.searchParams.get("page") || "1");
 
     if (page > 2) {
@@ -22,7 +22,6 @@ export default {
     }
 
     try {
-      // 🧠 استخدام الذكاء الاصطناعي لاستخراج أفضل كلمات مفتاحية
       if (originalTitle && env.AI) {
           keyword = await extractKeywordsWithAI(originalTitle, env);
           console.log(`🤖 AI Extracted Search Query: [${keyword}]`);
@@ -35,7 +34,9 @@ export default {
       }
 
       const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&proxy_country=us`;
+      
+      // 🔥 هنا تم حذف البروكسي تماماً (لا يوجد proxy_country)
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
       
       const antResponse = await fetch(antUrl);
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
@@ -48,7 +49,6 @@ export default {
           });
       }
 
-      // جلب المنتجات بدون فلترة (الاعتماد على دقة كلمة البحث)
       let products = parseItems(html);
 
       if (products.length === 0) {
@@ -92,15 +92,13 @@ async function extractKeywordsWithAI(title, env) {
         });
         
         if (response && response.response) {
-            // تنظيف النتيجة من أي رموز غريبة
             let cleanQuery = response.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
-            // إذا أعاد الذكاء الاصطناعي نصاً طويلاً بالخطأ، نأخذ أول 4 كلمات فقط
             return cleanQuery.split(/\s+/).slice(0, 4).join(' '); 
         }
         return '';
     } catch (e) {
         console.error("AI Error:", e);
-        return ''; // في حال فشل الذكاء الاصطناعي، سنعود للكلمة الاحتياطية
+        return ''; 
     }
 }
 
