@@ -1,102 +1,143 @@
-/* ============================================
-   Smart Shopper - Background Service Worker (Dynamic Settings)
-   ============================================ */
-
-const WORKER_URL = 'https://ali-scraper.your-username.workers.dev'; 
-
-const STOP_WORDS = new Set([
-  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
-  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
-  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
-  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
-  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
-  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
-  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter'
-]);
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  if (msg.type === 'CHECK_CACHE') {
-    sendResponse({ ok: false });
-    return true;
-  }
-
-  if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
-    const searchQuery = buildSmartSearchQuery(msg.title);
-    const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
-    const q = encodeURIComponent(searchQuery);
-    
-    // 🔥 تمرير الكوكيز لإعدادات المتجر
-    const cookieParam = msg.cookie ? `&cookie=${encodeURIComponent(msg.cookie)}` : '';
-    
-    fetch(`${WORKER_URL}?q=${q}&page=${page}${cookieParam}`)
-      .then(res => res.json())
-      .then(data => {
-         if (data.success && data.data) {
-            const items = data.data.map(item => ({
-               id: item.id,
-               title: item.title,
-               img: item.img,
-               price: item.price, 
-               rating: item.rating,
-               sold: item.soldStr,
-               link: item.url,
-               isExact: true,    
-               finalScore: 100
-            }));
-
-            const hasMore = items.length >= 20; 
-            
-            sendResponse({ ok: true, items: items, hasMore: hasMore });
-         } else {
-            sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
-         }
-      }).catch(err => {
-         sendResponse({ ok: false, error: err.message, hasMore: false });
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
       });
-      
-    return true;
-  }
-});
+    }
 
-function buildSmartSearchQuery(title) {
-  if (!title) return '';
-  const cleanTitle = title.toLowerCase().replace(/[^a-z0-9\s\-]/g, ' ');
-  const words = cleanTitle.split(/\s+/).filter(w => w.length > 1 && !STOP_WORDS.has(w));
-  
-  const originalWords = title.split(/\s+/);
-  let brand = '';
-  for (let w of originalWords) {
-      let cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && cleanW.length <= 8 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
-          brand = cleanW.toLowerCase();
-          break;
+    const url = new URL(request.url);
+    const keyword = url.searchParams.get("q");
+    const page = url.searchParams.get("page") || 1;
+    const cookie = url.searchParams.get("cookie"); // 🔥 استلام كوكيز المتجر
+
+    if (!keyword) {
+      return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
+        status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+      });
+    }
+
+    try {
+      const targetUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
+
+      // 🔥 إرسال الترويسات + الكوكيز (التي تحتوي على إعدادات اللغة والعملة الخاصة بك)
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      };
+
+      if (cookie) {
+        headers['Cookie'] = cookie; // تمرير إعدادات المتجر الخاصة بك
       }
+
+      const response = await fetch(targetUrl, { headers });
+      if (!response.ok) throw new Error(`AliExpress returned ${response.status}`);
+      
+      const html = await response.text();
+      const products = parseItems(html);
+
+      if (products.length === 0) {
+        return new Response(JSON.stringify({ 
+            success: false, 
+            message: "لم يتم العثور على منتجات. (احتمال كابتشا أو نهاية النتائج)." 
+        }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      }
+
+      return new Response(JSON.stringify({ success: true, data: products }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "s-maxage=3600" 
+        }
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false, error: error.message }), {
+        status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
   }
+};
 
-  const models = words.filter(w => {
-      const hasLetters = /[a-z]/.test(w);
-      const hasNumbers = /[0-9]/.test(w);
-      return hasLetters && hasNumbers;
-  });
-  const model = models[0] || '';
+// ==========================================
+// دوال الاستخراج
+// ==========================================
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    return '';
+  }
+  return String(v);
+}
 
-  let category = '';
-  if (/flash drive|usb drive|usb flash|cle usb|флешка/i.test(cleanTitle)) category = 'usb flash drive';
-  else if (/multimeter|voltmeter|мультиметр/i.test(cleanTitle)) category = 'multimeter';
-  else if (/label maker|dymo|принтер этикеток/i.test(cleanTitle)) category = 'label maker';
-  else if (/case|cover|coque|housse|чехол|حافظة/i.test(cleanTitle)) category = 'case';
-  else if (/tape|label tape|ruban|sticker|etiquette/i.test(cleanTitle)) category = 'label tape';
-  else if (/sweeper|vacuum|пилосос/i.test(cleanTitle)) category = 'vacuum cleaner';
-  else if (/earbuds|headphone|casque|навушники/i.test(cleanTitle)) category = 'earbuds';
+// دالة استخراج الرقم الصافي (تتجاهل رمز العملة)
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const str = String(s).replace(/,/g, '');
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
 
-  let queryParts = [];
-  if (brand) queryParts.push(brand);
-  if (model && model !== brand) queryParts.push(model);
-  if (category) queryParts.push(category);
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++; else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
 
-  if (queryParts.length > 0) return queryParts.join(' ');
-  return words.slice(0, 3).join(' ');
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      
+      const p = o.prices || {}; const sale = p.salePrice || {}; 
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({ 
+          id: String(id), 
+          title: title || 'Produit', 
+          img: img, 
+          price: priceNum, 
+          rating: parseFloat(rating) || 0, 
+          soldStr: sold,
+          url: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
+  }
+  return out;
 }
