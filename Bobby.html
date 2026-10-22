@@ -27,7 +27,7 @@ export default {
     }
 
     try {
-      // 🔥 السر الأول: التخزين المؤقت (يقلل الاستهلاك بشكل هائل)
+      // 1. التحقق من الكاش (توفير الرصيد)
       const cacheKey = `search:${keyword}:${page}`;
       if (env.COMPETITOR_CACHE) {
           const cached = await env.COMPETITOR_CACHE.get(cacheKey, 'json');
@@ -38,25 +38,34 @@ export default {
           }
       }
 
-      // 🔥 السر الثاني: رابط البحث الذكي (يجلب نتائج أكثر بكثير)
+      // 2. الرابط الذكي
       const targetUrl = `https://www.aliexpress.com/w/wholesale-${keyword.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
       
-      // 🔥 السر الثالث: browser=false لتوفير الرصيد للنصف
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(targetUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&headers=${encodeURIComponent(JSON.stringify({'Accept-Language': 'en-US,en;q=0.9'}))}`;
-      
-      const antResponse = await fetch(antUrl);
+      // 3. إعداد رابط ScrapingAnt (مع إرجاع proxy_country)
+      const antUrl = new URL('https://api.scrapingant.com/v2/general');
+      antUrl.searchParams.set('url', targetUrl);
+      antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
+      antUrl.searchParams.set('return_page_source', 'true');
+      antUrl.searchParams.set('proxy_country', 'us'); // 🔥 هذا هو السر الذي كان ناقصاً
+      antUrl.searchParams.set('browser', 'false');
+      antUrl.searchParams.set('headers', JSON.stringify({'Accept-Language': 'en-US,en;q=0.9'}));
+
+      const antResponse = await fetch(antUrl.toString());
       if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
       
       const html = await antResponse.text();
       const products = parseItems(html);
 
       if (products.length === 0) {
-        return new Response(JSON.stringify({ success: false, message: "لا توجد منتجات." }), { 
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-        });
+          // 🔥 ميزة التصحيح: إذا لم يجد منتجات، نرسل أول 300 حرف من الـ HTML لنعرف السبب
+          return new Response(JSON.stringify({ 
+              success: false, 
+              message: "لم يتم العثور على منتجات. قد يكون AliExpress قد حظر الطلب أو غير هيكل الصفحة.",
+              debug_html: html.substring(0, 300)
+          }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
       }
 
-      // حفظ النتائج في الكاش لمدة 5 أيام
+      // 4. حفظ النتائج في الكاش لمدة 5 أيام
       if (env.COMPETITOR_CACHE) {
           await env.COMPETITOR_CACHE.put(cacheKey, JSON.stringify(products), { expirationTtl: 432000 });
       }
