@@ -1,200 +1,220 @@
-/* ============================================
-   Smart Shopper - Background Service Worker (Precise Semantic Search)
-   ============================================ */
-
-const WORKER_URL = 'https://ali-scraper.your-username.workers.dev'; 
-const MAX_PAGES_TO_FETCH = 2; // أنت تبحث في صفحتين فقط
-
-// كلمات الحشو التي يجب تجاهلها
-const STOP_WORDS = new Set([
-  'free', 'shipping', 'hot', 'sale', 'new', 'original', 'quality', 'wholesale', 
-  'dropshipping', 'fast', 'delivery', 'cheap', 'for', 'and', 'with', 'the', 
-  'a', 'of', 'to', 'in', 'on', 'is', 'by', 'at', 'from', 'or', 'an', 'as', 
-  'be', 'this', 'that', 'it', 'not', 'are', 'was', 'if', 'but', 'high', 'good',
-  '2023', '2024', '2025', '2026', 'best', 'top', 'pcs', 'set', 'pack', 'piece',
-  'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
-  'double', 'door', 'enclosed', 'large', 'angle', 'flip', 'cover', 'removable', 
-  'easy', 'clean', 'waterproof', 'portable', 'multifunctional', 'design', 'filter',
-  'compatible', 'fits', 'fit', 'suitable', 'accessories', 'accessory'
-]);
-
-// العلامات التجارية الشهيرة
-const KNOWN_BRANDS = [
-  'apple', 'samsung', 'xiaomi', 'redmi', 'poco', 'huawei', 'honor', 'oppo', 'vivo', 
-  'oneplus', 'realme', 'lenovo', 'hp', 'dell', 'asus', 'acer', 'msi', 'sony', 'lg', 
-  'panasonic', 'philips', 'anker', 'baseus', 'ugreen', 'romoss', 'logitech', 'razer', 
-  'corsair', 'nike', 'adidas', 'puma', 'dyson', 'ecovacs', 'roborock'
-];
-
-// الفئات الأساسية والكلمات المرادفة
-const CATEGORIES = {
-  'case': ['case', 'cover', 'coque', 'housse', 'чехол', 'حافظة', 'shell'],
-  'earbuds': ['earbuds', 'headphone', 'headset', 'airpods', 'casque', 'навушники'],
-  'watch': ['watch', 'smartwatch', 'montre', 'часы', 'strap', 'watchband'],
-  'charger': ['charger', 'charging', 'adapter', 'chargeur', 'зарядка'],
-  'cable': ['cable', 'cord', 'câble', 'кабель'],
-  'powerbank': ['powerbank', 'power bank', 'battery', 'batterie', 'аккумулятор'],
-  'mouse': ['mouse', 'souris', 'мышь'],
-  'keyboard': ['keyboard', 'clavier', 'клавиатура'],
-  'lamp': ['lamp', 'light', 'led', 'lampe', 'лампа', 'светильник'],
-  'vacuum': ['vacuum', 'sweeper', 'aspirateur', 'пилосос'],
-  'drone': ['drone', 'дрон'],
-  'camera': ['camera', 'cam', 'caméra', 'камера'],
-  'speaker': ['speaker', 'soundbar', 'haut-parleur', 'колонка'],
-  'tool': ['tool', 'screwdriver', 'wrench', 'plier', 'drill', 'multimeter', 'voltmeter']
-};
-
-// الكلمات الوصفية المهمة (Descriptors)
-const DESCRIPTORS = ['silicone', 'leather', 'clear', 'magnetic', 'wireless', 'bluetooth', 'waterproof', 'shockproof', 'metal', 'glass', 'nylon', 'cotton', 'plastic', 'stainless', 'steel'];
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-
-  if (msg.type === 'CHECK_CACHE') {
-    sendResponse({ ok: false });
-    return true;
-  }
-
-  if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
-    const searchQuery = buildSmartSearchQuery(msg.title);
-    const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
-    
-    if (page > MAX_PAGES_TO_FETCH) {
-        return sendResponse({ ok: true, items: [], hasMore: false });
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
     }
 
-    console.log(`🎯 كلمة البحث الدقيقة: [${searchQuery}]`);
+    const url = new URL(request.url);
+    const keyword = url.searchParams.get("q");
+    const page = parseInt(url.searchParams.get("page") || "1");
+    const originalTitle = url.searchParams.get("originalTitle") || "";
+    const originalPrice = parseFloat(url.searchParams.get("originalPrice") || "0");
 
-    const q = encodeURIComponent(searchQuery);
-    
-    fetch(`${WORKER_URL}?q=${q}&page=${page}`)
-      .then(res => res.json())
-      .then(data => {
-         if (data.success && data.data) {
-            const items = data.data.map(item => ({
-               id: item.id,
-               title: item.title,
-               img: item.img,
-               price: item.price, 
-               rating: item.rating,
-               sold: item.soldStr,
-               link: item.url,
-               isExact: true,    
-               finalScore: 100
-            }));
-
-            let hasMore = items.length >= 20;
-            if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
-            
-            sendResponse({ ok: true, items: items, hasMore: hasMore });
-         } else {
-            sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
-         }
-      }).catch(err => {
-         sendResponse({ ok: false, error: err.message, hasMore: false });
+    if (!keyword) {
+      return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
+        status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
       });
+    }
+
+    if (page > 2) {
+      return new Response(JSON.stringify({ success: true, data: [], hasMore: false }), { 
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+      });
+    }
+
+    try {
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&proxy_country=us`;
       
-    return true;
+      const antResponse = await fetch(antUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
+      
+      const html = await antResponse.text();
+
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
+          return new Response(JSON.stringify({ success: false, message: "كابتشا أو حظر مؤقت." }), { 
+              headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+          });
+      }
+
+      let products = parseItems(html);
+
+      // 🔥 تطبيق البحث الذكي مع تقارب الأسعار
+      if (originalTitle && products.length > 0) {
+          products = smartFilterAndSort(originalTitle, originalPrice, products);
+      }
+
+      if (products.length === 0) {
+        return new Response(JSON.stringify({ success: false, message: "لا توجد منتجات مطابقة." }), { 
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+        });
+      }
+
+      return new Response(JSON.stringify({ success: true, data: products }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+
+    } catch (error) {
+      return new Response(JSON.stringify({ success: false, error: error.message }), {
+        status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
   }
-});
+};
 
 // ==========================================
-// 🔥 محرك البحث الدقيق (النسخة المطورة)
+// 🧠 دالة البحث الذكي وتقارب الأسعار
 // ==========================================
-function buildSmartSearchQuery(title) {
-  if (!title) return '';
-  
-  // 1. تنظيف العنوان
-  const cleanTitle = title.replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ').replace(/\s+/g, ' ').trim();
-  const lowerTitle = cleanTitle.toLowerCase();
-  const rawWords = cleanTitle.split(' ');
-  
-  // 2. استخراج البراند (Brand)
-  let brand = '';
-  for (let w of rawWords) {
-      const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && cleanW.length <= 10) {
-          if (KNOWN_BRANDS.includes(cleanW.toLowerCase())) {
-              brand = cleanW.toLowerCase();
-              break;
-          }
-          if (w === w.toUpperCase() && /^[A-Z]+$/.test(cleanW) && rawWords.indexOf(w) < 3) {
-              brand = cleanW.toLowerCase();
-              break;
-          }
-      }
+function smartFilterAndSort(originalTitle, originalPrice, items) {
+    if (!items || items.length === 0) return items;
+    
+    const cleanTitle = originalTitle.toLowerCase().replace(/[^\w\s]/g, ' ');
+    const words = cleanTitle.split(/\s+/).filter(w => w.length > 1);
+    
+    // استخراج البراند
+    let brand = '';
+    for (let w of originalTitle.split(/\s+/)) {
+        const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
+        if (cleanW.length >= 2 && cleanW === cleanW.toUpperCase() && /^[A-Z]+$/.test(cleanW)) {
+            brand = cleanW.toLowerCase();
+            break;
+        }
+    }
+    
+    // استخراج الموديل
+    const model = words.find(w => /[a-z]/.test(w) && /[0-9]/.test(w));
+    
+    // هل المنتج الأصلي إكسسوار؟
+    const isAccessory = /case|cover|coque|housse|protector|film|screen|cable|charger|adapter|strap|band|bag|pouch|skin|sleeve|stand|holder/i.test(cleanTitle);
+    
+    const stopWords = new Set(['the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best','pcs','set','pack','piece','items','item','wholesale','dropshipping','compatible','fits','fit','suitable','accessories']);
+    const essentialWords = words.filter(w => !stopWords.has(w) && w.length > 2);
+    
+    return items.map(item => {
+        const itemTitle = item.title.toLowerCase();
+        let score = 0;
+        let reject = false;
+        
+        // 1. فلترة البراند
+        if (brand && !itemTitle.includes(brand)) reject = true;
+        else if (brand) score += 30;
+        
+        // 2. فلترة الموديل
+        if (model && !itemTitle.includes(model)) reject = true;
+        else if (model) score += 40;
+        
+        // 3. فلترة الإكسسوارات
+        if (!isAccessory) {
+            const itemIsAccessory = /case|cover|coque|housse|protector|film|screen|cable|charger|adapter|strap|band|bag|pouch|skin|sleeve|stand|holder/i.test(itemTitle);
+            if (itemIsAccessory) reject = true;
+        }
+        
+        // 4. 🔥 تقارب الأسعار (Price Proximity) 🔥
+        if (originalPrice > 0 && item.price > 0) {
+            const ratio = item.price / originalPrice;
+            // رفض المنتجات البعيدة جداً في السعر
+            if (ratio < 0.25 || ratio > 4) reject = true;
+            // مكافأة السعر القريب جداً
+            if (ratio >= 0.7 && ratio <= 1.3) score += 20;
+            // مكافأة السعر الأرخص
+            if (ratio < 1 && ratio >= 0.5) score += 15;
+            // عقوبة السعر الأغلى بكثير
+            if (ratio > 1.5) score -= 10;
+        }
+        
+        // 5. تطابق الكلمات الجوهرية
+        const matchedWords = essentialWords.filter(w => itemTitle.includes(w)).length;
+        score += matchedWords * 5;
+        if (essentialWords.length >= 3 && matchedWords < 2) reject = true;
+        
+        return reject ? null : { ...item, score };
+    })
+    .filter(item => item !== null)
+    .sort((a, b) => b.score - a.score); // ترتيب حسب الأكثر دقة
+}
+
+// ==========================================
+// دوال الاستخراج
+// ==========================================
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    return '';
   }
-  
-  // 3. استخراج الموديل الكامل (Full Model) - تسلسل الكلمات التي تحتوي على أرقام
-  let model = '';
-  let modelStartIndex = -1;
-  for (let i = 0; i < rawWords.length; i++) {
-      const w = rawWords[i];
-      const cleanW = w.replace(/[^a-zA-Z0-9]/g, '');
-      if (cleanW.length >= 2 && /[0-9]/.test(cleanW) && /[a-zA-Z]/.test(cleanW) || /^\d+$/.test(cleanW)) {
-          modelStartIndex = i;
-          break;
-      }
+  return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const str = String(s).replace(/,/g, '');
+  const m = str.match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++; else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
   }
-  
-  if (modelStartIndex !== -1) {
-      // نأخذ الكلمة التي تحتوي على الرقم وما يليها من كلمات وصفية (مثل "15 Pro Max")
-      let modelParts = [rawWords[modelStartIndex].replace(/[^a-zA-Z0-9]/g, '')];
-      // إذا كان الرقم في كلمة منفصلة (مثل iPhone 15)، نأخذ الكلمات التالية
-      if (/^\d+$/.test(rawWords[modelStartIndex].replace(/[^a-zA-Z0-9]/g, ''))) {
-          let j = modelStartIndex + 1;
-          while (j < rawWords.length && j <= modelStartIndex + 3) {
-              const nextW = rawWords[j].replace(/[^a-zA-Z0-9]/g, '');
-              if (['pro', 'max', 'plus', 'ultra', 'mini', 'lite', 'air', 'note', 's24', 's23', 's22', 's21', 's20'].includes(nextW.toLowerCase())) {
-                  modelParts.push(nextW.toLowerCase());
-                  j++;
-              } else {
-                  break;
-              }
-          }
-      }
-      model = modelParts.join(' ');
-  }
-  
-  // 4. استخراج الفئة (Category)
-  let category = '';
-  for (const [catKey, keywords] of Object.entries(CATEGORIES)) {
-      if (keywords.some(k => lowerTitle.includes(k))) {
-          category = catKey;
-          break;
-      }
-  }
-  
-  // 5. استخراج الوصف المميز (Descriptor) - كلمة واحدة فقط
-  let descriptor = '';
-  for (let d of DESCRIPTORS) {
-      if (lowerTitle.includes(d)) {
-          descriptor = d;
-          break;
-      }
-  }
-  
-  // 6. تجميع الكلمات المفتاحية
-  let parts = [];
-  if (brand) parts.push(brand);
-  if (model && model !== brand) parts.push(model);
-  if (descriptor) parts.push(descriptor);
-  if (category) parts.push(category);
-  
-  // إذا لم نجد فئة معروفة، نأخذ أطول كلمتين متبقيتين
-  if (!category) {
-      const remainWords = rawWords
-          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
-          .filter(w => w.length > 2 && !STOP_WORDS.has(w) && w !== brand && !model.includes(w))
-          .sort((a, b) => b.length - a.length); 
+  return null;
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
       
-      parts.push(...remainWords.slice(0, 2));
+      const p = o.prices || {}; const sale = p.salePrice || {}; 
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({ 
+          id: String(id), 
+          title: title || 'Produit', 
+          img: img, 
+          price: priceNum, 
+          rating: parseFloat(rating) || 0, 
+          soldStr: sold,
+          url: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
   }
-  
-  if (parts.length === 0) {
-      return rawWords.slice(0, 3).join(' ');
-  }
-  
-  // إزالة التكرار وإرجاع النتيجة النهائية
-  return [...new Set(parts)].join(' ');
+  return out;
 }
