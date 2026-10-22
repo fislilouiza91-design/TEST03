@@ -11,8 +11,8 @@ export default {
     }
 
     const url = new URL(request.url);
-    let keyword = url.searchParams.get("q"); // كلمة البحث الاحتياطية
-    const originalTitle = url.searchParams.get("originalTitle") || ""; // العنوان الأصلي
+    let keyword = url.searchParams.get("q") || ""; 
+    const originalTitle = url.searchParams.get("originalTitle") || ""; 
     const page = parseInt(url.searchParams.get("page") || "1");
 
     if (page > 2) {
@@ -22,18 +22,49 @@ export default {
     }
 
     try {
-      // 🧠 استخدام الذكاء الاصطناعي لاستخراج أفضل كلمات مفتاحية
+      // 1. محاولة استخدام الذكاء الاصطناعي لاستخراج الكلمات
       if (originalTitle && env.AI) {
-          keyword = await extractKeywordsWithAI(originalTitle, env);
-          console.log(`🤖 AI Extracted Search Query: [${keyword}]`);
+          try {
+              const aiQuery = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+                  messages: [
+                      { role: 'system', content: 'You are an AliExpress search expert. Extract ONLY the main product name, brand, and model as 2-4 English keywords. Do NOT include colors, sizes, quantities, or promotional words. Output ONLY the keywords separated by spaces.' },
+                      { role: 'user', content: `Title: ${originalTitle}` }
+                  ],
+                  max_tokens: 20
+              });
+              
+              if (aiQuery && aiQuery.response) {
+                  let cleanAI = aiQuery.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
+                  if (cleanAI.length > 2) {
+                      keyword = cleanAI;
+                      console.log(`🤖 AI Extracted: [${keyword}]`);
+                  }
+              }
+          } catch (e) {
+              console.log(`⚠️ AI failed, falling back to dynamic extraction. Error: ${e.message}`);
+          }
+      }
+
+      // 2. إذا فشل الذكاء الاصطناعي، نستخدم الاحتياط الذكي (أول 4 كلمات)
+      if (!keyword && originalTitle) {
+          const cleanTitle = originalTitle.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+          const rawWords = cleanTitle.split(' ');
+          const stopWords = new Set(['the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best','pcs','set','pack','piece','items','item','wholesale','dropshipping','compatible','fits','fit','suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative','dedicated','student']);
+          const usefulWords = rawWords.filter(w => {
+              const lower = w.toLowerCase();
+              return w.length > 1 && !stopWords.has(lower) && !/^\d+$/.test(lower) && !/^\d+(mm|cm|inch)$/i.test(lower);
+          });
+          keyword = usefulWords.slice(0, 4).join(' ') || rawWords.slice(0, 3).join(' ');
+          console.log(`🛡️ Fallback Extracted: [${keyword}]`);
       }
 
       if (!keyword) {
-        return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
+        return new Response(JSON.stringify({ success: false, message: "لم يتم العثور على كلمات بحث." }), { 
           status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
         });
       }
 
+      // 3. جلب المنتجات من AliExpress بالكلمة المحددة
       const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
       const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false&proxy_country=us`;
       
@@ -48,7 +79,7 @@ export default {
           });
       }
 
-      // جلب المنتجات بدون فلترة (الاعتماد على دقة كلمة البحث)
+      // 4. استخراج المنتجات (بدون فلترة إضافية)
       let products = parseItems(html);
 
       if (products.length === 0) {
@@ -57,6 +88,7 @@ export default {
         });
       }
 
+      // إرجاع النتائج
       return new Response(JSON.stringify({ success: true, data: products, aiQuery: keyword }), {
         headers: {
           "Content-Type": "application/json",
@@ -73,39 +105,7 @@ export default {
 };
 
 // ==========================================
-// 🧠 دالة الذكاء الاصطناعي لاستخراج الكلمات
-// ==========================================
-async function extractKeywordsWithAI(title, env) {
-    try {
-        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-            messages: [
-                { 
-                  role: 'system', 
-                  content: 'You are an e-commerce search expert. Extract the main product type, brand, and model from the title. Output ONLY 3 to 4 English keywords separated by spaces. Do NOT include colors, sizes, numbers, or promotional words like "free shipping". Do NOT write sentences.' 
-                },
-                { 
-                  role: 'user', 
-                  content: title 
-                }
-            ],
-            max_tokens: 20
-        });
-        
-        if (response && response.response) {
-            // تنظيف النتيجة من أي رموز غريبة
-            let cleanQuery = response.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
-            // إذا أعاد الذكاء الاصطناعي نصاً طويلاً بالخطأ، نأخذ أول 4 كلمات فقط
-            return cleanQuery.split(/\s+/).slice(0, 4).join(' '); 
-        }
-        return '';
-    } catch (e) {
-        console.error("AI Error:", e);
-        return ''; // في حال فشل الذكاء الاصطناعي، سنعود للكلمة الاحتياطية
-    }
-}
-
-// ==========================================
-// دوال الاستخراج (بدون تعديل)
+// دوال الاستخراج
 // ==========================================
 function extractText(v) {
   if (v == null) return '';
