@@ -12,7 +12,10 @@ const ANT_API_KEY = process.env.SCRAPINGANT_API_KEY;
 const MARKET = { lang: 'en', code: 'US' };
 const BATCH_SIZE = 10; // كلمات في الدورة الواحدة
 const PAGES_PER_KEYWORD = 2;
-const MIN_RUN_TIME_MS = 25 * 60 * 1000; // 25 دقيقة
+
+// ⚠️ التعديل هنا: قراءة الوقت من GitHub Actions (355 دقيقة) أو استخدام 355 كافتراضي
+const MAX_RUNTIME_MINUTES = parseInt(process.env.MAX_RUNTIME_MINUTES || 355);
+const MAX_RUNTIME_MS = MAX_RUNTIME_MINUTES * 60 * 1000; 
 
 // ==========================================
 // إدارة الفئة العشوائية والاستكمال من حيث انتهى
@@ -204,9 +207,9 @@ async function saveToDatabase(products, keyword, language, category) {
 // ==========================================
 async function main() {
   const START_TIME = Date.now();
-  console.log('🚀 بدء محرك التدوير العشوائي...\n');
+  console.log(`🚀 بدء محرك التدوير العشوائي... (مدة التشغيل المحددة: ${MAX_RUNTIME_MINUTES} دقيقة)\n`);
 
-  while (Date.now() - START_TIME < MIN_RUN_TIME_MS) {
+  while (Date.now() - START_TIME < MAX_RUNTIME_MS) {
     const category = await getActiveCategory();
     if (!category) break;
 
@@ -219,10 +222,20 @@ async function main() {
     console.log(`\n📋 سحب ${keywords.length} كلمة من فئة [${category}]`);
     
     for (const kw of keywords) {
-      if (Date.now() - START_TIME >= MIN_RUN_TIME_MS) return; // إيقاف إذا انتهى الوقت
+      // التحقق من الوقت قبل بدء الكلمة
+      if (Date.now() - START_TIME >= MAX_RUNTIME_MS) {
+          console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت (${MAX_RUNTIME_MINUTES} دقيقة). جاري الخروج بأمان...`);
+          return; 
+      }
 
       console.log(`\n🔍 البحث عن: "${kw}"`);
       for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
+        // التحقق من الوقت قبل كل صفحة لضمان الخروج الآمن
+        if (Date.now() - START_TIME >= MAX_RUNTIME_MS) {
+           console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت (${MAX_RUNTIME_MINUTES} دقيقة). جاري الخروج بأمان...`);
+           return;
+        }
+
         try {
           const html = await fetchSearchPage(kw, page);
           if (html.length < 5000) break; 
