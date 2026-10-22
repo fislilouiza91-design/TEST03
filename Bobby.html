@@ -1,120 +1,27 @@
-import { createClient } from '@libsql/client';
-import dotenv from 'dotenv';
-dotenv.config();
+name: Manual Test Run
 
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
+on:
+  workflow_dispatch: # يعمل فقط عند الضغط على الزر
 
-const ANT_API_KEY = process.env.SCRAPINGANT_API_KEY;
-const MARKET = { lang: 'en', code: 'US' };
+jobs:
+  test-scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-// وصف البيانات المطلوبة من الذكاء الاصطناعي في ScrapingAnt
-const EXTRACT_PROPS = `productId, title, mainImage, productUrl, category, sellerName, sellerRating, sellerStoreUrl, currentPrice(number), originalPrice(number), discountPercentage(number), currency, shippingCost(number), shippingDays(number), isFreeShipping(boolean), rating(number), reviewsCount(number), ordersCount(number), coupons(list of {code, discountAmount, minSpend}), specifications(list of {name, value})`;
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-async function fetchProductFromAnt(url) {
-  const antUrl = `https://api.scrapingant.com/v2/extract?` +
-    `url=${encodeURIComponent(url)}&` +
-    `extract_properties=${encodeURIComponent(EXTRACT_PROPS)}&` +
-    `x-api-key=${ANT_API_KEY}&` +
-    `browser=true&` +
-    `proxy_type=residential&` +
-    `proxy_country=${MARKET.code}`;
+      - name: Install Dependencies
+        run: npm install
 
-  const response = await fetch(antUrl);
-  if (!response.ok) throw new Error(`HTTP Error ${response.status}: ${await response.text()}`);
-  return await response.json();
-}
-
-async function saveToDatabase(data, keyword, language) {
-  if (!data || !data.productId) return;
-  const now = Date.now();
-  
-  // استخراج معرف البائع
-  const sellerId = data.sellerName ? `slr_${data.sellerName.replace(/[^a-zA-Z0-9]/g, '_')}` : 'unknown';
-
-  // 1. المنتج الأساسي
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO products (product_id, title, product_url, main_image, category, created_at, updated_at) 
-          VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM products WHERE product_id = ?), ?), ?)`,
-    args: [data.productId, data.title || '', data.productUrl || '', data.mainImage || '', data.category || '', data.productId, now, now]
-  });
-
-  // 2. البائع
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO sellers (seller_id, seller_name, seller_rating, store_url) VALUES (?, ?, ?, ?)`,
-    args: [sellerId, data.sellerName || '', data.sellerRating || 0, data.sellerStoreUrl || '']
-  });
-
-  // 3. التفاصيل
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO product_details 
-          (product_id, seller_id, current_price, original_price, discount_percentage, currency, shipping_cost, shipping_days, is_free_shipping, rating, reviews_count, orders_count, last_updated) 
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [data.productId, sellerId, data.currentPrice || 0, data.originalPrice || 0, data.discountPercentage || 0, data.currency || 'USD', data.shippingCost || 0, data.shippingDays || 0, data.isFreeShipping ? 1 : 0, data.rating || 0, data.reviewsCount || 0, data.ordersCount || 0, now]
-  });
-
-  // 4. الكوبونات
-  if (data.coupons && Array.isArray(data.coupons)) {
-    await db.execute({ sql: `DELETE FROM coupons WHERE product_id = ?`, args: [data.productId] });
-    for (const c of data.coupons) {
-      await db.execute({
-        sql: `INSERT INTO coupons (product_id, coupon_code, discount_amount, min_spend) VALUES (?, ?, ?, ?)`,
-        args: [data.productId, c.code || '', c.discountAmount || '', c.minSpend || '']
-      });
-    }
-  }
-
-  // 5. المواصفات
-  if (data.specifications && Array.isArray(data.specifications)) {
-    await db.execute({ sql: `DELETE FROM specifications WHERE product_id = ?`, args: [data.productId] });
-    for (const s of data.specifications) {
-      await db.execute({
-        sql: `INSERT INTO specifications (product_id, spec_name, spec_value) VALUES (?, ?, ?)`,
-        args: [data.productId, s.name || '', s.value || '']
-      });
-    }
-  }
-
-  // 6. الربط بالكلمة المفتاحية
-  await db.execute({
-    sql: `INSERT OR IGNORE INTO keywords_mapping (product_id, keyword, language) VALUES (?, ?, ?)`,
-    args: [data.productId, keyword, language]
-  });
-
-  // 7. تاريخ السعر
-  await db.execute({
-    sql: `INSERT INTO price_history (product_id, price, recorded_at) VALUES (?, ?, ?)`,
-    args: [data.productId, data.currentPrice || 0, now]
-  });
-
-  console.log(`  ✅ تم حفظ وتوزيع: ${data.title ? data.title.substring(0, 40) : data.productId}...`);
-}
-
-async function main() {
-  console.log('🚀 بدء عملية الجلب الشاملة...');
-
-  // ⚠️ ضع هنا روابط المنتجات التي تريد جلبها (يمكنك إضافة العشرات)
-  const PRODUCT_URLS = [
-    "https://www.aliexpress.com/item/1005005972758201.html",
-    "https://www.aliexpress.com/item/1005005891234567.html"
-  ];
-
-  for (const url of PRODUCT_URLS) {
-    try {
-      console.log(`🔍 جلب: ${url}`);
-      const data = await fetchProductFromAnt(url);
-      // سنربطها حالياً بكلمة مفتاحية عامة
-      await saveToDatabase(data, 'general_search', MARKET.lang);
-      
-      console.log(`  ⏳ انتظار 8 ثوانٍ...`);
-      await new Promise(r => setTimeout(r, 8000)); 
-    } catch (error) {
-      console.error(`  ❌ فشل: ${error.message}`);
-    }
-  }
-  console.log('🏁 انتهت العملية.');
-}
-
-main();
+      - name: Run Scraper Script
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
+        run: node fetch-trending.js
