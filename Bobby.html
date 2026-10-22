@@ -4,39 +4,46 @@ on:
   schedule:
     # يعمل 4 مرات يومياً (الساعة 00:00، 06:00، 12:00، 18:00 بتوقيت UTC)
     - cron: '0 0,6,12,18 * * *'
-  workflow_dispatch: # للتجربة اليدوية
+  workflow_dispatch: # يتيح لك تشغيله يدوياً للتجربة
 
 jobs:
   run-private-scraper:
     runs-on: ubuntu-latest
-    # رفعنا المهلة إلى الحد الأقصى المسموح به في GitHub (6 ساعات)
+    # رفعنا المهلة إلى الحد الأقصى المسموح به في GitHub (6 ساعات) كأمان أخير
     timeout-minutes: 360 
     
     steps:
+      # 1. سحب الكود من المستودع الخاص EX-001
       - name: Checkout Private Repository
         uses: actions/checkout@v4
         with:
           repository: 'FSLBOT/EX-001' 
           token: ${{ secrets.PRIVATE_REPO_PAT }}
-          path: './core-code'
+          path: './core-code' # يتم وضع الكود في مجلد فرعي
 
+      # 2. إعداد Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      # 3. تثبيت المكتبات
       - name: Install Dependencies
         run: |
           cd ./core-code
           npm install
 
+      # 4. تشغيل السكريبت الأساسي
       - name: Run Scraper
         env:
+          # تمرير المفاتيح السرية
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           SCRAPINGANT_API_KEY: ${{ secrets.SCRAPINGANT_API_KEY }}
+          
+          # ⚠️ هنا المكان الصحيح للمتغير (تحت env وليس تحت run)
+          # 355 دقيقة = 5 ساعات و 55 دقيقة
+          MAX_RUNTIME_MINUTES: 355 
         run: |
           cd ./core-code
-          # هنا سنمرر متغير بيئة يخبر السكريبت بالعمل لمدة 5:55
-          MAX_RUNTIME_MINUTES: 355 
           node fetch-trending.js
