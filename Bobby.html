@@ -1,56 +1,246 @@
 import { createClient } from '@libsql/client';
-import fs from 'fs';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const db = createClient({
   url: process.env.TURSO_URL,
   authToken: process.env.TURSO_TOKEN,
 });
 
-const FILE = process.env.CATEGORIES_FILE || './config/master_categories.json';
+const ANT_API_KEY = process.env.SCRAPINGANT_API_KEY;
+const MARKET = { lang: 'en', code: 'US' };
+const BATCH_SIZE = 10; // كلمات في الدورة الواحدة
+const PAGES_PER_KEYWORD = 2;
+const MIN_RUN_TIME_MS = 25 * 60 * 1000; // 25 دقيقة
 
-async function main() {
-  console.log('📥 استيراد الكلمات...\n');
-  if (!fs.existsSync(FILE)) {
-    console.error(`❌ الملف غير موجود: ${FILE}`);
-    process.exit(1);
-  }
+// ==========================================
+// إدارة الفئة العشوائية والاستكمال من حيث انتهى
+// ==========================================
+async function getActiveCategory() {
+  try {
+    const stateRes = await db.execute(`SELECT value FROM system_state WHERE key = 'active_category'`);
+    let activeCat = stateRes.rows.length > 0 ? String(stateRes.rows[0].value) : null;
 
-  let content = fs.readFileSync(FILE, 'utf8').replace(/^\uFEFF/, '');
-  content = content.replace(/"id"\s*\{\s*"id"\s*:\s*(\d+)/g, '"id": $1'); // إصلاح تلقائي
+    // 1. إذا كان هناك فئة نشطة، هل ما زالت تحتوي على كلمات لم تُبحث؟
+    if (activeCat) {
+      const pending = await db.execute({
+        sql: `SELECT 1 FROM keywords_pipeline WHERE category = ? AND last_run_at = 0 AND enabled = 1 LIMIT 1`,
+        args: [activeCat]
+      });
+      if (pending.rows.length > 0) return activeCat; // نكمل في نفس الفئة
+    }
 
-  let data;
-  try { data = JSON.parse(content); } catch (e) { console.error(`❌ JSON خطأ: ${e.message}`); process.exit(1); }
+    // 2. إذا انتهت الفئة الحالية، نختار فئة جديدة "عشوائياً" لديها كلمات
+    const catsRes = await db.execute(`
+      SELECT DISTINCT category FROM keywords_pipeline 
+      WHERE last_run_at = 0 AND enabled = 1 AND category IS NOT NULL AND category != ''
+      ORDER BY RANDOM() LIMIT 1
+    `);
 
-  const categories = data.categories || [];
-  let insertedKw = 0;
-  const now = Date.now();
-  let counter = 0;
+    if (catsRes.rows.length > 0) {
+      activeCat = String(catsRes.rows[0].category);
+      console.log(`\n🎲 الانتقال عشوائياً إلى فئة جديدة: [${activeCat}]`);
+    } else {
+      // 3. إذا انتهت كل الكلمات في كل الفئات، نصفر الطابور
+      console.log(`\n🚨 اكتملت جميع الكلمات! جاري تصفير الطابور لدورة جديدة...`);
+      await db.execute(`UPDATE keywords_pipeline SET last_run_at = 0 WHERE enabled = 1`);
+      
+      const resetCatsRes = await db.execute(`
+        SELECT DISTINCT category FROM keywords_pipeline WHERE enabled = 1 ORDER BY RANDOM() LIMIT 1
+      `);
+      if (resetCatsRes.rows.length === 0) return null;
+      activeCat = String(resetCatsRes.rows[0].category);
+      console.log(`🔄 بدء دورة جديدة من فئة عشوائية: [${activeCat}]`);
+    }
 
-  for (const cat of categories) {
-    const catName = String(cat.name || '').trim();
-    if (!catName) continue;
-
+    // حفظ الفئة الجديدة
     await db.execute({
-      sql: `INSERT OR IGNORE INTO categories (name_en, full_path, level, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`,
-      args: [catName, catName, now, now]
+      sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) VALUES ('active_category', ?, ?)`,
+      args: [activeCat, Date.now()]
     });
 
-    for (const sub of cat.subcategories || []) {
-      for (const kw of (sub.keywords || [])) {
-        const keyword = String(kw).trim().toLowerCase();
-        if (!keyword || keyword.length < 3) continue;
-        counter++;
-        try {
-          const r = await db.execute({
-            sql: `INSERT OR IGNORE INTO keywords_pipeline (keyword, category, source, priority, enabled, run_count, success_count, fail_count, last_run_at, created_at) VALUES (?, ?, 'master_category', 4, 1, 0, 0, 0, 0, ?)`,
-            args: [keyword, catName, now + counter],
-          });
-          if (Number(r.rowsAffected) > 0) insertedKw++;
-        } catch (err) {}
-      }
-    }
-    console.log(`  ✅ تم استيراد فئة: [${catName}]`);
+    return activeCat;
+  } catch (e) {
+    return null;
   }
-  console.log(`\n📊 إجمالي الكلمات المضافة: ${insertedKw}`);
 }
+
+async function getKeywordsForCategory(category, limit) {
+  const res = await db.execute({
+    sql: `SELECT keyword FROM keywords_pipeline WHERE category = ? AND last_run_at = 0 AND enabled = 1 ORDER BY RANDOM() LIMIT ?`,
+    args: [category, limit]
+  });
+  return res.rows.map(r => String(r.keyword));
+}
+
+async function markKeywordProcessed(keyword) {
+  // بمجرد الانتهاء، نضع تاريخ اليوم، فلن يتم اختيارها مرة أخرى
+  await db.execute({
+    sql: `UPDATE keywords_pipeline SET last_run_at = ?, run_count = run_count + 1 WHERE keyword = ?`,
+    args: [Date.now(), keyword]
+  });
+}
+
+// ==========================================
+// الجلب والاستخراج
+// ==========================================
+async function fetchSearchPage(keyword, page) {
+  const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
+  const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${ANT_API_KEY}&browser=true&return_page_source=true&proxy_type=datacenter&proxy_country=${MARKET.code}`;
+  const response = await fetch(antUrl);
+  if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+  return await response.text();
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+    return '';
+  }
+  return String(v);
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++; else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      const p = o.prices || {}; const sale = p.salePrice || {}; const orig = p.originalPrice || {};
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const oldPriceStr = extractText(orig.formatedPrice || orig.minPrice || '');
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      out.push({ id: String(id), title: title || 'Produit', img, priceStr, oldPriceStr, rating: parseFloat(rating) || 0, soldStr: sold });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractPriceNum(s) {
+  const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractSoldCount(s) {
+  if (!s) return 0;
+  const str = String(s).toLowerCase();
+  if (str.includes('k')) return Math.floor(parseFloat(str.replace(/[^0-9.]/g, '')) * 1000);
+  const m = str.match(/(\d+)/);
+  return m ? parseInt(m[1]) : 0;
+}
+
+async function saveToDatabase(products, keyword, language, category) {
+  if (products.length === 0) return 0;
+  const now = Date.now();
+  let savedCount = 0;
+
+  for (const p of products) {
+    try {
+      const price = extractPriceNum(p.priceStr);
+      const oldPrice = extractPriceNum(p.oldPriceStr);
+      const orders = extractSoldCount(p.soldStr);
+      const productUrl = `https://www.aliexpress.com/item/${p.id}.html`;
+
+      await db.execute({
+        sql: `INSERT OR REPLACE INTO products (product_id, title, product_url, main_image, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM products WHERE product_id = ?), ?), ?)`,
+        args: [p.id, p.title, productUrl, p.img, category, p.id, now, now]
+      });
+
+      await db.execute({
+        sql: `INSERT OR REPLACE INTO product_details (product_id, current_price, original_price, rating, orders_count, last_updated) VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [p.id, price, oldPrice, p.rating, orders, now]
+      });
+
+      await db.execute({
+        sql: `INSERT INTO price_history (product_id, price, recorded_at) VALUES (?, ?, ?)`,
+        args: [p.id, price, now]
+      });
+
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO keywords_mapping (product_id, keyword, language) VALUES (?, ?, ?)`,
+        args: [p.id, keyword, language]
+      });
+      savedCount++;
+    } catch (dbError) {}
+  }
+  return savedCount;
+}
+
+// ==========================================
+// التشغيل الرئيسي
+// ==========================================
+async function main() {
+  const START_TIME = Date.now();
+  console.log('🚀 بدء محرك التدوير العشوائي...\n');
+
+  while (Date.now() - START_TIME < MIN_RUN_TIME_MS) {
+    const category = await getActiveCategory();
+    if (!category) break;
+
+    const keywords = await getKeywordsForCategory(category, BATCH_SIZE);
+    if (!keywords || keywords.length === 0) {
+      await new Promise(r => setTimeout(r, 2000)); 
+      continue; 
+    }
+
+    console.log(`\n📋 سحب ${keywords.length} كلمة من فئة [${category}]`);
+    
+    for (const kw of keywords) {
+      if (Date.now() - START_TIME >= MIN_RUN_TIME_MS) return; // إيقاف إذا انتهى الوقت
+
+      console.log(`\n🔍 البحث عن: "${kw}"`);
+      for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
+        try {
+          const html = await fetchSearchPage(kw, page);
+          if (html.length < 5000) break; 
+          const products = parseItems(html);
+          if (products.length === 0) break;
+          const saved = await saveToDatabase(products, kw, MARKET.lang, category);
+          console.log(`      ✅ صفحة ${page}: استخراج ${products.length} (جديد: ${saved})`);
+          await new Promise(r => setTimeout(r, 3000));
+        } catch (error) {
+          console.error(`      ⚠️ خطأ صفحة ${page}:`, error.message);
+        }
+      }
+      
+      // ⚠️ هنا السر: نضع علامة "تمت" فوراً بعد الكلمة، حتى لو توقف السكريبت لا يعيدها
+      await markKeywordProcessed(kw);
+    }
+  }
+  console.log(`\n🏁 انتهى وقت التشغيل.`);
+}
+
 main().catch(console.error);
