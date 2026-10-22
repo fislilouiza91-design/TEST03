@@ -10,13 +10,13 @@ const db = createClient({
 
 const ANT_API_KEY = process.env.SCRAPINGANT_API_KEY;
 const MARKET = { lang: 'en', code: 'US' };
-const BATCH_SIZE = 10; // كلمات في الدورة الواحدة
+const BATCH_SIZE = 10; 
 
-// ⚠️ التعديل هنا: قراءة الوقت من GitHub Actions (355 دقيقة) أو استخدام 355 كافتراضي
 const MAX_RUNTIME_MINUTES = parseInt(process.env.MAX_RUNTIME_MINUTES || 355);
 const MAX_RUNTIME_MS = MAX_RUNTIME_MINUTES * 60 * 1000; 
 
-const MAX_SAFETY_PAGES = 50; // حد أقصى للأمان (لن يسحب أكثر من 50 صفحة للكلمة الواحدة مهما حدث)
+// 🎯 هنا القرار النهائي: 3 صفحات كحد أقصى
+const MAX_PAGES_PER_KEYWORD = 3; 
 
 // ==========================================
 // إدارة الفئة العشوائية والاستكمال من حيث انتهى
@@ -173,22 +173,17 @@ async function saveToDatabase(products, keyword, language, category) {
       const orders = extractSoldCount(p.soldStr);
       const productUrl = `https://www.aliexpress.com/item/${p.id}.html`;
 
-      // نتحقق مما إذا كان المنتج جديداً فعلاً (لمنع التكرار)
-      // نستخدم INSERT OR IGNORE للمنتجات، ونحدث التفاصيل فقط إذا كانت جديدة
       const insertRes = await db.execute({
         sql: `INSERT OR IGNORE INTO products (product_id, title, product_url, main_image, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         args: [p.id, p.title, productUrl, p.img, category, now, now]
       });
 
-      // إذا تم إدخال صف جديد (rowsAffected > 0)، فهذا يعني أنه منتج جديد
       if (insertRes.rowsAffected > 0) {
           savedCount++;
-          
           await db.execute({
             sql: `INSERT OR REPLACE INTO product_details (product_id, current_price, original_price, rating, orders_count, last_updated) VALUES (?, ?, ?, ?, ?, ?)`,
             args: [p.id, price, oldPrice, p.rating, orders, now]
           });
-
           await db.execute({
             sql: `INSERT INTO price_history (product_id, price, recorded_at) VALUES (?, ?, ?)`,
             args: [p.id, price, now]
@@ -210,7 +205,7 @@ async function saveToDatabase(products, keyword, language, category) {
 // ==========================================
 async function main() {
   const START_TIME = Date.now();
-  console.log(`🚀 بدء محرك التدوير العشوائي... (مدة التشغيل المحددة: ${MAX_RUNTIME_MINUTES} دقيقة)\n`);
+  console.log(`🚀 بدء محرك التدوير العشوائي... (مدة التشغيل: ${MAX_RUNTIME_MINUTES} دقيقة | الحد الأقصى للصفحات: ${MAX_PAGES_PER_KEYWORD})\n`);
 
   while (Date.now() - START_TIME < MAX_RUNTIME_MS) {
     const category = await getActiveCategory();
@@ -233,19 +228,12 @@ async function main() {
       console.log(`\n🔍 البحث عن: "${kw}"`);
       
       let page = 1;
-      let consecutiveDuplicatePages = 0; // عداد للصفحات التي لا تحتوي على منتجات جديدة
+      let consecutiveDuplicatePages = 0;
 
-      while (true) {
-        // التحقق من الوقت قبل كل صفحة
+      while (page <= MAX_PAGES_PER_KEYWORD) {
         if (Date.now() - START_TIME >= MAX_RUNTIME_MS) {
            console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت. جاري الخروج بأمان...`);
            return;
-        }
-
-        // حد الأمان لمنع الحلقة اللانهائية
-        if (page > MAX_SAFETY_PAGES) {
-            console.log(`      🛑 وصلنا لحد الأمان (${MAX_SAFETY_PAGES} صفحة). الانتقال للكلمة التالية.`);
-            break;
         }
 
         try {
@@ -266,28 +254,29 @@ async function main() {
           const saved = await saveToDatabase(products, kw, MARKET.lang, category);
           console.log(`      ✅ صفحة ${page}: استخراج ${products.length} (جديد: ${saved})`);
 
-          // إذا لم يتم حفظ أي منتج جديد
           if (saved === 0) {
               consecutiveDuplicatePages++;
-              // إذا تكررت النتائج في صفحتين متتاليتين، نتوقف (الموقع بدأ يعيد نفس المنتجات)
               if (consecutiveDuplicatePages >= 2) {
                   console.log(`      ⏹️ المنتجات بدأت تتكرر. التوقف عن هذه الكلمة لتوفير الرصيد.`);
                   break;
               }
           } else {
-              consecutiveDuplicatePages = 0; // تصفير العداد لأننا وجدنا منتجات جديدة
+              consecutiveDuplicatePages = 0; 
           }
 
-          page++; // الانتقال للصفحة التالية
-          await new Promise(r => setTimeout(r, 3000)); // تأخير بشري
+          page++; 
+          await new Promise(r => setTimeout(r, 3000)); 
           
         } catch (error) {
           console.error(`      ⚠️ خطأ في صفحة ${page}:`, error.message);
-          break; // نتوقف عن هذه الكلمة إذا حدث خطأ
+          break; 
         }
       }
       
-      // وضع علامة "تمت" فوراً بعد الكلمة
+      if (page > MAX_PAGES_PER_KEYWORD) {
+          console.log(`      🛑 وصلنا للحد الأقصى (${MAX_PAGES_PER_KEYWORD} صفحات). الانتقال للكلمة التالية.`);
+      }
+      
       await markKeywordProcessed(kw);
     }
   }
