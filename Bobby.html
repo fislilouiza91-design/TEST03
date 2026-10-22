@@ -11,11 +11,12 @@ const db = createClient({
 const ANT_API_KEY = process.env.SCRAPINGANT_API_KEY;
 const MARKET = { lang: 'en', code: 'US' };
 const BATCH_SIZE = 10; // كلمات في الدورة الواحدة
-const PAGES_PER_KEYWORD = 2;
 
 // ⚠️ التعديل هنا: قراءة الوقت من GitHub Actions (355 دقيقة) أو استخدام 355 كافتراضي
 const MAX_RUNTIME_MINUTES = parseInt(process.env.MAX_RUNTIME_MINUTES || 355);
 const MAX_RUNTIME_MS = MAX_RUNTIME_MINUTES * 60 * 1000; 
+
+const MAX_SAFETY_PAGES = 50; // حد أقصى للأمان (لن يسحب أكثر من 50 صفحة للكلمة الواحدة مهما حدث)
 
 // ==========================================
 // إدارة الفئة العشوائية والاستكمال من حيث انتهى
@@ -25,16 +26,14 @@ async function getActiveCategory() {
     const stateRes = await db.execute(`SELECT value FROM system_state WHERE key = 'active_category'`);
     let activeCat = stateRes.rows.length > 0 ? String(stateRes.rows[0].value) : null;
 
-    // 1. إذا كان هناك فئة نشطة، هل ما زالت تحتوي على كلمات لم تُبحث؟
     if (activeCat) {
       const pending = await db.execute({
         sql: `SELECT 1 FROM keywords_pipeline WHERE category = ? AND last_run_at = 0 AND enabled = 1 LIMIT 1`,
         args: [activeCat]
       });
-      if (pending.rows.length > 0) return activeCat; // نكمل في نفس الفئة
+      if (pending.rows.length > 0) return activeCat; 
     }
 
-    // 2. إذا انتهت الفئة الحالية، نختار فئة جديدة "عشوائياً" لديها كلمات
     const catsRes = await db.execute(`
       SELECT DISTINCT category FROM keywords_pipeline 
       WHERE last_run_at = 0 AND enabled = 1 AND category IS NOT NULL AND category != ''
@@ -45,7 +44,6 @@ async function getActiveCategory() {
       activeCat = String(catsRes.rows[0].category);
       console.log(`\n🎲 الانتقال عشوائياً إلى فئة جديدة: [${activeCat}]`);
     } else {
-      // 3. إذا انتهت كل الكلمات في كل الفئات، نصفر الطابور
       console.log(`\n🚨 اكتملت جميع الكلمات! جاري تصفير الطابور لدورة جديدة...`);
       await db.execute(`UPDATE keywords_pipeline SET last_run_at = 0 WHERE enabled = 1`);
       
@@ -57,7 +55,6 @@ async function getActiveCategory() {
       console.log(`🔄 بدء دورة جديدة من فئة عشوائية: [${activeCat}]`);
     }
 
-    // حفظ الفئة الجديدة
     await db.execute({
       sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) VALUES ('active_category', ?, ?)`,
       args: [activeCat, Date.now()]
@@ -78,7 +75,6 @@ async function getKeywordsForCategory(category, limit) {
 }
 
 async function markKeywordProcessed(keyword) {
-  // بمجرد الانتهاء، نضع تاريخ اليوم، فلن يتم اختيارها مرة أخرى
   await db.execute({
     sql: `UPDATE keywords_pipeline SET last_run_at = ?, run_count = run_count + 1 WHERE keyword = ?`,
     args: [Date.now(), keyword]
@@ -177,26 +173,33 @@ async function saveToDatabase(products, keyword, language, category) {
       const orders = extractSoldCount(p.soldStr);
       const productUrl = `https://www.aliexpress.com/item/${p.id}.html`;
 
-      await db.execute({
-        sql: `INSERT OR REPLACE INTO products (product_id, title, product_url, main_image, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM products WHERE product_id = ?), ?), ?)`,
-        args: [p.id, p.title, productUrl, p.img, category, p.id, now, now]
+      // نتحقق مما إذا كان المنتج جديداً فعلاً (لمنع التكرار)
+      // نستخدم INSERT OR IGNORE للمنتجات، ونحدث التفاصيل فقط إذا كانت جديدة
+      const insertRes = await db.execute({
+        sql: `INSERT OR IGNORE INTO products (product_id, title, product_url, main_image, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [p.id, p.title, productUrl, p.img, category, now, now]
       });
 
-      await db.execute({
-        sql: `INSERT OR REPLACE INTO product_details (product_id, current_price, original_price, rating, orders_count, last_updated) VALUES (?, ?, ?, ?, ?, ?)`,
-        args: [p.id, price, oldPrice, p.rating, orders, now]
-      });
+      // إذا تم إدخال صف جديد (rowsAffected > 0)، فهذا يعني أنه منتج جديد
+      if (insertRes.rowsAffected > 0) {
+          savedCount++;
+          
+          await db.execute({
+            sql: `INSERT OR REPLACE INTO product_details (product_id, current_price, original_price, rating, orders_count, last_updated) VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [p.id, price, oldPrice, p.rating, orders, now]
+          });
 
-      await db.execute({
-        sql: `INSERT INTO price_history (product_id, price, recorded_at) VALUES (?, ?, ?)`,
-        args: [p.id, price, now]
-      });
+          await db.execute({
+            sql: `INSERT INTO price_history (product_id, price, recorded_at) VALUES (?, ?, ?)`,
+            args: [p.id, price, now]
+          });
+      }
 
       await db.execute({
         sql: `INSERT OR IGNORE INTO keywords_mapping (product_id, keyword, language) VALUES (?, ?, ?)`,
         args: [p.id, keyword, language]
       });
-      savedCount++;
+
     } catch (dbError) {}
   }
   return savedCount;
@@ -222,34 +225,69 @@ async function main() {
     console.log(`\n📋 سحب ${keywords.length} كلمة من فئة [${category}]`);
     
     for (const kw of keywords) {
-      // التحقق من الوقت قبل بدء الكلمة
       if (Date.now() - START_TIME >= MAX_RUNTIME_MS) {
-          console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت (${MAX_RUNTIME_MINUTES} دقيقة). جاري الخروج بأمان...`);
+          console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت. جاري الخروج بأمان...`);
           return; 
       }
 
       console.log(`\n🔍 البحث عن: "${kw}"`);
-      for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
-        // التحقق من الوقت قبل كل صفحة لضمان الخروج الآمن
+      
+      let page = 1;
+      let consecutiveDuplicatePages = 0; // عداد للصفحات التي لا تحتوي على منتجات جديدة
+
+      while (true) {
+        // التحقق من الوقت قبل كل صفحة
         if (Date.now() - START_TIME >= MAX_RUNTIME_MS) {
-           console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت (${MAX_RUNTIME_MINUTES} دقيقة). جاري الخروج بأمان...`);
+           console.log(`\n⏰ وصلنا إلى الحد الأقصى للوقت. جاري الخروج بأمان...`);
            return;
+        }
+
+        // حد الأمان لمنع الحلقة اللانهائية
+        if (page > MAX_SAFETY_PAGES) {
+            console.log(`      🛑 وصلنا لحد الأمان (${MAX_SAFETY_PAGES} صفحة). الانتقال للكلمة التالية.`);
+            break;
         }
 
         try {
           const html = await fetchSearchPage(kw, page);
-          if (html.length < 5000) break; 
+          
+          if (html.length < 5000) {
+              console.log(`      🏁 لا توجد نتائج إضافية. نهاية البحث لهذه الكلمة.`);
+              break; 
+          }
+
           const products = parseItems(html);
-          if (products.length === 0) break;
+          
+          if (products.length === 0) {
+              console.log(`      🏁 لا توجد منتجات في الصفحة ${page}. نهاية البحث.`);
+              break; 
+          }
+
           const saved = await saveToDatabase(products, kw, MARKET.lang, category);
           console.log(`      ✅ صفحة ${page}: استخراج ${products.length} (جديد: ${saved})`);
-          await new Promise(r => setTimeout(r, 3000));
+
+          // إذا لم يتم حفظ أي منتج جديد
+          if (saved === 0) {
+              consecutiveDuplicatePages++;
+              // إذا تكررت النتائج في صفحتين متتاليتين، نتوقف (الموقع بدأ يعيد نفس المنتجات)
+              if (consecutiveDuplicatePages >= 2) {
+                  console.log(`      ⏹️ المنتجات بدأت تتكرر. التوقف عن هذه الكلمة لتوفير الرصيد.`);
+                  break;
+              }
+          } else {
+              consecutiveDuplicatePages = 0; // تصفير العداد لأننا وجدنا منتجات جديدة
+          }
+
+          page++; // الانتقال للصفحة التالية
+          await new Promise(r => setTimeout(r, 3000)); // تأخير بشري
+          
         } catch (error) {
-          console.error(`      ⚠️ خطأ صفحة ${page}:`, error.message);
+          console.error(`      ⚠️ خطأ في صفحة ${page}:`, error.message);
+          break; // نتوقف عن هذه الكلمة إذا حدث خطأ
         }
       }
       
-      // ⚠️ هنا السر: نضع علامة "تمت" فوراً بعد الكلمة، حتى لو توقف السكريبت لا يعيدها
+      // وضع علامة "تمت" فوراً بعد الكلمة
       await markKeywordProcessed(kw);
     }
   }
