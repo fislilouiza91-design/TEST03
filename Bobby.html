@@ -85,7 +85,8 @@ export default {
     const originalTitle = url.searchParams.get("originalTitle") || ""; 
     const page = parseInt(url.searchParams.get("page") || "1");
 
-    if (page > 2) {
+    // 🔥 تم التعديل هنا: الحد الأقصى أصبح 3 صفحات
+    if (page > 3) {
       return new Response(JSON.stringify({ success: true, data: [], hasMore: false }), { 
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
       });
