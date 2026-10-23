@@ -31,7 +31,7 @@ export default {
 
         const modelName = '@cf/baai/bge-m3';
         
-        // 🔥 قائمة كلمات الحشو
+        // 🔥 كلمات الحشو
         const STOP_WORDS = new Set([
           'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping',
           'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece',
@@ -46,22 +46,42 @@ export default {
                 .filter(w => w.length > 2 && !STOP_WORDS.has(w));
         };
 
-        // 🔥 تصنيف محلي قوي (بدون AI - مجاني)
+        // 🔥 كلمات الملحقات والمنتجات الأساسية
+        const accessoryWords = ['case','cover','strap','band','bracelet','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
+        const mainProductWords = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
+
+        // 🔥 تصنيف محلي ذكي (مع التراكيب المركبة)
         const classifyLocally = (title) => {
             const lower = title.toLowerCase().trim();
             
-            // كلمات الملحقات
-            const accessoryWords = ['case','cover','strap','band','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
-            
-            // كلمات المنتجات الأساسية
-            const mainProductWords = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
-            
             // 1. يبدأ بـ "for" أو "compatible" → ملحق
-            if (/^(for|compatible|replacement|suitable|fit for)\s/i.test(lower)) {
+            if (/^(for|compatible|replacement|suitable|fit for|fits)\s/i.test(lower)) {
                 return { type: 'accessory', acc: true };
             }
             
-            // 2. يحتوي على "with" → منتج أساسي
+            // 2. تراكيب ملحق + منتج (watch strap, phone case, camera lens...)
+            const compoundAccessories = [
+                { pattern: /\b(watch|clock)\s+(strap|band|bracelet)\b/i, type: 'strap' },
+                { pattern: /\b(strap|band|bracelet)\s+(for|compatible)\b/i, type: 'strap' },
+                { pattern: /\b(phone|iphone|samsung|android)\s+(case|cover|shell|housing)\b/i, type: 'case' },
+                { pattern: /\b(case|cover|shell)\s+(for|compatible)\b/i, type: 'case' },
+                { pattern: /\b(screen)\s+(protector|film|glass)\b/i, type: 'protector' },
+                { pattern: /\b(charging?|usb|type-c|lightning|data)\s+(cable|cord|line)\b/i, type: 'cable' },
+                { pattern: /\b(wall|usb|fast|wireless|car)\s+charger\b/i, type: 'charger' },
+                { pattern: /\b(camera|lens)\s+(cap|cover|filter|hood)\b/i, type: 'lens_accessory' },
+            ];
+            
+            for (const ca of compoundAccessories) {
+                if (ca.pattern.test(lower)) return { type: ca.type, acc: true };
+            }
+            
+            // 3. كلمات ملحق في أول كلمتين
+            const firstTwo = lower.split(/\s+/).slice(0, 2).join(' ');
+            for (const w of accessoryWords) {
+                if (new RegExp(`\\b${w}\\b`, 'i').test(firstTwo)) return { type: w, acc: true };
+            }
+            
+            // 4. يحتوي على "with" + منتج أساسي → منتج أساسي
             if (/\bwith\b/i.test(lower)) {
                 for (const w of mainProductWords) {
                     if (lower.includes(w)) return { type: w, acc: false };
@@ -69,18 +89,12 @@ export default {
                 return { type: 'main', acc: false };
             }
             
-            // 3. أول 3 كلمات تحتوي على كلمة ملحق → ملحق
-            const firstWords = lower.split(/\s+/).slice(0, 3).join(' ');
-            for (const w of accessoryWords) {
-                if (firstWords.includes(w)) return { type: w, acc: true };
-            }
-            
-            // 4. أي كلمة منتج أساسي → منتج أساسي
+            // 5. منتجات أساسية
             for (const w of mainProductWords) {
                 if (lower.includes(w)) return { type: w, acc: false };
             }
             
-            // 5. كلمة ملحق عامة → ملحق
+            // 6. ملحقات عامة (احتياط)
             for (const w of accessoryWords) {
                 if (lower.includes(w)) return { type: w, acc: true };
             }
@@ -92,12 +106,16 @@ export default {
         const synonyms = {
             'strap': ['band', 'belt', 'bracelet'],
             'band': ['strap', 'belt', 'bracelet'],
+            'bracelet': ['strap', 'band', 'belt'],
             'case': ['cover', 'shell', 'housing'],
-            'cover': ['case', 'shell'],
-            'cable': ['wire', 'cord', 'lead'],
-            'charger': ['adapter', 'power supply'],
+            'cover': ['case', 'shell', 'housing'],
+            'cable': ['wire', 'cord', 'lead', 'line'],
+            'charger': ['adapter', 'power'],
             'holder': ['stand', 'mount', 'bracket'],
-            'protector': ['film', 'glass', 'screen protector'],
+            'protector': ['film', 'glass'],
+            'headphone': ['headset', 'earphone'],
+            'headset': ['headphone', 'earphone'],
+            'earbud': ['earphone', 'headphone'],
         };
 
         const areSynonyms = (t1, t2) => {
@@ -105,30 +123,33 @@ export default {
             if (t1 === t2) return true;
             if (t1.includes(t2) || t2.includes(t1)) return true;
             for (const key in synonyms) {
-                if (t1.includes(key) || synonyms[key].some(s => t1.includes(s))) {
-                    if (t2.includes(key) || synonyms[key].some(s => t2.includes(s))) return true;
-                }
+                const group = [key, ...synonyms[key]];
+                const t1InGroup = group.some(g => t1.includes(g));
+                const t2InGroup = group.some(g => t2.includes(g));
+                if (t1InGroup && t2InGroup) return true;
             }
             return false;
         };
 
-        // 🔥 مقارنة النوع
+        // 🔥 مقارنة النوع - نسخة متساهلة (الحل الرئيسي)
         const isSameType = (itemType, itemAcc, origType, origAcc) => {
-            // يجب أن يكونا من نفس الفئة
+            // 1. مختلف الفئات (ملحق vs منتج) → Similar فقط
             if (itemAcc !== origAcc) return false;
             
-            // إذا كانا ملحقين، يجب أن يكونا نفس النوع (مع المرادفات)
-            if (origAcc) {
+            // 2. كلاهما منتج أساسي → Exact دائماً (نثق بالفرز المحلي)
+            if (!origAcc) {
+                // نتحقق فقط من أن الأنواع متوافقة أو أحدهما فارغ
                 if (!origType || !itemType) return true;
-                return areSynonyms(origType, itemType);
+                // حتى لو اختلفت الأنواع، نعتبرها متطابقة (كلاهما منتج أساسي)
+                return true;
             }
             
-            // منتجات أساسية: يجب أن يكونا نفس النوع
-            if (origType && itemType) {
-                return areSynonyms(origType, itemType);
-            }
+            // 3. كلاهما ملحق → يجب أن يكونا نفس النوع (مع المرادفات)
+            if (!origType || !itemType) return true;
+            if (areSynonyms(origType, itemType)) return true;
             
-            return true;
+            // إذا لم تتطابق، تحقق من التداخل النصي
+            return origType.includes(itemType) || itemType.includes(origType);
         };
 
         // ==========================================
@@ -138,12 +159,11 @@ export default {
         const originalTokens = new Set(originalTokensList);
         const originalTokenCount = Math.max(originalTokensList.length, 1);
         
-        // تصنيف العنوان الأصلي
         const originalClass = classifyLocally(originalTitle);
         const originalType = originalClass.type;
         const originalIsAccessory = originalClass.acc;
 
-        console.log(`Original: type="${originalType}", acc=${originalIsAccessory}`);
+        console.log(`Original: "${originalTitle}" → type="${originalType}", acc=${originalIsAccessory}`);
 
         // ==========================================
         // المرحلة 1: فرز محلي لاختيار أفضل 5 مرشحين
@@ -165,7 +185,7 @@ export default {
         const remainingItems = preScoredItems.slice(5);
 
         // ==========================================
-        // المرحلة 2: تصنيف أفضل 5 منتجات (محلياً + AI)
+        // المرحلة 2: تصنيف أفضل 5 منتجات
         // ==========================================
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
@@ -176,7 +196,6 @@ export default {
         let scoredAIItems = aiItems.map((it, index) => {
             const aiScore = cosineSimilarity(baseVector, aiEmbeddings.data[index]);
             
-            // تصنيف محلي
             const itemClass = classifyLocally(it.title);
             const sameType = isSameType(itemClass.type, itemClass.acc, originalType, originalIsAccessory);
             
@@ -184,6 +203,8 @@ export default {
             
             let finalScore = aiScore * 100;
             if (isExact) finalScore += 50;
+            
+            console.log(`  AI item "${it.title.substring(0,40)}..." → type="${itemClass.type}", acc=${itemClass.acc}, exact=${isExact}`);
             
             return { ...it, finalScore, isExact };
         });
@@ -193,7 +214,6 @@ export default {
         // ==========================================
         // المرحلة 3: تصنيف باقي المنتجات
         // ==========================================
-        // مراجع Exact و Similar من أفضل 5
         const exactRefs = scoredAIItems.filter(i => i.isExact).slice(0, 3);
         const similarRefs = scoredAIItems.filter(i => !i.isExact).slice(0, 3);
         
@@ -219,47 +239,26 @@ export default {
                 return { ...it, finalScore: 0, isExact: false };
             }
             
-            // 🔥 تصنيف محلي
             const itemClass = classifyLocally(it.title);
             const sameType = isSameType(itemClass.type, itemClass.acc, originalType, originalIsAccessory);
             
-            // 🔥 إذا كان النوع مختلفاً تماماً → Similar مباشرة
+            // إذا كان النوع مختلفاً تماماً (ملحق ≠ منتج) → Similar مباشرة
             if (!sameType) {
                 const simToExact = avgSimilarity(itemTokens, exactRefTokens);
                 return { ...it, finalScore: Math.min(simToExact * 100, 50), isExact: false };
             }
             
-            // حساب التشابهات
+            // نفس النوع → Exact (نثق بالتصنيف المحلي)
             const simToExact = avgSimilarity(itemTokens, exactRefTokens);
-            const simToSimilar = avgSimilarity(itemTokens, similarRefTokens);
             
             const origIntersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
             const origUnion = new Set([...itemTokens, ...originalTokens]).size;
             const origJaccard = origUnion > 0 ? origIntersection / origUnion : 0;
             const keyTermsRatio = origIntersection / originalTokenCount;
             
-            // 🔥 العتبات المطلقة
-            let isExact = false;
-            
-            if (origJaccard >= 0.10 || keyTermsRatio >= 0.25 || simToExact >= 0.10) {
-                // تشابه قوي → Exact
-                isExact = true;
-            } else if (origJaccard >= 0.04 || keyTermsRatio >= 0.10 || simToExact >= 0.05) {
-                // تشابه متوسط → Exact (متساهل)
-                isExact = true;
-            } else {
-                // تشابه ضعيف جداً → Similar
-                isExact = false;
-            }
-            
-            // إذا كان هناك مراجع Similar والمنتج أقرب لها بكثير → Similar
-            if (similarRefTokens.length > 0 && simToSimilar > simToExact * 1.5) {
-                isExact = false;
-            }
-            
             const finalScore = Math.min((simToExact * 0.5 + origJaccard * 0.2 + keyTermsRatio * 0.3) * 150, 85);
             
-            return { ...it, finalScore, isExact };
+            return { ...it, finalScore, isExact: true };
         });
 
         scoredRemaining.sort((a, b) => b.finalScore - a.finalScore);
@@ -269,10 +268,9 @@ export default {
         // ==========================================
         const finalItems = [...scoredAIItems, ...scoredRemaining];
 
-        // 🔥 إحصاءات (تظهر في Cloudflare logs)
         const exactCount = finalItems.filter(i => i.isExact).length;
         const similarCount = finalItems.length - exactCount;
-        console.log(`Total: ${finalItems.length}, Exact: ${exactCount}, Similar: ${similarCount}`);
+        console.log(`✅ Total: ${finalItems.length} | Exact: ${exactCount} | Similar: ${similarCount}`);
 
         return new Response(JSON.stringify({ success: true, data: finalItems }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
