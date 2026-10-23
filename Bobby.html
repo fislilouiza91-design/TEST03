@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Content Script (Dynamic Pagination)
+   Smart Shopper - Content Script (Fetch All, Then Sort)
    ============================================ */
    (function () {
     'use strict';
@@ -154,9 +154,10 @@
   
       document.getElementById('ss-list').addEventListener('scroll', (e) => {
           const list = e.target;
+          // التمرير لن يفعل شيئاً الآن لأننا نجلب كل شيء تلقائياً
           if (list.scrollTop + list.clientHeight >= list.scrollHeight - 100) {
-              if (hasMoreResults && !isBackgroundFetching && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
-                  prefetchBackgroundPages(); 
+              if (hasMoreResults && !isBackgroundFetching && nextPageToFetch <= MAX_PAGES_TO_FETCH && !searchState.running) {
+                  // disabled for now, handled by fetchAllPagesThenSort
               }
           }
       }, { passive: true });
@@ -340,13 +341,10 @@
       return '';
     }
 
-    function prefetchBackgroundPages() {
-      if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) return;
-      
-      if (nextPageToFetch === 4 && allFetchedItems.length <= 220) {
-          hasMoreResults = false;
-          updateFooter();
-          syncFullscreen();
+    // 🔥 دالة جلب كل الصفحات ثم الفرز
+    function fetchAllPagesThenSort() {
+      if (nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults || allFetchedItems.length <= 40) {
+          triggerAISort();
           return;
       }
       
@@ -357,56 +355,56 @@
           type: 'SMART_LOAD_MORE', title: currentSearchTitle, startPage: nextPageToFetch, 
           existingIds: existingIds, productId: currentProductId, cookie: getAliExpressCookie()
       }, (resp) => {
-          if (resp && resp.ok) {
-              let newItems = [];
-              if (resp.items) {
-                  newItems = resp.items.filter(i => !existingIds.includes(i.id));
-                  allFetchedItems = allFetchedItems.concat(newItems);
-              }
+          if (resp && resp.ok && resp.items && resp.items.length > 0) {
+              let newItems = resp.items.filter(i => !existingIds.includes(i.id));
+              allFetchedItems = allFetchedItems.concat(newItems);
               nextPageToFetch++;
               
-              renderList(true); updateProgress(); syncFullscreen();
-  
-              if (!resp.hasMore || nextPageToFetch > MAX_PAGES_TO_FETCH || resp.items.length === 0) {
-                  hasMoreResults = false; 
-              }
+              if (!resp.hasMore) hasMoreResults = false;
               
-              if (allFetchedItems.length > 0) {
-                  const ogImage = document.querySelector('meta[property="og:image"]');
-                  const originalImage = ogImage ? ogImage.content : '';
-                  
-                  chrome.runtime.sendMessage({
-                      type: 'SORT_ITEMS',
-                      title: currentSearchTitle,
-                      originalImage: originalImage,
-                      items: allFetchedItems
-                  }, sortResp => {
-                      isBackgroundFetching = false;
-                      if (sortResp && sortResp.ok && sortResp.items) {
-                          allFetchedItems = sortResp.items;
-                          renderList(true); syncFullscreen();
-                      }
-                      updateFooter();
-                      
-                      if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
-                          setTimeout(prefetchBackgroundPages, 2000); 
-                      }
-                  });
-              } else {
-                  isBackgroundFetching = false;
-                  updateFooter(); syncFullscreen();
-                  if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
-                      setTimeout(prefetchBackgroundPages, 2000); 
-                  }
-              }
+              renderList(true); syncFullscreen(); // عرض النتائج الجديدة فوراً
+              fetchAllPagesThenSort(); // جلب الصفحة التالية تلقائياً
           } else { 
-              isBackgroundFetching = false;
               hasMoreResults = false; 
-              updateFooter(); syncFullscreen();
+              triggerAISort(); // انتهى الجلب، ابدأ الفرز
           }
       });
     }
+
+    // 🔥 دالة بدء الفرز بالذكاء الاصطناعي
+    function triggerAISort() {
+      isBackgroundFetching = false;
+      if (allFetchedItems.length === 0) { 
+          searchState.running = false;
+          searchState.complete = true;
+          updateProgress(); updateFooter(); 
+          return; 
+      }
+      
+      updateProgress(); // يظهر "Loading..." في شريط التقدم
+      updateFooter();
+      
+      const ogImage = document.querySelector('meta[property="og:image"]');
+      const originalImage = ogImage ? ogImage.content : '';
   
+      chrome.runtime.sendMessage({
+          type: 'SORT_ITEMS',
+          title: currentSearchTitle,
+          originalImage: originalImage,
+          items: allFetchedItems
+      }, sortResp => {
+          searchState.running = false;
+          searchState.complete = true;
+          
+          if (sortResp && sortResp.ok && sortResp.items) {
+              allFetchedItems = sortResp.items;
+              renderList(true); updateProgress(); syncFullscreen();
+          }
+          updateFooter();
+      });
+    }
+  
+    // 🔥 دالة runSearch المعدلة
     function runSearch(title, productPrice, productId) {
       currentSearchTitle = title; currentProductPrice = productPrice || 0;
       allFetchedItems = []; cachedSortedItems = []; nextPageToFetch = 2;
@@ -430,39 +428,21 @@
         hasMoreResults = resp.hasMore !== false;
         searchState.totalItems = allFetchedItems.length;
   
-        renderList(true); updateProgress(); updateFooter(); syncFullscreen();
-        if (allFetchedItems.length === 0) { searchState.running = false; message(T('noResults')); return; }
+        // عرض الصفحة الأولى
+        renderList(true); updateFooter(); syncFullscreen();
         
-        if (allFetchedItems.length > 0) {
-            isBackgroundFetching = true;
-            updateFooter(); syncFullscreen();
-            
-            chrome.runtime.sendMessage({
-                type: 'SORT_ITEMS',
-                title: currentSearchTitle,
-                originalImage: originalImage, // 🔥 إرسال الصورة الأصلية
-                items: allFetchedItems
-            }, sortResp => {
-                isBackgroundFetching = false;
-                searchState.running = false;
-                searchState.complete = true;
-                if (sortResp && sortResp.ok && sortResp.items) {
-                    allFetchedItems = sortResp.items;
-                    renderList(true); updateProgress(); syncFullscreen();
-                }
-                updateFooter();
-            });
-        } else {
-            searchState.running = false;
-            searchState.complete = true;
+        if (allFetchedItems.length === 0) { 
+            searchState.running = false; 
+            message(T('noResults')); 
+            return; 
         }
         
+        // بدء جلب باقي الصفحات
         if (allFetchedItems.length <= 40) {
             hasMoreResults = false;
-        } else if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
-            setTimeout(prefetchBackgroundPages, 1000);
+            triggerAISort(); // إذا كانت المنتجات قليلة، ابدأ الفرز مباشرة
         } else {
-            hasMoreResults = false;
+            fetchAllPagesThenSort(); // ابدأ جلب الصفحات
         }
       });
     }
