@@ -33,15 +33,33 @@ export default {
         const modelName = '@cf/baai/bge-m3';
         const cleanOriginalTitle = originalTitle.toLowerCase();
         
-        // 🔥 دالة تجزئة النص
+        // 🔥 قائمة كلمات الحشو (لتحسين دقة التطابق)
+        const STOP_WORDS = new Set([
+          'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping', 
+          'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece', 
+          'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible', 
+          'fits', 'fit', 'suitable', 'accessories', 'accessory', 'universal', 
+          'dual', 'purpose', 'large', 'screen', 'plug', 'creative', 'dedicated', 
+          'student', 'portable', 'multifunctional', 'design', 'style', 'luxury', 
+          'fast', 'quick', 'smart', 'waterproof', 'shockproof', 'gift', 'fashion', 
+          'good', 'perfect', '2023', '2024', '2025', 'sans', 'fil', 'sur', 'pour', 
+          'avec', 'les', 'des', 'une', 'dans', 'par', 'double', 'door', 'enclosed', 
+          'angle', 'flip', 'cover', 'removable', 'easy', 'clean', 'filter',
+          'with', 'from', 'that', 'this', 'have', 'will', 'your', 'their'
+        ]);
+        
+        // 🔥 دالة تجزئة النص مع إزالة كلمات الحشو
         const tokenize = (text) => {
             return text.toLowerCase()
                 .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
                 .split(/\s+/)
-                .filter(w => w.length > 2);
+                .filter(w => w.length > 2 && !STOP_WORDS.has(w));
         };
 
-        const originalTokens = new Set(tokenize(originalTitle));
+        // الكلمات المهمة من العنوان الأصلي
+        const originalTokensList = tokenize(originalTitle);
+        const originalTokens = new Set(originalTokensList);
+        const originalTokenCount = Math.max(originalTokensList.length, 1);
 
         // ==========================================
         // المرحلة 1: فرز محلي سريع لاختيار أفضل 5 مرشحين
@@ -54,17 +72,21 @@ export default {
             const union = new Set([...itemTokens, ...originalTokens]).size;
             const jaccard = union > 0 ? intersection / union : 0;
             
-            return { ...it, preScore: jaccard };
+            // 🔥 نسبة تطابق الكلمات المهمة
+            const keyTermsRatio = intersection / originalTokenCount;
+            
+            // نأخذ أعلى قيمة من الاثنين
+            return { ...it, preScore: Math.max(jaccard, keyTermsRatio * 0.8) };
         });
 
         preScoredItems.sort((a, b) => b.preScore - a.preScore);
 
-        // 🔥 تغيير: أفضل 5 منتجات فقط للذكاء الاصطناعي
+        // أفضل 5 منتجات للذكاء الاصطناعي
         const aiItems = preScoredItems.slice(0, 5);
         const remainingItems = preScoredItems.slice(5);
 
         // ==========================================
-        // المرحلة 2: الذكاء الاصطناعي لأفضل 5 منتجات فقط
+        // المرحلة 2: الذكاء الاصطناعي لأفضل 5 منتجات
         // ==========================================
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
@@ -81,7 +103,9 @@ export default {
                 (!/cable|charger|كابل|شاحن/i.test(cleanOriginalTitle) && /cable|charger|كابل|شاحن/i.test(itemTitleLower)) ||
                 /protector|sticker|skin|sleeve|stand|holder|حماية|ملصق/i.test(itemTitleLower);
 
-            const isExact = !isAccessory && aiScore >= 0.55;
+            // 🔥 تم تخفيض العتبة من 0.55 إلى 0.40
+            const isExact = !isAccessory && aiScore >= 0.40;
+            
             let finalScore = aiScore * 100;
             if (isExact) finalScore += 50;
             
@@ -94,9 +118,7 @@ export default {
         // ==========================================
         // المرحلة 3: ترتيب محلي للباقي بناءً على أفضل 5
         // ==========================================
-        
-        // نستخدم كل الـ 5 كمراجع (بدلاً من 5 من أصل 10)
-        const referenceItems = scoredAIItems; // كل الـ 5
+        const referenceItems = scoredAIItems;
         const totalRefScore = referenceItems.reduce((sum, r) => sum + Math.max(r.finalScore, 1), 0) || 1;
         
         const referenceData = referenceItems.map(ref => ({
@@ -104,9 +126,10 @@ export default {
             weight: Math.max(ref.finalScore, 1) / totalRefScore
         }));
 
-        // تقييم كل منتج متبقي
+        // تقييم المنتجات المتبقية
         const scoredRemaining = remainingItems.map(it => {
-            const itemTokens = new Set(tokenize(it.title));
+            const itemTokensList = tokenize(it.title);
+            const itemTokens = new Set(itemTokensList);
             
             if (itemTokens.size === 0) {
                 return { ...it, finalScore: 0, isExact: false };
@@ -125,15 +148,27 @@ export default {
             const origIntersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
             const origUnion = new Set([...itemTokens, ...originalTokens]).size;
             const origJaccard = origUnion > 0 ? origIntersection / origUnion : 0;
+            
+            // 🔥 ج) نسبة تطابق الكلمات المهمة
+            const keyTermsRatio = origIntersection / originalTokenCount;
 
-            // ج) الدمج: 70% مراجع + 30% عنوان أصلي (لأن المراجع أصبحت أكثر أهمية)
-            const combinedScore = (weightedSimilarity * 0.7 + origJaccard * 0.3) * 150;
+            // د) الدمج
+            const combinedScore = (weightedSimilarity * 0.5 + origJaccard * 0.2 + keyTermsRatio * 0.3) * 150;
             
             // سقف 85 لضمان بقاء منتجات AI دائماً في القمة
             const finalScore = Math.min(combinedScore, 85);
             
-            // معيار المطابقة المحلية (متساهل)
-            const isExact = weightedSimilarity >= 0.25 || origJaccard >= 0.35;
+            // 🔥 معايير متساهلة للمطابقة (أي شرط يكفي)
+            const isAccessory = /case|coque|housse|غطاء|حافظة|protector|sticker|skin|sleeve|stand|holder|حماية|ملصق|cable|charger|كابل|شاحن|bag|pouch|mount|clip|bracket|adapter/i.test(it.title.toLowerCase());
+            const originalIsAccessory = /case|coque|housse|غطاء|حافظة|protector|sticker|skin|sleeve|stand|holder|حماية|ملصق|cable|charger|كابل|شاحن|bag|pouch|mount|clip|bracket|adapter/i.test(cleanOriginalTitle);
+            
+            const isActualAccessory = isAccessory && !originalIsAccessory;
+            
+            const isExact = !isActualAccessory && (
+                keyTermsRatio >= 0.35 ||       // 35% من الكلمات المهمة موجودة
+                origJaccard >= 0.15 ||         // تشابه Jaccard معقول جداً
+                weightedSimilarity >= 0.12     // تشابه مع المراجع
+            );
 
             return { ...it, finalScore, isExact };
         });
