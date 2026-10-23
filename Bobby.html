@@ -1,540 +1,99 @@
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
-      });
-    }
+/* ============================================
+   Smart Shopper - Background Service Worker
+   ============================================ */
 
-    const url = new URL(request.url);
-
-    if (request.method === "POST" && url.pathname === "/sort") {
-      try {
-        const body = await request.json();
-        const { originalTitle, items } = body;
-        
-        if (!originalTitle || !items || !Array.isArray(items)) {
-          return new Response(JSON.stringify({ success: false, message: "Invalid data" }), { 
-            status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-          });
-        }
-
-        if (!env.AI || items.length === 0) {
-           return new Response(JSON.stringify({ success: true, data: items }), { 
-             headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-           });
-        }
-
-        const modelName = '@cf/baai/bge-m3';
-        
-        console.log(`\n=== NEW REQUEST ===`);
-        console.log(`Original: "${originalTitle}"`);
-        console.log(`Items: ${items.length}`);
-
-        // ==========================================
-        // 🔥 أدوات مساعدة
-        // ==========================================
-        const STOP_WORDS = new Set([
-          'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping',
-          'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece',
-          'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible',
-          'fits', 'fit', 'suitable', 'accessories', 'accessory', 'universal',
-          'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
-        ]);
-        
-        const tokenize = (text) => {
-            return text.toLowerCase()
-                .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
-                .split(/\s+/)
-                .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-        };
-        
-        const jaccard = (t1, t2) => {
-            const s1 = new Set(tokenize(t1));
-            const s2 = new Set(tokenize(t2));
-            if (s1.size === 0 || s2.size === 0) return 0;
-            const inter = [...s1].filter(w => s2.has(w)).length;
-            const union = new Set([...s1, ...s2]).size;
-            return union > 0 ? inter / union : 0;
-        };
-
-        // ==========================================
-        // 🔥 المرحلة 1: التقاط 3 الأكثر تطابقاً نصياً + 3 عشوائية
-        // ==========================================
-        const preScored = items.map(it => ({
-            ...it,
-            textSim: jaccard(originalTitle, it.title)
-        }));
-        preScored.sort((a, b) => b.textSim - a.textSim);
-
-        const top3 = preScored.slice(0, Math.min(3, preScored.length));
-        const others = preScored.slice(3);
-
-        const random3 = [];
-        const othersCopy = [...others];
-        for (let i = 0; i < 3 && othersCopy.length > 0; i++) {
-            const idx = Math.floor(Math.random() * othersCopy.length);
-            random3.push(othersCopy.splice(idx, 1)[0]);
-        }
-
-        console.log(`\n📌 Top 3: ${top3.map(x => `${x.title.substring(0,30)}(sim:${x.textSim.toFixed(2)})`).join(', ')}`);
-        console.log(`🎲 Random 3: ${random3.map(x => `${x.title.substring(0,30)}(sim:${x.textSim.toFixed(2)})`).join(', ')}`);
-
-        // ==========================================
-        // 🔥 المرحلة 2: AI يصنّف 7 عناوين
-        // ==========================================
-        const refTitles = [originalTitle, ...top3.map(x => x.title), ...random3.map(x => x.title)];
-        const refClasses = await classifyBatch(refTitles, env);
-        
-        const originalClass = refClasses[0];
-        const top3Classes = refClasses.slice(1, 1 + top3.length);
-        const random3Classes = refClasses.slice(1 + top3.length);
-        
-        console.log(`\n🧠 Original: ${JSON.stringify(originalClass)}`);
-
-        // 🔥 التحقق من نجاح التصنيف
-        const classificationWorked = refClasses.filter(c => c.type && c.type.length > 0).length >= 4;
-        console.log(`Classification quality: ${classificationWorked ? '✅ GOOD' : '⚠️ POOR'} (${refClasses.filter(c => c.type).length}/7 valid)`);
-
-        // ==========================================
-        // 🔥 المرحلة 3: بناء المراجع (Anchors)
-        // ==========================================
-        const exactAnchors = [];
-        const similarAnchors = [];
-        
-        top3.forEach((item, i) => {
-            const cls = top3Classes[i];
-            const isExact = isSameTypeAI(cls, originalClass, item.textSim, classificationWorked);
-            item.isExact = isExact;
-            item.finalScore = 1000 - i * 10;
-            if (isExact) {
-                exactAnchors.push(item);
+   const WORKER_URL = 'https://extension.smailsuit11.workers.dev/'; 
+   const MAX_PAGES_TO_FETCH = 3; 
+   
+   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+     if (!msg) return;
+   
+     if (msg.type === 'CHECK_CACHE') {
+       sendResponse({ ok: false });
+       return true;
+     }
+   
+     if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
+       // 🔥 استخدام customQuery إذا وُجد (من content.js)
+       const searchQuery = msg.customQuery || buildSmartSearchQuery(msg.title);
+       const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
+       
+       if (page > MAX_PAGES_TO_FETCH) {
+           return sendResponse({ ok: true, items: [], hasMore: false });
+       }
+   
+       console.log(`🎯 [${msg.type}] Query: [${searchQuery}] | Page: ${page}`);
+   
+       const q = encodeURIComponent(searchQuery);
+       
+       fetch(`${WORKER_URL}?q=${q}&page=${page}`)
+         .then(res => res.json())
+         .then(data => {
+            if (data.success && data.data) {
+               const items = data.data.map(item => ({
+                  id: item.id,
+                  title: item.title,
+                  img: item.img,
+                  price: item.price, 
+                  rating: item.rating,
+                  sold: item.soldStr,
+                  link: item.url,
+                  isExact: true,    
+                  finalScore: 100
+               }));
+   
+               let hasMore = items.length >= 15;
+               if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
+               
+               sendResponse({ ok: true, items: items, hasMore: hasMore });
             } else {
-                similarAnchors.push(item);
+               sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
             }
-            console.log(`  ${isExact ? '✅' : '❌'} Top "${item.title.substring(0, 40)}" → ${JSON.stringify(cls)} → ${isExact ? 'EXACT' : 'SIMILAR'}`);
-        });
-        
-        random3.forEach((item) => {
-            const cls = random3Classes[random3.indexOf(item)];
-            const isExact = isSameTypeAI(cls, originalClass, item.textSim, classificationWorked);
-            item.isExact = isExact;
-            item.finalScore = 500;
-            if (isExact) {
-                exactAnchors.push(item);
-            } else {
-                similarAnchors.push(item);
-            }
-            console.log(`  ${isExact ? '✅' : '❌'} Rnd "${item.title.substring(0, 40)}" → ${JSON.stringify(cls)} → ${isExact ? 'EXACT' : 'SIMILAR'}`);
-        });
+         }).catch(err => {
+            sendResponse({ ok: false, error: err.message, hasMore: false });
+         });
+         
+       return true;
+     }
 
-        console.log(`\n🎯 Anchors: ${exactAnchors.length} exact, ${similarAnchors.length} similar`);
-
-        // ==========================================
-        // 🔥 المرحلة 4: تصنيف الباقي
-        // ==========================================
-        const random3Ids = new Set(random3.map(x => x.id));
-        const toClassify = others.filter(x => !random3Ids.has(x.id));
-        
-        // توليد Embeddings للمراجع + المتبقية
-        const allTitlesToEmbed = [
-            ...exactAnchors.map(x => x.title),
-            ...similarAnchors.map(x => x.title),
-            ...toClassify.map(x => x.title)
-        ];
-        
-        let allEmbeddings = [];
-        for (let i = 0; i < allTitlesToEmbed.length; i += 50) {
-            const chunk = allTitlesToEmbed.slice(i, i + 50);
-            const emb = await env.AI.run(modelName, { text: chunk });
-            allEmbeddings = allEmbeddings.concat(emb.data);
-        }
-        
-        const exactVectors = allEmbeddings.slice(0, exactAnchors.length);
-        const similarVectors = allEmbeddings.slice(exactAnchors.length, exactAnchors.length + similarAnchors.length);
-        const toClassifyVectors = allEmbeddings.slice(exactAnchors.length + similarAnchors.length);
-        
-        const avgCos = (vec, vectors) => {
-            if (vectors.length === 0) return 0;
-            let sum = 0;
-            for (const v of vectors) sum += cosineSimilarity(vec, v);
-            return sum / vectors.length;
-        };
-        
-        // حساب متوسط التشابه النصي مع المراجع
-        const avgTextSimTo = (title, anchors) => {
-            if (anchors.length === 0) return 0;
-            let sum = 0;
-            for (const a of anchors) sum += jaccard(title, a.title);
-            return sum / anchors.length;
-        };
-
-        // 🔥 تصنيف كل منتج بـ 3 إشارات
-        toClassify.forEach((item, i) => {
-            const vec = toClassifyVectors[i];
-            
-            // الإشارة 1: التشابه مع المراجع (Cos)
-            const simToExact = avgCos(vec, exactVectors);
-            const simToSimilar = avgCos(vec, similarVectors);
-            
-            // الإشارة 2: التشابه النصي مع المراجع (Jaccard)
-            const textToExact = avgTextSimTo(item.title, exactAnchors);
-            const textToSimilar = avgTextSimTo(item.title, similarAnchors);
-            
-            // الإشارة 3: التشابه مع العنوان الأصلي
-            const textToOriginal = item.textSim;
-            
-            // 🔥 القرار المُرجّح
-            let score = 0;
-            
-            // إشارة 1: Cos مع المراجع (وزن 3)
-            if (exactAnchors.length > 0 && similarAnchors.length > 0) {
-                if (simToExact > simToSimilar * 1.05) score += 3;
-                else if (simToSimilar > simToExact * 1.05) score -= 3;
-            } else if (exactAnchors.length > 0) {
-                if (simToExact > 0.75) score += 2;
-                else if (simToExact < 0.5) score -= 2;
-            }
-            
-            // إشارة 2: النص مع المراجع (وزن 2)
-            if (exactAnchors.length > 0 && similarAnchors.length > 0) {
-                if (textToExact > textToSimilar * 1.2) score += 2;
-                else if (textToSimilar > textToExact * 1.2) score -= 2;
-            } else if (exactAnchors.length > 0) {
-                if (textToExact > 0.2) score += 1;
-                else if (textToExact < 0.05) score -= 1;
-            }
-            
-            // إشارة 3: النص مع العنوان الأصلي (وزن 2)
-            if (textToOriginal >= 0.15) score += 2;
-            else if (textToOriginal >= 0.08) score += 1;
-            else if (textToOriginal < 0.03) score -= 2;
-            else if (textToOriginal < 0.06) score -= 1;
-            
-            // 🔥 قرار نهائي: إذا الدرجة موجبة → Exact، وإلا → Similar
-            const isExact = score > 0;
-            
-            item.isExact = isExact;
-            item.finalScore = Math.min((simToExact * 50 + textToOriginal * 50 + (isExact ? 40 : 0)), 100);
-        });
-
-        // ==========================================
-        // 🔥 المرحلة 5: الدمج والترتيب
-        // ==========================================
-        const allItems = [...top3, ...random3, ...toClassify];
-        allItems.sort((a, b) => {
-            if (a.isExact !== b.isExact) return b.isExact ? 1 : -1;
-            return (b.finalScore || 0) - (a.finalScore || 0);
-        });
-
-        const exactCount = allItems.filter(i => i.isExact).length;
-        console.log(`\n✅ FINAL: Total: ${allItems.length} | Exact: ${exactCount} | Similar: ${allItems.length - exactCount}`);
-
-        const finalItems = allItems.map(it => {
-            const { textSim, aiClassified, _type, _acc, ...clean } = it;
-            return clean;
-        });
-
-        return new Response(JSON.stringify({ success: true, data: finalItems }), {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-        });
-
-      } catch (error) {
-        console.error('Sort error:', error);
-        return new Response(JSON.stringify({ success: false, error: error.message }), {
-          status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-        });
-      }
-    }
-
-    // ==========================================
-    // الكود القديم (جلب المنتجات)
-    // ==========================================
-    let keyword = url.searchParams.get("q"); 
-    const originalTitle = url.searchParams.get("originalTitle") || ""; 
-    const page = parseInt(url.searchParams.get("page") || "1");
-
-    if (page > 3) {
-      return new Response(JSON.stringify({ success: true, data: [], hasMore: false }), { 
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-      });
-    }
-
-    try {
-      if (originalTitle && env.AI) {
-          keyword = await extractKeywordsWithAI(originalTitle, env);
-      }
-
-      if (!keyword) {
-        return new Response(JSON.stringify({ success: false, message: "Missing keyword" }), { 
-          status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-        });
-      }
-
-      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
-      
-      const antResponse = await fetch(antUrl);
-      if (!antResponse.ok) throw new Error(`ScrapingAnt Error: ${antResponse.status}`);
-      
-      const html = await antResponse.text();
-
-      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
-          return new Response(JSON.stringify({ success: false, message: "كابتشا أو حظر مؤقت." }), { 
-              headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-          });
-      }
-
-      let products = parseItems(html);
-
-      if (products.length === 0) {
-        return new Response(JSON.stringify({ success: false, message: "لا توجد منتجات." }), { 
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
-        });
-      }
-
-      return new Response(JSON.stringify({ success: true, data: products, aiQuery: keyword }), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
-
-    } catch (error) {
-      return new Response(JSON.stringify({ success: false, error: error.message }), {
-        status: 500, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-      });
-    }
-  }
-};
-
-// ==========================================
-// 🧠 تصنيف دفعة (7 عناوين)
-// ==========================================
-async function classifyBatch(titles, env) {
-    const titlesList = titles.map((t, i) => `${i}: "${t}"`).join('\n');
-    
-    const prompt = `Classify these product titles. Return ONLY a valid JSON array:
-
-${titlesList}
-
-For EACH title return: {"i": <index>, "type": "<product type 1-2 words>", "acc": <true/false>}
-
-RULES:
-acc=true (accessory) for: strap, band, case, cover, cable, charger, protector, film, holder, stand, mount, adapter, bag, sleeve, skin, replacement
-acc=false (main product) for: watch, phone, tablet, headphone, speaker, camera, laptop, mouse, keyboard, TV, monitor, earbud
-
-If title has "with" + main product → acc=false
-If title starts with "for"/"compatible" → acc=true
-
-EXAMPLES:
-"Leather Band for Apple Watch" → {"i":0, "type":"strap", "acc":true}
-"Smart Watch Series 8" → {"i":1, "type":"watch", "acc":false}
-"Phone Case iPhone 15" → {"i":2, "type":"case", "acc":true}
-"iPhone 15 Pro" → {"i":3, "type":"phone", "acc":false}
-
-Return ONLY JSON array, no markdown, no explanation.`;
-
-    try {
-        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-            messages: [
-                { role: 'system', content: 'Output ONLY valid JSON arrays. No markdown, no explanations.' },
-                { role: 'user', content: prompt }
-            ],
-            max_tokens: 400
-        });
-        
-        if (response && response.response) {
-            let clean = response.response.trim();
-            clean = clean.replace(/```json/g, '').replace(/```/g, '').trim();
-            const start = clean.indexOf('[');
-            const end = clean.lastIndexOf(']');
-            if (start >= 0 && end > start) {
-                clean = clean.slice(start, end + 1);
-            }
-            const parsed = JSON.parse(clean);
-            
-            if (Array.isArray(parsed)) {
-                const resultMap = new Map();
-                for (const item of parsed) {
-                    if (typeof item.i === 'number') {
-                        resultMap.set(item.i, {
-                            type: String(item.type || '').toLowerCase().trim(),
-                            acc: item.acc === true
-                        });
-                    }
-                }
-                return titles.map((_, idx) => resultMap.get(idx) || { type: '', acc: false });
-            }
-        }
-    } catch (e) {
-        console.error('Classify batch error:', e.message);
-    }
-    
-    return titles.map(() => ({ type: '', acc: false }));
-}
-
-// ==========================================
-// 🧠 مقارنة التصنيفين (3 إشارات)
-// ==========================================
-function isSameTypeAI(itemClass, origClass, textSim, classificationWorked) {
-    // إذا فشل التصنيف كلياً → نعتمد على التشابه النصي فقط
-    if (!classificationWorked) {
-        return textSim >= 0.10;
-    }
-    
-    if (!itemClass || !origClass) return false;
-    
-    // مختلف الفئات → مختلف
-    if (itemClass.acc !== origClass.acc) return false;
-    
-    // لا يوجد نوع في أحدهما → نعتمد على التشابه النصي
-    if (!origClass.type || !itemClass.type) {
-        return textSim >= 0.10;
-    }
-    
-    // تطابق مباشر أو مرادفات
-    return areSynonyms(itemClass.type, origClass.type);
-}
-
-function areSynonyms(t1, t2) {
-    if (!t1 || !t2) return false;
-    if (t1 === t2) return true;
-    if (t1.includes(t2) || t2.includes(t1)) return true;
-    
-    const synonyms = {
-        'strap': ['band', 'bracelet', 'belt'],
-        'band': ['strap', 'bracelet', 'belt'],
-        'bracelet': ['strap', 'band', 'belt'],
-        'case': ['cover', 'shell', 'housing'],
-        'cover': ['case', 'shell', 'housing'],
-        'cable': ['wire', 'cord', 'line'],
-        'charger': ['adapter', 'power'],
-        'headphone': ['headset', 'earphone', 'earbud'],
-        'headset': ['headphone', 'earphone', 'earbud'],
-        'earbud': ['headphone', 'headset', 'earphone'],
-        'phone': ['smartphone', 'cellphone', 'cell'],
-        'watch': ['smartwatch', 'wristwatch'],
-        'smartwatch': ['watch', 'wristwatch'],
-        'protector': ['film', 'glass'],
-    };
-    
-    for (const key in synonyms) {
-        const group = [key, ...synonyms[key]];
-        const t1InGroup = group.some(g => t1.includes(g));
-        const t2InGroup = group.some(g => t2.includes(g));
-        if (t1InGroup && t2InGroup) return true;
-    }
-    return false;
-}
-
-function cosineSimilarity(vecA, vecB) {
-    let dotProduct = 0, normA = 0, normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        dotProduct += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
-    }
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-// ==========================================
-// دوال مساعدة (لم تتغير)
-// ==========================================
-async function extractKeywordsWithAI(title, env) {
-    try {
-        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-            messages: [
-                { role: 'system', content: 'You are an e-commerce search expert. Extract the main product type, brand, and model from the title. Output ONLY 3 to 4 English keywords separated by spaces. Do NOT include colors, sizes, numbers, or promotional words like "free shipping". Do NOT write sentences.' },
-                { role: 'user', content: title }
-            ],
-            max_tokens: 20
-        });
-        
-        if (response && response.response) {
-            let cleanQuery = response.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
-            return cleanQuery.split(/\s+/).slice(0, 4).join(' '); 
-        }
-        return '';
-    } catch (e) {
-        return ''; 
-    }
-}
-
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
-    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
-    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
-    return '';
-  }
-  return String(v);
-}
-
-function extractPriceNumber(s) {
-  if (!s) return 0;
-  const str = String(s).replace(/,/g, '');
-  const m = str.match(/(\d+(?:\.\d+)?)/);
-  return m ? parseFloat(m[1]) : 0;
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++; else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  let arr; try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
-
-  const out = [];
-  for (const o of arr) {
-    try {
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-      let img = '';
-      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
-      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
-      if (img && img.startsWith('//')) img = 'https:' + img;
-      
-      const p = o.prices || {}; const sale = p.salePrice || {}; 
-      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const priceNum = extractPriceNumber(priceStr);
-
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-      
-      out.push({ 
-          id: String(id), 
-          title: title || 'Produit', 
-          img: img, 
-          price: priceNum, 
-          rating: parseFloat(rating) || 0, 
-          soldStr: sold,
-          url: `https://www.aliexpress.com/item/${id}.html`
-      });
-    } catch (e) {}
-  }
-  return out;
-}
+     if (msg.type === 'SORT_ITEMS') {
+        fetch(`${WORKER_URL}sort`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ originalTitle: msg.title, items: msg.items })
+        })
+        .then(res => res.json())
+        .then(data => sendResponse({ ok: data.success, items: data.data }))
+        .catch(err => sendResponse({ ok: false, error: err.message }));
+        return true;
+     }
+   });
+   
+   function buildSmartSearchQuery(title) {
+     if (!title) return '';
+     
+     const cleanTitle = title.replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ').replace(/\s+/g, ' ').trim();
+     const rawWords = cleanTitle.split(' ');
+     
+     const stopWords = new Set([
+       'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping', 'original', 'high', 'quality', 'best', 
+       'pcs', 'set', 'pack', 'piece', 'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible', 'fits', 'fit', 
+       'suitable', 'accessories', 'accessory', 'universal', 'dual', 'purpose', 'large', 'screen', 'plug', 'creative', 
+       'dedicated', 'student', 'portable', 'multifunctional', 'design', 'style', 'luxury', 'fast', 'quick', 'smart', 
+       'waterproof', 'shockproof', 'gift', 'fashion', 'good', 'perfect', '2023', '2024', '2025'
+     ]);
+   
+     const usefulWords = rawWords.filter(w => {
+         const lower = w.toLowerCase();
+         const isNumberOrSize = /^\d+$/.test(lower) || /^\d+(mm|cm|inch|in|v|w|mah)$/i.test(lower);
+         return w.length > 1 && !stopWords.has(lower) && !isNumberOrSize;
+     });
+   
+     const finalQuery = usefulWords.slice(0, 4).join(' ');
+     
+     if (!finalQuery) {
+         return rawWords.slice(0, 3).join(' ');
+     }
+   
+     return finalQuery;
+   }
