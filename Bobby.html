@@ -1,99 +1,522 @@
 /* ============================================
-   Smart Shopper - Background Service Worker
+   Smart Shopper - Lean & Fast Worker (0.2 neurons/op)
    ============================================ */
 
-   const WORKER_URL = 'https://extension.smailsuit11.workers.dev/'; 
-   const MAX_PAGES_TO_FETCH = 3; 
-   
-   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-     if (!msg) return;
-   
-     if (msg.type === 'CHECK_CACHE') {
-       sendResponse({ ok: false });
-       return true;
-     }
-   
-     if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
-       // 🔥 استخدام customQuery إذا وُجد (من content.js)
-       const searchQuery = msg.customQuery || buildSmartSearchQuery(msg.title);
-       const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
-       
-       if (page > MAX_PAGES_TO_FETCH) {
-           return sendResponse({ ok: true, items: [], hasMore: false });
-       }
-   
-       console.log(`🎯 [${msg.type}] Query: [${searchQuery}] | Page: ${page}`);
-   
-       const q = encodeURIComponent(searchQuery);
-       
-       fetch(`${WORKER_URL}?q=${q}&page=${page}`)
-         .then(res => res.json())
-         .then(data => {
-            if (data.success && data.data) {
-               const items = data.data.map(item => ({
-                  id: item.id,
-                  title: item.title,
-                  img: item.img,
-                  price: item.price, 
-                  rating: item.rating,
-                  sold: item.soldStr,
-                  link: item.url,
-                  isExact: true,    
-                  finalScore: 100
-               }));
-   
-               let hasMore = items.length >= 15;
-               if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
-               
-               sendResponse({ ok: true, items: items, hasMore: hasMore });
-            } else {
-               sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
-            }
-         }).catch(err => {
-            sendResponse({ ok: false, error: err.message, hasMore: false });
-         });
-         
-       return true;
-     }
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
-     if (msg.type === 'SORT_ITEMS') {
-        fetch(`${WORKER_URL}sort`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ originalTitle: msg.title, items: msg.items })
-        })
-        .then(res => res.json())
-        .then(data => sendResponse({ ok: data.success, items: data.data }))
-        .catch(err => sendResponse({ ok: false, error: err.message }));
-        return true;
-     }
-   });
-   
-   function buildSmartSearchQuery(title) {
-     if (!title) return '';
-     
-     const cleanTitle = title.replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ').replace(/\s+/g, ' ').trim();
-     const rawWords = cleanTitle.split(' ');
-     
-     const stopWords = new Set([
-       'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping', 'original', 'high', 'quality', 'best', 
-       'pcs', 'set', 'pack', 'piece', 'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible', 'fits', 'fit', 
-       'suitable', 'accessories', 'accessory', 'universal', 'dual', 'purpose', 'large', 'screen', 'plug', 'creative', 
-       'dedicated', 'student', 'portable', 'multifunctional', 'design', 'style', 'luxury', 'fast', 'quick', 'smart', 
-       'waterproof', 'shockproof', 'gift', 'fashion', 'good', 'perfect', '2023', '2024', '2025'
-     ]);
-   
-     const usefulWords = rawWords.filter(w => {
-         const lower = w.toLowerCase();
-         const isNumberOrSize = /^\d+$/.test(lower) || /^\d+(mm|cm|inch|in|v|w|mah)$/i.test(lower);
-         return w.length > 1 && !stopWords.has(lower) && !isNumberOrSize;
-     });
-   
-     const finalQuery = usefulWords.slice(0, 4).join(' ');
-     
-     if (!finalQuery) {
-         return rawWords.slice(0, 3).join(' ');
-     }
-   
-     return finalQuery;
-   }
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS });
+    }
+
+    const url = new URL(request.url);
+
+    // ==========================================
+    // 🔥 SORT ENDPOINT - Lean Hybrid (TF-IDF + 10 AI Anchors)
+    // ==========================================
+    if (request.method === "POST" && url.pathname === "/sort") {
+      const startTime = Date.now();
+      
+      try {
+        const body = await request.json();
+        const { originalTitle, items } = body;
+        
+        if (!originalTitle || !items || !Array.isArray(items) || items.length === 0) {
+          return json({ success: true, data: items || [] });
+        }
+
+        console.log(`\n⚡ === LEAN SORT START ===`);
+        console.log(`📝 Original: "${originalTitle}"`);
+        console.log(`📦 Items: ${items.length}`);
+
+        // ============================================
+        // PHASE 1: TF-IDF Vectorization (Local, 0 neurons)
+        // ============================================
+        const STOP_WORDS = new Set([
+          'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
+          'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
+          'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
+          'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
+          'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
+          'sans','fil','sur','pour','avec','les','des','une','dans','par'
+        ]);
+
+        const tokenize = (text) => text.toLowerCase()
+          .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+          .split(/\s+/)
+          .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+        // Build vocabulary & IDF
+        const docTokens = items.map(it => tokenize(it.title));
+        const df = {}; // document frequency
+        const N = items.length;
+
+        docTokens.forEach(tokens => {
+          const unique = new Set(tokens);
+          unique.forEach(t => { df[t] = (df[t] || 0) + 1; });
+        });
+
+        const idf = {};
+        for (const term in df) {
+          idf[term] = Math.log((N + 1) / (df[term] + 1)) + 1;
+        }
+
+        // TF-IDF vectors (sparse)
+        const tfidfVectors = docTokens.map(tokens => {
+          const tf = {};
+          tokens.forEach(t => { tf[t] = (tf[t] || 0) + 1; });
+          const vec = {};
+          for (const term in tf) {
+            if (idf[term]) vec[term] = tf[term] * idf[term];
+          }
+          return vec;
+        });
+
+        const originalTokens = tokenize(originalTitle);
+        const originalTf = {};
+        originalTokens.forEach(t => { originalTf[t] = (originalTf[t] || 0) + 1; });
+        const originalVec = {};
+        for (const term in originalTf) {
+          if (idf[term]) originalVec[term] = originalTf[term] * idf[term];
+        }
+
+        // Cosine similarity between original and each item
+        const cosine = (vecA, vecB) => {
+          let dot = 0, na = 0, nb = 0;
+          for (const t in vecA) { na += vecA[t] * vecA[t]; }
+          for (const t in vecB) { nb += vecB[t] * vecB[t]; }
+          for (const t in vecA) {
+            if (vecB[t]) dot += vecA[t] * vecB[t];
+          }
+          return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+        };
+
+        const jaccard = (a, b) => {
+          const setA = new Set(a);
+          const setB = new Set(b);
+          if (!setA.size || !setB.size) return 0;
+          const inter = [...setA].filter(x => setB.has(x)).length;
+          const union = new Set([...setA, ...setB]).size;
+          return inter / union;
+        };
+
+        // Score each item locally
+        let scored = items.map((it, i) => {
+          const cos = cosine(originalVec, tfidfVectors[i]);
+          const jac = jaccard(originalTokens, docTokens[i]);
+          return { ...it, _cos: cos, _jac: jac, _textSim: cos * 0.6 + jac * 0.4 };
+        });
+
+        scored.sort((a, b) => b._textSim - a._textSim);
+
+        console.log(`📊 TextSim range: ${scored[0]?._textSim.toFixed(3)} → ${scored[scored.length-1]?._textSim.toFixed(3)}`);
+
+        // ============================================
+        // PHASE 2: Select 10 Diverse Anchors (0 neurons)
+        // ============================================
+        const anchors = [];
+        const n = scored.length;
+        const numAnchors = Math.min(10, n);
+        
+        if (numAnchors <= 6) {
+          anchors.push(...scored.slice(0, numAnchors));
+        } else {
+          // 5 top
+          anchors.push(...scored.slice(0, 5));
+          // 2 middle
+          const mid = Math.floor(n / 2);
+          anchors.push(scored[mid]);
+          anchors.push(scored[Math.min(mid + 1, n - 1)]);
+          // 2 bottom
+          anchors.push(scored[n - 2]);
+          anchors.push(scored[n - 1]);
+          // 1 random
+          anchors.push(scored[5 + Math.floor(Math.random() * Math.max(1, n - 10))]);
+        }
+
+        // Deduplicate
+        const anchorIds = new Set();
+        const uniqueAnchors = anchors.filter(a => {
+          if (anchorIds.has(a.id)) return false;
+          anchorIds.add(a.id);
+          return true;
+        });
+
+        const remaining = scored.filter(s => !anchorIds.has(s.id));
+
+        console.log(`🎯 Selected ${uniqueAnchors.length} anchors`);
+
+        // ============================================
+        // PHASE 3: AI Embeddings for 10 Anchors Only (~0.2 neurons)
+        // ============================================
+        let anchorVectors = [];
+        try {
+          const anchorTitles = uniqueAnchors.map(a => a.title);
+          const emb = await env.AI.run('@cf/baai/bge-m3', { text: anchorTitles });
+          anchorVectors = emb.data;
+          console.log(`🧠 Generated ${anchorVectors.length} anchor embeddings`);
+        } catch (e) {
+          console.log(`⚠️ Embedding failed: ${e.message.substring(0, 60)}`);
+          // Fallback: use TF-IDF vectors (already have)
+        }
+
+        // ============================================
+        // PHASE 4: Classify anchors by text similarity (local rules)
+        // ============================================
+        const origClass = classifyTitle(originalTitle);
+        const exactAnchors = [];
+        const similarAnchors = [];
+
+        uniqueAnchors.forEach((anchor, i) => {
+          const cls = classifyTitle(anchor.title);
+          const isExact = isSameType(cls, origClass, anchor._textSim);
+          anchor._isExact = isExact;
+          anchor._score = 1000 - i * 10;
+          anchor._vec = anchorVectors[i] || null;
+          
+          const icon = isExact ? '✅' : '❌';
+          console.log(`  ${icon} "${anchor.title.substring(0, 45)}" → ${isExact ? 'EXACT' : 'SIMILAR'}`);
+          
+          if (isExact) exactAnchors.push(anchor);
+          else similarAnchors.push(anchor);
+        });
+
+        console.log(`📌 Exact: ${exactAnchors.length}, Similar: ${similarAnchors.length}`);
+
+        // ============================================
+        // PHASE 5: Classify remaining (Local TF-IDF + optional AI check)
+        // ============================================
+        // Use anchor centroids (if embeddings available) OR text similarity
+        let exactCentroid = null;
+        let similarCentroid = null;
+
+        if (anchorVectors.length > 0) {
+          if (exactAnchors.length > 0) {
+            exactCentroid = averageVectors(exactAnchors.map(a => a._vec).filter(v => v));
+          }
+          if (similarAnchors.length > 0) {
+            similarCentroid = averageVectors(similarAnchors.map(a => a._vec).filter(v => v));
+          }
+        }
+
+        // Precompute TF-IDF for remaining (already have tfidfVectors)
+        remaining.forEach((item, idx) => {
+          // Find original index
+          const originalIdx = items.findIndex(x => x.id === item.id);
+          const itemVec = tfidfVectors[originalIdx] || {};
+          
+          // Local text similarity (already computed)
+          const textSim = item._textSim;
+          
+          // If we have centroids, use them (requires embeddings for item, which we don't have)
+          // So we rely on textSim + anchor similarity via TF-IDF
+          
+          // Compute avg TF-IDF cosine to exact anchors & similar anchors
+          const avgCosToExact = exactAnchors.length > 0
+            ? exactAnchors.reduce((sum, a) => {
+                const aIdx = items.findIndex(x => x.id === a.id);
+                return sum + cosine(itemVec, tfidfVectors[aIdx] || {});
+              }, 0) / exactAnchors.length
+            : 0;
+          
+          const avgCosToSimilar = similarAnchors.length > 0
+            ? similarAnchors.reduce((sum, a) => {
+                const aIdx = items.findIndex(x => x.id === a.id);
+                return sum + cosine(itemVec, tfidfVectors[aIdx] || {});
+              }, 0) / similarAnchors.length
+            : 0;
+
+          // Decision logic
+          let isExact;
+          
+          if (exactAnchors.length === 0) {
+            // No exact anchors → rely on textSim
+            isExact = textSim >= 0.12;
+          } else if (similarAnchors.length === 0) {
+            // No similar anchors → all similar to exact are exact
+            isExact = avgCosToExact >= 0.15 || textSim >= 0.10;
+          } else {
+            // Compare to both
+            const exactScore = avgCosToExact * 0.5 + textSim * 0.5;
+            const similarScore = avgCosToSimilar * 0.7 + (1 - textSim) * 0.3;
+            isExact = exactScore > similarScore;
+          }
+
+          // Absolute floor
+          if (isExact && textSim < 0.04 && avgCosToExact < 0.10) {
+            isExact = false;
+          }
+
+          item._isExact = isExact;
+          item._score = textSim * 100 + (isExact ? 40 : 0) + avgCosToExact * 20;
+        });
+
+        // ============================================
+        // PHASE 6: Merge and sort
+        // ============================================
+        const all = [...uniqueAnchors, ...remaining];
+        all.sort((a, b) => {
+          if (a._isExact !== b._isExact) return b._isExact ? 1 : -1;
+          return (b._score || 0) - (a._score || 0);
+        });
+
+        const exactCount = all.filter(a => a._isExact).length;
+        const elapsed = Date.now() - startTime;
+        console.log(`✅ === DONE in ${elapsed}ms ===`);
+        console.log(`📊 Total: ${all.length} | Exact: ${exactCount} | Similar: ${all.length - exactCount}`);
+
+        const final = all.map(it => {
+          const { _cos, _jac, _textSim, _isExact, _score, _vec, ...clean } = it;
+          return { ...clean, isExact: _isExact || false, finalScore: _score || 0 };
+        });
+
+        return json({ success: true, data: final });
+
+      } catch (error) {
+        console.error('❌ Sort error:', error.message);
+        return json({ success: false, error: error.message }, 500);
+      }
+    }
+
+    // ==========================================
+    // 🔍 FETCH ENDPOINT (unchanged)
+    // ==========================================
+    let keyword = url.searchParams.get("q");
+    const originalTitle = url.searchParams.get("originalTitle") || "";
+    const page = parseInt(url.searchParams.get("page") || "1");
+
+    if (page > 3) {
+      return json({ success: true, data: [], hasMore: false });
+    }
+
+    try {
+      if (originalTitle && env.AI) {
+        keyword = await extractKeywordsWithAI(originalTitle, env);
+      }
+
+      if (!keyword) {
+        return json({ success: false, message: "Missing keyword" }, 400);
+      }
+
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
+      
+      const antResponse = await fetch(antUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt: ${antResponse.status}`);
+      
+      const html = await antResponse.text();
+
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
+        return json({ success: false, message: "كابتشا أو حظر مؤقت." });
+      }
+
+      const products = parseItems(html);
+      if (products.length === 0) {
+        return json({ success: false, message: "لا توجد منتجات." });
+      }
+
+      return json({ success: true, data: products, aiQuery: keyword });
+
+    } catch (error) {
+      return json({ success: false, error: error.message }, 500);
+    }
+  }
+};
+
+// ============================================
+// 🧠 Helper: Local classification rules
+// ============================================
+function classifyTitle(title) {
+  const lower = title.toLowerCase().trim();
+  
+  const accessories = ['case','cover','strap','band','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
+  const mainProducts = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
+  
+  if (/^(for|compatible|replacement|suitable|fit for|fits)\s/i.test(lower)) {
+    return { type: 'accessory', acc: true };
+  }
+  
+  if (/\bwith\b/i.test(lower)) {
+    for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
+    return { type: 'main', acc: false };
+  }
+  
+  for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
+  for (const w of accessories) if (lower.includes(w)) return { type: w, acc: true };
+  
+  return { type: '', acc: false };
+}
+
+function isSameType(itemClass, origClass, textSim) {
+  if (!itemClass.type || !origClass.type) return textSim >= 0.12;
+  if (itemClass.acc !== origClass.acc) return false;
+  return areSynonyms(itemClass.type, origClass.type);
+}
+
+function areSynonyms(t1, t2) {
+  if (!t1 || !t2) return false;
+  if (t1 === t2 || t1.includes(t2) || t2.includes(t1)) return true;
+  
+  const groups = [
+    ['strap', 'band', 'bracelet', 'belt', 'wristband'],
+    ['case', 'cover', 'shell', 'housing'],
+    ['cable', 'wire', 'cord', 'line'],
+    ['charger', 'adapter', 'power'],
+    ['headphone', 'headset', 'earphone', 'earbud'],
+    ['phone', 'smartphone', 'cellphone', 'cell'],
+    ['watch', 'smartwatch', 'wristwatch'],
+    ['protector', 'film', 'glass', 'tempered'],
+    ['holder', 'stand', 'mount', 'bracket'],
+    ['bag', 'pouch', 'sleeve', 'pocket'],
+  ];
+  
+  for (const g of groups) {
+    const t1In = g.some(x => t1.includes(x));
+    const t2In = g.some(x => t2.includes(x));
+    if (t1In && t2In) return true;
+  }
+  return false;
+}
+
+function averageVectors(vectors) {
+  if (!vectors.length) return null;
+  const dim = vectors[0].length;
+  const avg = new Array(dim).fill(0);
+  for (const v of vectors) {
+    for (let i = 0; i < dim; i++) avg[i] += v[i];
+  }
+  for (let i = 0; i < dim; i++) avg[i] /= vectors.length;
+  return avg;
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// ============================================
+// 🧠 Extract keywords (for search - unchanged)
+// ============================================
+async function extractKeywordsWithAI(title, env) {
+  try {
+    const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+      messages: [
+        { role: 'system', content: 'Extract 3-4 English keywords for e-commerce search. Output ONLY the keywords separated by spaces. No sentences.' },
+        { role: 'user', content: title }
+      ],
+      max_tokens: 20
+    });
+    
+    if (response?.response) {
+      const clean = response.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
+      return clean.split(/\s+/).slice(0, 4).join(' ');
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// ============================================
+// 📦 Parse HTML (unchanged)
+// ============================================
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({
+        id: String(id),
+        title: title || 'Produit',
+        img,
+        price: priceNum,
+        rating: parseFloat(rating) || 0,
+        soldStr: sold,
+        url: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+  }
+  return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const m = String(s).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" }
+  });
+}
