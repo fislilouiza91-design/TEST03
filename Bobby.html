@@ -223,7 +223,7 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
-    // 🔥 دالة applySort المصححة
+    // 🔥 دالة applySort المصححة - المشابهة فقط في "All" و "Similar"
     function applySort() {
       const p = detectProduct();
       const getOriginalProduct = () => {
@@ -241,23 +241,23 @@
           }];
       };
   
+      // Tab 0: All = كل المنتجات (مطابقة + مشابهة) مرتبة حسب درجة AI
       if (activeTab === 0) { 
           cachedSortedItems = [...allFetchedItems];
           if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
           return; 
       }
       
+      // Tab 5: Similar = المنتجات المشابهة فقط
       if (activeTab === 5) {
           cachedSortedItems = allFetchedItems.filter(it => !it.isExact);
           if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
           return;
       }
       
-      // 🔥 الحل: تبويبات 1-4 تعرض الكل (المطابقة أولاً ثم المشابهة)
+      // 🔥 Tab 1-4: التبويبات الأخرى = المنتجات المطابقة فقط
       const exactMatches = allFetchedItems.filter(it => it.isExact);
-      const similarMatches = allFetchedItems.filter(it => !it.isExact);
-      
-      if (exactMatches.length === 0 && similarMatches.length === 0) {
+      if (exactMatches.length === 0) {
           cachedSortedItems = getOriginalProduct();
           return;
       }
@@ -269,12 +269,7 @@
           (a, b) => discNum(b.discount) - discNum(a.discount), 
           (a, b) => soldNum(b.sold) - soldNum(a.sold) 
       ];
-      const sortFn = sorters[activeTab] || sorters[1];
-      
-      cachedSortedItems = [
-          ...exactMatches.sort(sortFn),
-          ...similarMatches.sort(sortFn)
-      ];
+      cachedSortedItems = [...exactMatches].sort(sorters[activeTab] || sorters[1]);
     }
   
     function buildCard(it, i) {
@@ -349,7 +344,6 @@
       return '';
     }
 
-    // 🔥 دالة جلب كل الصفحات ثم الفرز
     function fetchAllPagesThenSort() {
       if (nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults || allFetchedItems.length <= 40) {
           triggerAISort();
@@ -379,7 +373,6 @@
       });
     }
 
-    // 🔥 دالة بدء الفرز بالذكاء الاصطناعي
     function triggerAISort() {
       isBackgroundFetching = false;
       if (allFetchedItems.length === 0) { 
@@ -409,7 +402,6 @@
       });
     }
   
-    // 🔥 دالة runSearch
     function runSearch(title, productPrice, productId) {
       currentSearchTitle = title; currentProductPrice = productPrice || 0;
       allFetchedItems = []; cachedSortedItems = []; nextPageToFetch = 2;
