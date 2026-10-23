@@ -31,7 +31,7 @@ export default {
 
         const modelName = '@cf/baai/bge-m3';
         
-        // 🔥 دالة تجزئة بسيطة
+        // 🔥 قائمة كلمات الحشو
         const STOP_WORDS = new Set([
           'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping',
           'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece',
@@ -46,8 +46,104 @@ export default {
                 .filter(w => w.length > 2 && !STOP_WORDS.has(w));
         };
 
+        // 🔥 تصنيف محلي قوي (بدون AI - مجاني)
+        const classifyLocally = (title) => {
+            const lower = title.toLowerCase().trim();
+            
+            // كلمات الملحقات
+            const accessoryWords = ['case','cover','strap','band','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
+            
+            // كلمات المنتجات الأساسية
+            const mainProductWords = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
+            
+            // 1. يبدأ بـ "for" أو "compatible" → ملحق
+            if (/^(for|compatible|replacement|suitable|fit for)\s/i.test(lower)) {
+                return { type: 'accessory', acc: true };
+            }
+            
+            // 2. يحتوي على "with" → منتج أساسي
+            if (/\bwith\b/i.test(lower)) {
+                for (const w of mainProductWords) {
+                    if (lower.includes(w)) return { type: w, acc: false };
+                }
+                return { type: 'main', acc: false };
+            }
+            
+            // 3. أول 3 كلمات تحتوي على كلمة ملحق → ملحق
+            const firstWords = lower.split(/\s+/).slice(0, 3).join(' ');
+            for (const w of accessoryWords) {
+                if (firstWords.includes(w)) return { type: w, acc: true };
+            }
+            
+            // 4. أي كلمة منتج أساسي → منتج أساسي
+            for (const w of mainProductWords) {
+                if (lower.includes(w)) return { type: w, acc: false };
+            }
+            
+            // 5. كلمة ملحق عامة → ملحق
+            for (const w of accessoryWords) {
+                if (lower.includes(w)) return { type: w, acc: true };
+            }
+            
+            return { type: '', acc: false };
+        };
+
+        // 🔥 مرادفات
+        const synonyms = {
+            'strap': ['band', 'belt', 'bracelet'],
+            'band': ['strap', 'belt', 'bracelet'],
+            'case': ['cover', 'shell', 'housing'],
+            'cover': ['case', 'shell'],
+            'cable': ['wire', 'cord', 'lead'],
+            'charger': ['adapter', 'power supply'],
+            'holder': ['stand', 'mount', 'bracket'],
+            'protector': ['film', 'glass', 'screen protector'],
+        };
+
+        const areSynonyms = (t1, t2) => {
+            if (!t1 || !t2) return false;
+            if (t1 === t2) return true;
+            if (t1.includes(t2) || t2.includes(t1)) return true;
+            for (const key in synonyms) {
+                if (t1.includes(key) || synonyms[key].some(s => t1.includes(s))) {
+                    if (t2.includes(key) || synonyms[key].some(s => t2.includes(s))) return true;
+                }
+            }
+            return false;
+        };
+
+        // 🔥 مقارنة النوع
+        const isSameType = (itemType, itemAcc, origType, origAcc) => {
+            // يجب أن يكونا من نفس الفئة
+            if (itemAcc !== origAcc) return false;
+            
+            // إذا كانا ملحقين، يجب أن يكونا نفس النوع (مع المرادفات)
+            if (origAcc) {
+                if (!origType || !itemType) return true;
+                return areSynonyms(origType, itemType);
+            }
+            
+            // منتجات أساسية: يجب أن يكونا نفس النوع
+            if (origType && itemType) {
+                return areSynonyms(origType, itemType);
+            }
+            
+            return true;
+        };
+
+        // ==========================================
+        // تحضير البيانات
+        // ==========================================
         const originalTokensList = tokenize(originalTitle);
         const originalTokens = new Set(originalTokensList);
+        const originalTokenCount = Math.max(originalTokensList.length, 1);
+        
+        // تصنيف العنوان الأصلي
+        const originalClass = classifyLocally(originalTitle);
+        const originalType = originalClass.type;
+        const originalIsAccessory = originalClass.acc;
+
+        console.log(`Original: type="${originalType}", acc=${originalIsAccessory}`);
 
         // ==========================================
         // المرحلة 1: فرز محلي لاختيار أفضل 5 مرشحين
@@ -69,78 +165,7 @@ export default {
         const remainingItems = preScoredItems.slice(5);
 
         // ==========================================
-        // المرحلة 2: تصنيف ذكي بـ Llama (العنوان الأصلي + 5 منتجات)
-        // ==========================================
-        const titlesToClassify = [originalTitle, ...aiItems.map(it => it.title)];
-        let classifications = [];
-        
-        try {
-            const classifyPrompt = `Classify each product title below. For each, determine:
-- "type": the MAIN product category in 1-2 English words (e.g. "watch", "phone", "headphones", "strap", "case", "cable", "charger")
-- "acc": true if the title describes an ACCESSORY (strap, band, case, cover, cable, charger, protector, stand, mount, adapter, bag), false if it describes the MAIN PRODUCT itself (watch, phone, headphones, speaker, camera)
-
-IMPORTANT: "watch strap" = type="strap", acc=true. "smart watch with strap" = type="watch", acc=false.
-
-Return ONLY valid JSON array, no markdown, no explanation:
-[{"i":0,"type":"watch strap","acc":true},{"i":1,"type":"watch","acc":false}]
-
-Titles:
-${titlesToClassify.map((t, i) => `${i}: ${t}`).join('\n')}`;
-
-            const aiResponse = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-                messages: [
-                    { role: 'system', content: 'You are a product classifier. Output ONLY valid JSON array. No markdown, no explanation, no code fences.' },
-                    { role: 'user', content: classifyPrompt }
-                ],
-                max_tokens: 400
-            });
-            
-            if (aiResponse && aiResponse.response) {
-                let cleanJson = aiResponse.response.trim();
-                // إزالة أي markdown
-                cleanJson = cleanJson.replace(/```json/g, '').replace(/```/g, '').trim();
-                // استخراج المصفوفة
-                const start = cleanJson.indexOf('[');
-                const end = cleanJson.lastIndexOf(']');
-                if (start >= 0 && end > start) {
-                    cleanJson = cleanJson.slice(start, end + 1);
-                }
-                const parsed = JSON.parse(cleanJson);
-                if (Array.isArray(parsed)) {
-                    classifications = parsed;
-                }
-            }
-        } catch (e) {
-            console.error('Llama classification failed:', e.message);
-        }
-
-        // استخراج تصنيف العنوان الأصلي
-        const originalClass = classifications.find(c => c.i === 0) || { type: '', acc: false };
-        const originalType = (originalClass.type || '').toLowerCase().trim();
-        const originalIsAccessory = originalClass.acc === true;
-
-        // 🔥 دالة ذكية للتحقق من تطابق النوع
-        const isSameType = (itemType, itemIsAccessory, origType, origIsAccessory) => {
-            // 1. يجب أن يكونا من نفس الفئة (ملحق أو منتج أساسي)
-            if (itemIsAccessory !== origIsAccessory) return false;
-            
-            // 2. إذا كانت الأنواع فارغة، نعتبرها متطابقة (احتياط)
-            if (!itemType || !origType) return true;
-            
-            // 3. مطابقة جزئية للنوع (مثلاً "watch strap" و "strap" متطابقان)
-            const origWords = origType.split(/\s+/);
-            const itemWords = itemType.split(/\s+/);
-            
-            // إذا تشاركا أي كلمة مهمة → نفس النوع
-            const hasCommonWord = origWords.some(ow => 
-                ow.length > 2 && itemWords.some(iw => iw.includes(ow) || ow.includes(iw))
-            );
-            
-            return hasCommonWord;
-        };
-
-        // ==========================================
-        // المرحلة 3: تصنيف أفضل 5 منتجات
+        // المرحلة 2: تصنيف أفضل 5 منتجات (محلياً + AI)
         // ==========================================
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
@@ -151,28 +176,24 @@ ${titlesToClassify.map((t, i) => `${i}: ${t}`).join('\n')}`;
         let scoredAIItems = aiItems.map((it, index) => {
             const aiScore = cosineSimilarity(baseVector, aiEmbeddings.data[index]);
             
-            // الحصول على تصنيف هذا المنتج
-            const itemClass = classifications.find(c => c.i === index + 1) || { type: '', acc: false };
-            const itemType = (itemClass.type || '').toLowerCase().trim();
-            const itemIsAccessory = itemClass.acc === true;
-            
-            // هل هو نفس النوع؟
-            const sameType = isSameType(itemType, itemIsAccessory, originalType, originalIsAccessory);
+            // تصنيف محلي
+            const itemClass = classifyLocally(it.title);
+            const sameType = isSameType(itemClass.type, itemClass.acc, originalType, originalIsAccessory);
             
             const isExact = sameType;
             
             let finalScore = aiScore * 100;
             if (isExact) finalScore += 50;
             
-            return { ...it, finalScore, isExact, _type: itemType, _acc: itemIsAccessory };
+            return { ...it, finalScore, isExact };
         });
 
         scoredAIItems.sort((a, b) => b.finalScore - a.finalScore);
 
         // ==========================================
-        // المرحلة 4: تصنيف باقي المنتجات (محلياً)
+        // المرحلة 3: تصنيف باقي المنتجات
         // ==========================================
-        // نستخدم أفضل 3 مراجع Exact كأمثلة
+        // مراجع Exact و Similar من أفضل 5
         const exactRefs = scoredAIItems.filter(i => i.isExact).slice(0, 3);
         const similarRefs = scoredAIItems.filter(i => !i.isExact).slice(0, 3);
         
@@ -198,31 +219,45 @@ ${titlesToClassify.map((t, i) => `${i}: ${t}`).join('\n')}`;
                 return { ...it, finalScore: 0, isExact: false };
             }
             
-            // حساب التشابه مع المراجع Exact و Similar
+            // 🔥 تصنيف محلي
+            const itemClass = classifyLocally(it.title);
+            const sameType = isSameType(itemClass.type, itemClass.acc, originalType, originalIsAccessory);
+            
+            // 🔥 إذا كان النوع مختلفاً تماماً → Similar مباشرة
+            if (!sameType) {
+                const simToExact = avgSimilarity(itemTokens, exactRefTokens);
+                return { ...it, finalScore: Math.min(simToExact * 100, 50), isExact: false };
+            }
+            
+            // حساب التشابهات
             const simToExact = avgSimilarity(itemTokens, exactRefTokens);
             const simToSimilar = avgSimilarity(itemTokens, similarRefTokens);
             
-            // التشابه مع العنوان الأصلي
             const origIntersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
             const origUnion = new Set([...itemTokens, ...originalTokens]).size;
             const origJaccard = origUnion > 0 ? origIntersection / origUnion : 0;
+            const keyTermsRatio = origIntersection / originalTokenCount;
             
-            // 🔥 القرار الذكي:
-            // إذا كان المنتج أقرب بكثير للمراجع Exact → Exact
-            // إذا كان أقرب للمراجع Similar → Similar
-            let isExact;
-            if (exactRefTokens.length === 0) {
-                // لا يوجد مراجع Exact، نعتمد على العنوان الأصلي
-                isExact = origJaccard >= 0.2;
-            } else if (similarRefTokens.length === 0) {
-                // لا يوجد مراجع Similar، كل شيء Exact تقريباً
+            // 🔥 العتبات المطلقة
+            let isExact = false;
+            
+            if (origJaccard >= 0.10 || keyTermsRatio >= 0.25 || simToExact >= 0.10) {
+                // تشابه قوي → Exact
+                isExact = true;
+            } else if (origJaccard >= 0.04 || keyTermsRatio >= 0.10 || simToExact >= 0.05) {
+                // تشابه متوسط → Exact (متساهل)
                 isExact = true;
             } else {
-                // مقارنة: هل هو أقرب للـ Exact أم Similar؟
-                isExact = simToExact >= simToSimilar;
+                // تشابه ضعيف جداً → Similar
+                isExact = false;
             }
             
-            const finalScore = Math.min((simToExact * 0.7 + origJaccard * 0.3) * 150, 85);
+            // إذا كان هناك مراجع Similar والمنتج أقرب لها بكثير → Similar
+            if (similarRefTokens.length > 0 && simToSimilar > simToExact * 1.5) {
+                isExact = false;
+            }
+            
+            const finalScore = Math.min((simToExact * 0.5 + origJaccard * 0.2 + keyTermsRatio * 0.3) * 150, 85);
             
             return { ...it, finalScore, isExact };
         });
@@ -230,13 +265,14 @@ ${titlesToClassify.map((t, i) => `${i}: ${t}`).join('\n')}`;
         scoredRemaining.sort((a, b) => b.finalScore - a.finalScore);
 
         // ==========================================
-        // المرحلة 5: الدمج النهائي
+        // المرحلة 4: الدمج النهائي
         // ==========================================
-        const finalItems = [...scoredAIItems, ...scoredRemaining].map(it => {
-            // إزالة الحقول المؤقتة
-            const { _type, _acc, ...clean } = it;
-            return clean;
-        });
+        const finalItems = [...scoredAIItems, ...scoredRemaining];
+
+        // 🔥 إحصاءات (تظهر في Cloudflare logs)
+        const exactCount = finalItems.filter(i => i.isExact).length;
+        const similarCount = finalItems.length - exactCount;
+        console.log(`Total: ${finalItems.length}, Exact: ${exactCount}, Similar: ${similarCount}`);
 
         return new Response(JSON.stringify({ success: true, data: finalItems }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
