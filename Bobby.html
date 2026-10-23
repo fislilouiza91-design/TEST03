@@ -63,7 +63,7 @@ export default {
         };
 
         // ==========================================
-        // 🔥 المرحلة 1: التقاط 3 الأكثر تطابقاً نصياً
+        // 🔥 المرحلة 1: التقاط 3 الأكثر تطابقاً نصياً + 3 عشوائية
         // ==========================================
         const preScored = items.map(it => ({
             ...it,
@@ -74,12 +74,6 @@ export default {
         const top3 = preScored.slice(0, Math.min(3, preScored.length));
         const others = preScored.slice(3);
 
-        console.log(`\n📌 Top 3 (most textually similar):`);
-        top3.forEach((it, i) => console.log(`  ${i+1}. "${it.title.substring(0, 60)}" (sim: ${it.textSim.toFixed(3)})`));
-
-        // ==========================================
-        // 🔥 المرحلة 2: التقاط 3 عشوائية من الباقي
-        // ==========================================
         const random3 = [];
         const othersCopy = [...others];
         for (let i = 0; i < 3 && othersCopy.length > 0; i++) {
@@ -87,11 +81,11 @@ export default {
             random3.push(othersCopy.splice(idx, 1)[0]);
         }
 
-        console.log(`\n🎲 3 random samples:`);
-        random3.forEach((it, i) => console.log(`  ${i+1}. "${it.title.substring(0, 60)}" (sim: ${it.textSim.toFixed(3)})`));
+        console.log(`\n📌 Top 3: ${top3.map(x => `${x.title.substring(0,30)}(sim:${x.textSim.toFixed(2)})`).join(', ')}`);
+        console.log(`🎲 Random 3: ${random3.map(x => `${x.title.substring(0,30)}(sim:${x.textSim.toFixed(2)})`).join(', ')}`);
 
         // ==========================================
-        // 🔥 المرحلة 3: AI يصنّف 7 عناوين (الأصلي + 3 + 3)
+        // 🔥 المرحلة 2: AI يصنّف 7 عناوين
         // ==========================================
         const refTitles = [originalTitle, ...top3.map(x => x.title), ...random3.map(x => x.title)];
         const refClasses = await classifyBatch(refTitles, env);
@@ -100,50 +94,53 @@ export default {
         const top3Classes = refClasses.slice(1, 1 + top3.length);
         const random3Classes = refClasses.slice(1 + top3.length);
         
-        console.log(`\n🧠 Original classified as: ${JSON.stringify(originalClass)}`);
+        console.log(`\n🧠 Original: ${JSON.stringify(originalClass)}`);
+
+        // 🔥 التحقق من نجاح التصنيف
+        const classificationWorked = refClasses.filter(c => c.type && c.type.length > 0).length >= 4;
+        console.log(`Classification quality: ${classificationWorked ? '✅ GOOD' : '⚠️ POOR'} (${refClasses.filter(c => c.type).length}/7 valid)`);
 
         // ==========================================
-        // 🔥 المرحلة 4: بناء مجموعات المراجع (Anchors)
+        // 🔥 المرحلة 3: بناء المراجع (Anchors)
         // ==========================================
         const exactAnchors = [];
         const similarAnchors = [];
         
         top3.forEach((item, i) => {
             const cls = top3Classes[i];
-            const isExact = isSameTypeAI(cls, originalClass);
+            const isExact = isSameTypeAI(cls, originalClass, item.textSim, classificationWorked);
             item.isExact = isExact;
-            item.finalScore = (1 - i) * 1000; // ترتيب أفضل 3 محفوظ
+            item.finalScore = 1000 - i * 10;
             if (isExact) {
                 exactAnchors.push(item);
-                console.log(`  ✅ Top "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → EXACT`);
             } else {
                 similarAnchors.push(item);
-                console.log(`  ❌ Top "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → SIMILAR`);
             }
+            console.log(`  ${isExact ? '✅' : '❌'} Top "${item.title.substring(0, 40)}" → ${JSON.stringify(cls)} → ${isExact ? 'EXACT' : 'SIMILAR'}`);
         });
         
-        random3.forEach((item, i) => {
-            const cls = random3Classes[i];
-            const isExact = isSameTypeAI(cls, originalClass);
+        random3.forEach((item) => {
+            const cls = random3Classes[random3.indexOf(item)];
+            const isExact = isSameTypeAI(cls, originalClass, item.textSim, classificationWorked);
             item.isExact = isExact;
+            item.finalScore = 500;
             if (isExact) {
                 exactAnchors.push(item);
-                console.log(`  ✅ Rnd "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → EXACT`);
             } else {
                 similarAnchors.push(item);
-                console.log(`  ❌ Rnd "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → SIMILAR`);
             }
+            console.log(`  ${isExact ? '✅' : '❌'} Rnd "${item.title.substring(0, 40)}" → ${JSON.stringify(cls)} → ${isExact ? 'EXACT' : 'SIMILAR'}`);
         });
 
         console.log(`\n🎯 Anchors: ${exactAnchors.length} exact, ${similarAnchors.length} similar`);
 
         // ==========================================
-        // 🔥 المرحلة 5: تصنيف الباقي بسرعة بناءً على المراجع
+        // 🔥 المرحلة 4: تصنيف الباقي
         // ==========================================
         const random3Ids = new Set(random3.map(x => x.id));
         const toClassify = others.filter(x => !random3Ids.has(x.id));
         
-        // توليد Embeddings لكل شيء دفعة واحدة
+        // توليد Embeddings للمراجع + المتبقية
         const allTitlesToEmbed = [
             ...exactAnchors.map(x => x.title),
             ...similarAnchors.map(x => x.title),
@@ -168,42 +165,65 @@ export default {
             return sum / vectors.length;
         };
         
+        // حساب متوسط التشابه النصي مع المراجع
+        const avgTextSimTo = (title, anchors) => {
+            if (anchors.length === 0) return 0;
+            let sum = 0;
+            for (const a of anchors) sum += jaccard(title, a.title);
+            return sum / anchors.length;
+        };
+
+        // 🔥 تصنيف كل منتج بـ 3 إشارات
         toClassify.forEach((item, i) => {
             const vec = toClassifyVectors[i];
+            
+            // الإشارة 1: التشابه مع المراجع (Cos)
             const simToExact = avgCos(vec, exactVectors);
             const simToSimilar = avgCos(vec, similarVectors);
             
-            // حساب تشابه نصي مع المراجع Exact
-            let textSimToExact = 0;
-            if (exactAnchors.length > 0) {
-                for (const anchor of exactAnchors) {
-                    textSimToExact += jaccard(item.title, anchor.title);
-                }
-                textSimToExact /= exactAnchors.length;
+            // الإشارة 2: التشابه النصي مع المراجع (Jaccard)
+            const textToExact = avgTextSimTo(item.title, exactAnchors);
+            const textToSimilar = avgTextSimTo(item.title, similarAnchors);
+            
+            // الإشارة 3: التشابه مع العنوان الأصلي
+            const textToOriginal = item.textSim;
+            
+            // 🔥 القرار المُرجّح
+            let score = 0;
+            
+            // إشارة 1: Cos مع المراجع (وزن 3)
+            if (exactAnchors.length > 0 && similarAnchors.length > 0) {
+                if (simToExact > simToSimilar * 1.05) score += 3;
+                else if (simToSimilar > simToExact * 1.05) score -= 3;
+            } else if (exactAnchors.length > 0) {
+                if (simToExact > 0.75) score += 2;
+                else if (simToExact < 0.5) score -= 2;
             }
             
-            // 🔥 قرار التصنيف
-            let isExact;
-            
-            if (exactAnchors.length === 0) {
-                // لا يوجد مراجع Exact → نعتمد على تشابه العنوان الأصلي
-                isExact = item.textSim >= 0.15;
-            } else if (similarAnchors.length === 0) {
-                // لا يوجد مراجع Similar → كل ما يشبه Exact يعتبر Exact
-                isExact = simToExact >= 0.25 || textSimToExact >= 0.10;
-            } else {
-                // مقارنة متوازنة
-                const scoreToExact = simToExact * 0.5 + textSimToExact * 0.5;
-                const scoreToSimilar = simToSimilar * 0.7 + (1 - item.textSim) * 0.3;
-                isExact = scoreToExact > scoreToSimilar;
+            // إشارة 2: النص مع المراجع (وزن 2)
+            if (exactAnchors.length > 0 && similarAnchors.length > 0) {
+                if (textToExact > textToSimilar * 1.2) score += 2;
+                else if (textToSimilar > textToExact * 1.2) score -= 2;
+            } else if (exactAnchors.length > 0) {
+                if (textToExact > 0.2) score += 1;
+                else if (textToExact < 0.05) score -= 1;
             }
+            
+            // إشارة 3: النص مع العنوان الأصلي (وزن 2)
+            if (textToOriginal >= 0.15) score += 2;
+            else if (textToOriginal >= 0.08) score += 1;
+            else if (textToOriginal < 0.03) score -= 2;
+            else if (textToOriginal < 0.06) score -= 1;
+            
+            // 🔥 قرار نهائي: إذا الدرجة موجبة → Exact، وإلا → Similar
+            const isExact = score > 0;
             
             item.isExact = isExact;
-            item.finalScore = simToExact * 100 + (isExact ? 50 : 0) + item.textSim * 30;
+            item.finalScore = Math.min((simToExact * 50 + textToOriginal * 50 + (isExact ? 40 : 0)), 100);
         });
 
         // ==========================================
-        // 🔥 المرحلة 6: الدمج والترتيب النهائي
+        // 🔥 المرحلة 5: الدمج والترتيب
         // ==========================================
         const allItems = [...top3, ...random3, ...toClassify];
         allItems.sort((a, b) => {
@@ -214,7 +234,6 @@ export default {
         const exactCount = allItems.filter(i => i.isExact).length;
         console.log(`\n✅ FINAL: Total: ${allItems.length} | Exact: ${exactCount} | Similar: ${allItems.length - exactCount}`);
 
-        // إزالة الحقول المؤقتة
         const finalItems = allItems.map(it => {
             const { textSim, aiClassified, _type, _acc, ...clean } = it;
             return clean;
@@ -294,38 +313,36 @@ export default {
 };
 
 // ==========================================
-// 🧠 تصنيف دفعة عناوين (7 عناوين فقط - دفعة واحدة)
+// 🧠 تصنيف دفعة (7 عناوين)
 // ==========================================
 async function classifyBatch(titles, env) {
     const titlesList = titles.map((t, i) => `${i}: "${t}"`).join('\n');
     
-    const prompt = `Classify each product title below. Return ONLY a valid JSON array (no markdown, no code fences, no explanation):
+    const prompt = `Classify these product titles. Return ONLY a valid JSON array:
 
 ${titlesList}
 
-For each title return:
-{"i": <index>, "type": "<main product in 1-2 English words>", "acc": <true if accessory, false if main product>}
+For EACH title return: {"i": <index>, "type": "<product type 1-2 words>", "acc": <true/false>}
 
 RULES:
-- accessory=true for: strap, band, case, cover, cable, charger, protector, film, holder, stand, mount, adapter, bag, sleeve, skin, replacement part
-- accessory=false for: watch, phone, tablet, headphones, speaker, camera, laptop, mouse, keyboard, TV, monitor (the actual device)
-- If title contains "with" + a main product → accessory=false (e.g., "watch with strap" = watch = accessory:false)
-- If title starts with "for"/"compatible"/"fits" → accessory=true
+acc=true (accessory) for: strap, band, case, cover, cable, charger, protector, film, holder, stand, mount, adapter, bag, sleeve, skin, replacement
+acc=false (main product) for: watch, phone, tablet, headphone, speaker, camera, laptop, mouse, keyboard, TV, monitor, earbud
+
+If title has "with" + main product → acc=false
+If title starts with "for"/"compatible" → acc=true
 
 EXAMPLES:
-"Leather Band for Apple Watch" → {"type": "strap", "acc": true}
-"Smart Watch Series 8" → {"type": "watch", "acc": false}
-"Phone Case iPhone 15" → {"type": "case", "acc": true}
-"iPhone 15 Pro Max" → {"type": "phone", "acc": false}
-"USB Charging Cable" → {"type": "cable", "acc": true}
-"Wireless Earbuds" → {"type": "earbud", "acc": false}
+"Leather Band for Apple Watch" → {"i":0, "type":"strap", "acc":true}
+"Smart Watch Series 8" → {"i":1, "type":"watch", "acc":false}
+"Phone Case iPhone 15" → {"i":2, "type":"case", "acc":true}
+"iPhone 15 Pro" → {"i":3, "type":"phone", "acc":false}
 
-Return ONLY the JSON array.`;
+Return ONLY JSON array, no markdown, no explanation.`;
 
     try {
         const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
             messages: [
-                { role: 'system', content: 'You output ONLY valid JSON arrays. No markdown, no explanations, no code fences.' },
+                { role: 'system', content: 'Output ONLY valid JSON arrays. No markdown, no explanations.' },
                 { role: 'user', content: prompt }
             ],
             max_tokens: 400
@@ -362,23 +379,30 @@ Return ONLY the JSON array.`;
 }
 
 // ==========================================
-// 🧠 مقارنة التصنيفين
+// 🧠 مقارنة التصنيفين (3 إشارات)
 // ==========================================
-function isSameTypeAI(itemClass, origClass) {
+function isSameTypeAI(itemClass, origClass, textSim, classificationWorked) {
+    // إذا فشل التصنيف كلياً → نعتمد على التشابه النصي فقط
+    if (!classificationWorked) {
+        return textSim >= 0.10;
+    }
+    
     if (!itemClass || !origClass) return false;
     
     // مختلف الفئات → مختلف
     if (itemClass.acc !== origClass.acc) return false;
     
-    // لا يوجد نوع → نعتبره متطابق (احتياط)
-    if (!origClass.type || !itemClass.type) return true;
+    // لا يوجد نوع في أحدهما → نعتمد على التشابه النصي
+    if (!origClass.type || !itemClass.type) {
+        return textSim >= 0.10;
+    }
     
     // تطابق مباشر أو مرادفات
     return areSynonyms(itemClass.type, origClass.type);
 }
 
 function areSynonyms(t1, t2) {
-    if (!t1 || !t2) return true;
+    if (!t1 || !t2) return false;
     if (t1 === t2) return true;
     if (t1.includes(t2) || t2.includes(t1)) return true;
     
