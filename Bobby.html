@@ -36,56 +36,187 @@ export default {
         console.log(`Items: ${items.length}`);
 
         // ==========================================
-        // 🔥 المرحلة 1: تصنيف العنوان الأصلي بالذكاء الاصطناعي
+        // 🔥 أدوات مساعدة
         // ==========================================
-        const originalClass = await classifyWithAI(originalTitle, env);
-        console.log(`Original classified as: ${JSON.stringify(originalClass)}`);
+        const STOP_WORDS = new Set([
+          'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping',
+          'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece',
+          'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible',
+          'fits', 'fit', 'suitable', 'accessories', 'accessory', 'universal',
+          'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par'
+        ]);
+        
+        const tokenize = (text) => {
+            return text.toLowerCase()
+                .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+                .split(/\s+/)
+                .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+        };
+        
+        const jaccard = (t1, t2) => {
+            const s1 = new Set(tokenize(t1));
+            const s2 = new Set(tokenize(t2));
+            if (s1.size === 0 || s2.size === 0) return 0;
+            const inter = [...s1].filter(w => s2.has(w)).length;
+            const union = new Set([...s1, ...s2]).size;
+            return union > 0 ? inter / union : 0;
+        };
 
         // ==========================================
-        // 🔥 المرحلة 2: تصنيف جميع المنتجات بالذكاء الاصطناعي (دفعات صغيرة)
+        // 🔥 المرحلة 1: التقاط 3 الأكثر تطابقاً نصياً
         // ==========================================
-        const allClassified = await classifyBatch(items.map(it => it.title), env);
-        
+        const preScored = items.map(it => ({
+            ...it,
+            textSim: jaccard(originalTitle, it.title)
+        }));
+        preScored.sort((a, b) => b.textSim - a.textSim);
+
+        const top3 = preScored.slice(0, Math.min(3, preScored.length));
+        const others = preScored.slice(3);
+
+        console.log(`\n📌 Top 3 (most textually similar):`);
+        top3.forEach((it, i) => console.log(`  ${i+1}. "${it.title.substring(0, 60)}" (sim: ${it.textSim.toFixed(3)})`));
+
         // ==========================================
-        // 🔥 المرحلة 3: حساب التشابه للترتيب
+        // 🔥 المرحلة 2: التقاط 3 عشوائية من الباقي
         // ==========================================
-        const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
-        const baseVector = originalEmbedding.data[0];
-        
-        const itemTitles = items.map(it => it.title);
-        let itemEmbeddings = [];
-        for (let i = 0; i < itemTitles.length; i += 50) {
-            const chunk = itemTitles.slice(i, i + 50);
-            const emb = await env.AI.run(modelName, { text: chunk });
-            itemEmbeddings = itemEmbeddings.concat(emb.data);
+        const random3 = [];
+        const othersCopy = [...others];
+        for (let i = 0; i < 3 && othersCopy.length > 0; i++) {
+            const idx = Math.floor(Math.random() * othersCopy.length);
+            random3.push(othersCopy.splice(idx, 1)[0]);
         }
 
+        console.log(`\n🎲 3 random samples:`);
+        random3.forEach((it, i) => console.log(`  ${i+1}. "${it.title.substring(0, 60)}" (sim: ${it.textSim.toFixed(3)})`));
+
         // ==========================================
-        // 🔥 المرحلة 4: تصنيف Exact/Similar بناءً على التصنيف
+        // 🔥 المرحلة 3: AI يصنّف 7 عناوين (الأصلي + 3 + 3)
         // ==========================================
-        const scoredItems = items.map((it, index) => {
-            const aiScore = cosineSimilarity(baseVector, itemEmbeddings[index]);
-            const itemClass = allClassified[index] || { type: '', acc: false };
-            
-            // 🔥 المنطق الجديد: مقارنة صارمة
-            const isExact = isSameType(itemClass, originalClass);
-            
-            let finalScore = aiScore * 100;
-            if (isExact) finalScore += 100;
-            
-            return { ...it, finalScore, isExact, _type: itemClass.type, _acc: itemClass.acc };
+        const refTitles = [originalTitle, ...top3.map(x => x.title), ...random3.map(x => x.title)];
+        const refClasses = await classifyBatch(refTitles, env);
+        
+        const originalClass = refClasses[0];
+        const top3Classes = refClasses.slice(1, 1 + top3.length);
+        const random3Classes = refClasses.slice(1 + top3.length);
+        
+        console.log(`\n🧠 Original classified as: ${JSON.stringify(originalClass)}`);
+
+        // ==========================================
+        // 🔥 المرحلة 4: بناء مجموعات المراجع (Anchors)
+        // ==========================================
+        const exactAnchors = [];
+        const similarAnchors = [];
+        
+        top3.forEach((item, i) => {
+            const cls = top3Classes[i];
+            const isExact = isSameTypeAI(cls, originalClass);
+            item.isExact = isExact;
+            item.finalScore = (1 - i) * 1000; // ترتيب أفضل 3 محفوظ
+            if (isExact) {
+                exactAnchors.push(item);
+                console.log(`  ✅ Top "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → EXACT`);
+            } else {
+                similarAnchors.push(item);
+                console.log(`  ❌ Top "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → SIMILAR`);
+            }
+        });
+        
+        random3.forEach((item, i) => {
+            const cls = random3Classes[i];
+            const isExact = isSameTypeAI(cls, originalClass);
+            item.isExact = isExact;
+            if (isExact) {
+                exactAnchors.push(item);
+                console.log(`  ✅ Rnd "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → EXACT`);
+            } else {
+                similarAnchors.push(item);
+                console.log(`  ❌ Rnd "${item.title.substring(0, 50)}" → ${JSON.stringify(cls)} → SIMILAR`);
+            }
         });
 
-        scoredItems.sort((a, b) => b.finalScore - a.finalScore);
+        console.log(`\n🎯 Anchors: ${exactAnchors.length} exact, ${similarAnchors.length} similar`);
 
-        // إحصاءات
-        const exactCount = scoredItems.filter(i => i.isExact).length;
-        const similarCount = scoredItems.length - exactCount;
-        console.log(`✅ Total: ${scoredItems.length} | Exact: ${exactCount} | Similar: ${similarCount}`);
+        // ==========================================
+        // 🔥 المرحلة 5: تصنيف الباقي بسرعة بناءً على المراجع
+        // ==========================================
+        const random3Ids = new Set(random3.map(x => x.id));
+        const toClassify = others.filter(x => !random3Ids.has(x.id));
         
+        // توليد Embeddings لكل شيء دفعة واحدة
+        const allTitlesToEmbed = [
+            ...exactAnchors.map(x => x.title),
+            ...similarAnchors.map(x => x.title),
+            ...toClassify.map(x => x.title)
+        ];
+        
+        let allEmbeddings = [];
+        for (let i = 0; i < allTitlesToEmbed.length; i += 50) {
+            const chunk = allTitlesToEmbed.slice(i, i + 50);
+            const emb = await env.AI.run(modelName, { text: chunk });
+            allEmbeddings = allEmbeddings.concat(emb.data);
+        }
+        
+        const exactVectors = allEmbeddings.slice(0, exactAnchors.length);
+        const similarVectors = allEmbeddings.slice(exactAnchors.length, exactAnchors.length + similarAnchors.length);
+        const toClassifyVectors = allEmbeddings.slice(exactAnchors.length + similarAnchors.length);
+        
+        const avgCos = (vec, vectors) => {
+            if (vectors.length === 0) return 0;
+            let sum = 0;
+            for (const v of vectors) sum += cosineSimilarity(vec, v);
+            return sum / vectors.length;
+        };
+        
+        toClassify.forEach((item, i) => {
+            const vec = toClassifyVectors[i];
+            const simToExact = avgCos(vec, exactVectors);
+            const simToSimilar = avgCos(vec, similarVectors);
+            
+            // حساب تشابه نصي مع المراجع Exact
+            let textSimToExact = 0;
+            if (exactAnchors.length > 0) {
+                for (const anchor of exactAnchors) {
+                    textSimToExact += jaccard(item.title, anchor.title);
+                }
+                textSimToExact /= exactAnchors.length;
+            }
+            
+            // 🔥 قرار التصنيف
+            let isExact;
+            
+            if (exactAnchors.length === 0) {
+                // لا يوجد مراجع Exact → نعتمد على تشابه العنوان الأصلي
+                isExact = item.textSim >= 0.15;
+            } else if (similarAnchors.length === 0) {
+                // لا يوجد مراجع Similar → كل ما يشبه Exact يعتبر Exact
+                isExact = simToExact >= 0.25 || textSimToExact >= 0.10;
+            } else {
+                // مقارنة متوازنة
+                const scoreToExact = simToExact * 0.5 + textSimToExact * 0.5;
+                const scoreToSimilar = simToSimilar * 0.7 + (1 - item.textSim) * 0.3;
+                isExact = scoreToExact > scoreToSimilar;
+            }
+            
+            item.isExact = isExact;
+            item.finalScore = simToExact * 100 + (isExact ? 50 : 0) + item.textSim * 30;
+        });
+
+        // ==========================================
+        // 🔥 المرحلة 6: الدمج والترتيب النهائي
+        // ==========================================
+        const allItems = [...top3, ...random3, ...toClassify];
+        allItems.sort((a, b) => {
+            if (a.isExact !== b.isExact) return b.isExact ? 1 : -1;
+            return (b.finalScore || 0) - (a.finalScore || 0);
+        });
+
+        const exactCount = allItems.filter(i => i.isExact).length;
+        console.log(`\n✅ FINAL: Total: ${allItems.length} | Exact: ${exactCount} | Similar: ${allItems.length - exactCount}`);
+
         // إزالة الحقول المؤقتة
-        const finalItems = scoredItems.map(it => {
-            const { _type, _acc, ...clean } = it;
+        const finalItems = allItems.map(it => {
+            const { textSim, aiClassified, _type, _acc, ...clean } = it;
             return clean;
         });
 
@@ -163,99 +294,41 @@ export default {
 };
 
 // ==========================================
-// 🧠 تصنيف منتج واحد بالذكاء الاصطناعي
-// ==========================================
-async function classifyWithAI(title, env) {
-    const prompt = `Analyze this product title and return ONLY a valid JSON object (no markdown, no explanation):
-
-Title: "${title}"
-
-Return format:
-{"type": "<main product in 1-2 English words>", "acc": <true if accessory, false if main product>}
-
-Rules:
-- "Watch Strap", "Leather Band for Watch" → {"type": "strap", "acc": true}
-- "Smart Watch", "Apple Watch Series 8" → {"type": "watch", "acc": false}
-- "Phone Case", "Cover for iPhone" → {"type": "case", "acc": true}
-- "iPhone 15", "Samsung Galaxy" → {"type": "phone", "acc": false}
-- "USB Cable", "Charging Cord" → {"type": "cable", "acc": true}
-- "Headphones", "Earbuds" → {"type": "headphone", "acc": false}
-- "Screen Protector", "Tempered Glass" → {"type": "protector", "acc": true}
-
-CRITICAL: If the title contains BOTH a product and an accessory (e.g., "watch with strap", "phone with case"), it's the MAIN PRODUCT (acc: false).
-
-Return ONLY JSON.`;
-
-    try {
-        const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
-            messages: [
-                { role: 'system', content: 'You are a JSON-only product classifier. Output ONLY valid JSON, no markdown, no explanations.' },
-                { role: 'user', content: prompt }
-            ],
-            max_tokens: 60
-        });
-        
-        if (response && response.response) {
-            let clean = response.response.trim();
-            clean = clean.replace(/```json/g, '').replace(/```/g, '').trim();
-            const start = clean.indexOf('{');
-            const end = clean.lastIndexOf('}');
-            if (start >= 0 && end > start) {
-                clean = clean.slice(start, end + 1);
-            }
-            const parsed = JSON.parse(clean);
-            return { 
-                type: String(parsed.type || '').toLowerCase().trim(), 
-                acc: parsed.acc === true 
-            };
-        }
-    } catch (e) {
-        console.error('Classify error:', e.message);
-    }
-    return { type: '', acc: false };
-}
-
-// ==========================================
-// 🧠 تصنيف دفعة منتجات (دفعات من 10)
+// 🧠 تصنيف دفعة عناوين (7 عناوين فقط - دفعة واحدة)
 // ==========================================
 async function classifyBatch(titles, env) {
-    const results = [];
-    const BATCH_SIZE = 10;
+    const titlesList = titles.map((t, i) => `${i}: "${t}"`).join('\n');
     
-    for (let i = 0; i < titles.length; i += BATCH_SIZE) {
-        const batch = titles.slice(i, i + BATCH_SIZE);
-        const batchResults = await classifyOneBatch(batch, env, i);
-        results.push(...batchResults);
-    }
-    
-    return results;
-}
-
-async function classifyOneBatch(titles, env, offset) {
-    const titlesList = titles.map((t, i) => `${offset + i}: "${t}"`).join('\n');
-    
-    const prompt = `Classify each product title. Return ONLY a valid JSON array (no markdown, no explanation):
+    const prompt = `Classify each product title below. Return ONLY a valid JSON array (no markdown, no code fences, no explanation):
 
 ${titlesList}
 
-Return format for each:
-{"i": <index>, "type": "<main product 1-2 words>", "acc": <true if accessory, false if main product>}
+For each title return:
+{"i": <index>, "type": "<main product in 1-2 English words>", "acc": <true if accessory, false if main product>}
 
-Rules:
-- Accessories: strap, band, case, cover, cable, charger, protector, holder, stand, mount, adapter, bag, sleeve, skin
-- Main products: watch, phone, headphones, speaker, camera, tablet, laptop, etc.
-- If title has "with" + main product → acc: false (main product)
-- If starts with "for"/"compatible" → acc: true (accessory)
+RULES:
+- accessory=true for: strap, band, case, cover, cable, charger, protector, film, holder, stand, mount, adapter, bag, sleeve, skin, replacement part
+- accessory=false for: watch, phone, tablet, headphones, speaker, camera, laptop, mouse, keyboard, TV, monitor (the actual device)
+- If title contains "with" + a main product → accessory=false (e.g., "watch with strap" = watch = accessory:false)
+- If title starts with "for"/"compatible"/"fits" → accessory=true
+
+EXAMPLES:
+"Leather Band for Apple Watch" → {"type": "strap", "acc": true}
+"Smart Watch Series 8" → {"type": "watch", "acc": false}
+"Phone Case iPhone 15" → {"type": "case", "acc": true}
+"iPhone 15 Pro Max" → {"type": "phone", "acc": false}
+"USB Charging Cable" → {"type": "cable", "acc": true}
+"Wireless Earbuds" → {"type": "earbud", "acc": false}
 
 Return ONLY the JSON array.`;
 
     try {
         const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
             messages: [
-                { role: 'system', content: 'You are a JSON-only classifier. Output ONLY a valid JSON array.' },
+                { role: 'system', content: 'You output ONLY valid JSON arrays. No markdown, no explanations, no code fences.' },
                 { role: 'user', content: prompt }
             ],
-            max_tokens: 500
+            max_tokens: 400
         });
         
         if (response && response.response) {
@@ -269,7 +342,6 @@ Return ONLY the JSON array.`;
             const parsed = JSON.parse(clean);
             
             if (Array.isArray(parsed)) {
-                // بناء النتائج بترتيب صحيح
                 const resultMap = new Map();
                 for (const item of parsed) {
                     if (typeof item.i === 'number') {
@@ -279,46 +351,32 @@ Return ONLY the JSON array.`;
                         });
                     }
                 }
-                
-                return titles.map((_, idx) => {
-                    return resultMap.get(offset + idx) || { type: '', acc: false };
-                });
+                return titles.map((_, idx) => resultMap.get(idx) || { type: '', acc: false });
             }
         }
     } catch (e) {
-        console.error(`Batch classify error (offset ${offset}):`, e.message);
+        console.error('Classify batch error:', e.message);
     }
     
-    // فشل التصنيف → إرجاع تصنيف فارغ
     return titles.map(() => ({ type: '', acc: false }));
 }
 
 // ==========================================
-// 🧠 مقارنة صارمة بين تصنيفين
+// 🧠 مقارنة التصنيفين
 // ==========================================
-function isSameType(itemClass, origClass) {
-    const itemType = itemClass.type;
-    const itemAcc = itemClass.acc;
-    const origType = origClass.type;
-    const origAcc = origClass.acc;
+function isSameTypeAI(itemClass, origClass) {
+    if (!itemClass || !origClass) return false;
     
-    // 1. مختلف الفئات (ملحق ≠ منتج) → مختلف
-    if (itemAcc !== origAcc) return false;
+    // مختلف الفئات → مختلف
+    if (itemClass.acc !== origClass.acc) return false;
     
-    // 2. كلاهما منتج أساسي → يجب أن يكونا من نفس النوع
-    if (!origAcc) {
-        if (!origType || !itemType) return true; // غير معروف → نعتبره متطابق
-        return areSynonyms(origType, itemType);
-    }
+    // لا يوجد نوع → نعتبره متطابق (احتياط)
+    if (!origClass.type || !itemClass.type) return true;
     
-    // 3. كلاهما ملحق → يجب أن يكونا من نفس النوع
-    if (!origType || !itemType) return true;
-    return areSynonyms(origType, itemType);
+    // تطابق مباشر أو مرادفات
+    return areSynonyms(itemClass.type, origClass.type);
 }
 
-// ==========================================
-// 🧠 المرادفات
-// ==========================================
 function areSynonyms(t1, t2) {
     if (!t1 || !t2) return true;
     if (t1 === t2) return true;
@@ -331,13 +389,11 @@ function areSynonyms(t1, t2) {
         'case': ['cover', 'shell', 'housing'],
         'cover': ['case', 'shell', 'housing'],
         'cable': ['wire', 'cord', 'line'],
-        'charger': ['adapter'],
+        'charger': ['adapter', 'power'],
         'headphone': ['headset', 'earphone', 'earbud'],
         'headset': ['headphone', 'earphone', 'earbud'],
         'earbud': ['headphone', 'headset', 'earphone'],
-        'earphone': ['headphone', 'headset', 'earbud'],
         'phone': ['smartphone', 'cellphone', 'cell'],
-        'smartphone': ['phone', 'cellphone'],
         'watch': ['smartwatch', 'wristwatch'],
         'smartwatch': ['watch', 'wristwatch'],
         'protector': ['film', 'glass'],
@@ -352,8 +408,18 @@ function areSynonyms(t1, t2) {
     return false;
 }
 
+function cosineSimilarity(vecA, vecB) {
+    let dotProduct = 0, normA = 0, normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
 // ==========================================
-// 🧠 دوال مساعدة
+// دوال مساعدة (لم تتغير)
 // ==========================================
 async function extractKeywordsWithAI(title, env) {
     try {
@@ -373,16 +439,6 @@ async function extractKeywordsWithAI(title, env) {
     } catch (e) {
         return ''; 
     }
-}
-
-function cosineSimilarity(vecA, vecB) {
-    let dotProduct = 0, normA = 0, normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        dotProduct += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
-    }
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 function extractText(v) {
