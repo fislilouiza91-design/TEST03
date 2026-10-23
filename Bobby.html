@@ -12,11 +12,11 @@ export default {
 
     const url = new URL(request.url);
 
-    // 🔥 نقطة النهاية: فرز المنتجات بالذكاء الاصطناعي النصي والبصري (المرحلة الجديدة)
+    // 🔥 نقطة الفرز: اختيار ذكي لأفضل 10 + AI + ترتيب محلي متقدم
     if (request.method === "POST" && url.pathname === "/sort") {
       try {
         const body = await request.json();
-        const { originalTitle, originalImage, items } = body;
+        const { originalTitle, items } = body;
         
         if (!originalTitle || !items || !Array.isArray(items)) {
           return new Response(JSON.stringify({ success: false, message: "Invalid data" }), { 
@@ -31,101 +31,124 @@ export default {
         }
 
         const modelName = '@cf/baai/bge-m3';
+        const cleanOriginalTitle = originalTitle.toLowerCase();
         
-        // 1️⃣ المرحلة الأولى: الفرز النصي الأولي لجميع المنتجات
+        // 🔥 دالة تجزئة النص إلى كلمات مفتاحية (للاستخدام المحلي)
+        const tokenize = (text) => {
+            return text.toLowerCase()
+                .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+                .split(/\s+/)
+                .filter(w => w.length > 2);
+        };
+
+        const originalTokens = new Set(tokenize(originalTitle));
+
+        // ==========================================
+        // المرحلة 1: فرز محلي سريع لاختيار أفضل 10 مرشحين
+        // ==========================================
+        const preScoredItems = items.map(it => {
+            const itemTokens = new Set(tokenize(it.title));
+            if (itemTokens.size === 0) return { ...it, preScore: 0 };
+            
+            const intersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
+            const union = new Set([...itemTokens, ...originalTokens]).size;
+            const jaccard = union > 0 ? intersection / union : 0;
+            
+            return { ...it, preScore: jaccard };
+        });
+
+        // ترتيب محلي مبدئي
+        preScoredItems.sort((a, b) => b.preScore - a.preScore);
+
+        // أفضل 10 يذهبون للذكاء الاصطناعي
+        const aiItems = preScoredItems.slice(0, 10);
+        const remainingItems = preScoredItems.slice(10);
+
+        // ==========================================
+        // المرحلة 2: الذكاء الاصطناعي لأفضل 10 منتجات
+        // ==========================================
         const originalEmbedding = await env.AI.run(modelName, { text: [originalTitle] });
         const baseVector = originalEmbedding.data[0];
         
-        const itemTitles = items.map(it => it.title);
-        let itemsEmbeddingData = [];
-        for (let i = 0; i < itemTitles.length; i += 50) {
-            const chunk = itemTitles.slice(i, i + 50);
-            const emb = await env.AI.run(modelName, { text: chunk });
-            itemsEmbeddingData = itemsEmbeddingData.concat(emb.data);
-        }
-
-        let scoredItems = items.map((it, index) => {
-            const itemVector = itemsEmbeddingData[index];
-            const aiScore = cosineSimilarity(baseVector, itemVector);
-            return { ...it, aiScore, finalScore: aiScore * 100 };
-        });
-
-        // ترتيب مبدئي لأخذ أفضل منتجين
-        scoredItems.sort((a, b) => b.finalScore - a.finalScore);
-        const top2Items = scoredItems.slice(0, 2);
-
-        // 2️⃣ المرحلة الثانية: التحليل البصري (أفضل منتجين + المنتج الأصلي)
-        let visualContext = '';
-        const prompt = "Describe the product in this image in 5 words or less.";
-
-        // دالة مساعدة لوصف الصورة
-        const describeImage = async (imgUrl) => {
-            if (!imgUrl) return '';
-            try {
-                const res = await fetch(imgUrl);
-                if (!res.ok) return '';
-                const buffer = await res.arrayBuffer();
-                const imageData = [...new Uint8Array(buffer)];
-                const aiResponse = await env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', {
-                    image: imageData,
-                    prompt: prompt,
-                    max_tokens: 20
-                });
-                return aiResponse.description || aiResponse.response || '';
-            } catch (e) {
-                return '';
-            }
-        };
-
-        // تحليل الصور الثلاث بالتوازي لتسريع العملية
-        const [descOriginal, descTop1, descTop2] = await Promise.all([
-            describeImage(originalImage),
-            describeImage(top2Items[0]?.img),
-            describeImage(top2Items[1]?.img)
-        ]);
-
-        if (descOriginal) visualContext += ` Original product image shows: ${descOriginal}.`;
-        if (descTop1) visualContext += ` Similar product 1 image shows: ${descTop1}.`;
-        if (descTop2) visualContext += ` Similar product 2 image shows: ${descTop2}.`;
-
-        // 3️⃣ المرحلة الثالثة: بناء النص المرجعي الشامل وإعادة الترتيب
-        // نجمع العنوان الأصلي + عناوين أفضل منتجين + الأوصاف البصرية
-        const referenceText = `
-            ${originalTitle}. 
-            ${top2Items[0]?.title || ''}. 
-            ${top2Items[1]?.title || ''}. 
-            ${visualContext}
-        `.replace(/\s+/g, ' ').trim();
-
-        // إنشاء متجه للنص المرجعي
-        const refEmbedding = await env.AI.run(modelName, { text: [referenceText] });
-        const refVector = refEmbedding.data[0];
-
-        // إعادة حساب التشابه لكل منتج مع النص المرجعي الجديد
-        const cleanOriginalTitle = originalTitle.toLowerCase();
+        const aiTitles = aiItems.map(it => it.title);
+        const aiEmbeddings = await env.AI.run(modelName, { text: aiTitles });
         
-        scoredItems = items.map((it, index) => {
-            const itemVector = itemsEmbeddingData[index];
-            const finalScore = cosineSimilarity(refVector, itemVector) * 100;
-            
+        let scoredAIItems = aiItems.map((it, index) => {
+            const aiScore = cosineSimilarity(baseVector, aiEmbeddings.data[index]);
             const itemTitleLower = it.title.toLowerCase();
+            
             const isAccessory = 
                 (!/case|coque|housse|غطاء|حافظة/i.test(cleanOriginalTitle) && /case|coque|housse|غطاء|حافظة/i.test(itemTitleLower)) ||
                 (!/cable|charger|كابل|شاحن/i.test(cleanOriginalTitle) && /cable|charger|كابل|شاحن/i.test(itemTitleLower)) ||
                 /protector|sticker|skin|sleeve|stand|holder|حماية|ملصق/i.test(itemTitleLower);
 
-            // إذا كان المنتج من أفضل 2، نضمن بقاءه في القمة
-            const isTop2 = top2Items.some(t => t.id === it.id);
-            let adjustedScore = isTop2 ? finalScore + 100 : finalScore;
+            const isExact = !isAccessory && aiScore >= 0.55;
+            let finalScore = aiScore * 100;
+            if (isExact) finalScore += 50;
             
-            const isExact = !isAccessory && (adjustedScore > 60 || isTop2);
-
-            return { ...it, finalScore: adjustedScore, isExact };
+            return { ...it, finalScore, isExact };
         });
 
-        scoredItems.sort((a, b) => b.finalScore - a.finalScore);
+        // ترتيب المنتجات الـ 10 حسب AI
+        scoredAIItems.sort((a, b) => b.finalScore - a.finalScore);
 
-        return new Response(JSON.stringify({ success: true, data: scoredItems }), {
+        // ==========================================
+        // المرحلة 3: ترتيب محلي للـ 190 المتبقية بناءً على المراجع
+        // ==========================================
+        
+        // أخذ أفضل 5 كمراجع (مع أوزانهم بناءً على درجة AI)
+        const referenceItems = scoredAIItems.slice(0, 5);
+        const totalRefScore = referenceItems.reduce((sum, r) => sum + Math.max(r.finalScore, 1), 0) || 1;
+        
+        // تجهيز كلمات المراجع
+        const referenceData = referenceItems.map(ref => ({
+            tokens: new Set(tokenize(ref.title)),
+            weight: Math.max(ref.finalScore, 1) / totalRefScore
+        }));
+
+        // تقييم كل منتج متبقي
+        const scoredRemaining = remainingItems.map(it => {
+            const itemTokens = new Set(tokenize(it.title));
+            
+            if (itemTokens.size === 0) {
+                return { ...it, finalScore: 0, isExact: false };
+            }
+
+            // أ) التشابه مع المراجع الخمسة (مرجح بأوزان AI)
+            let weightedSimilarity = 0;
+            for (const ref of referenceData) {
+                const intersection = [...itemTokens].filter(w => ref.tokens.has(w)).length;
+                const union = new Set([...itemTokens, ...ref.tokens]).size;
+                const jaccard = union > 0 ? intersection / union : 0;
+                weightedSimilarity += jaccard * ref.weight;
+            }
+
+            // ب) التشابه المباشر مع العنوان الأصلي
+            const origIntersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
+            const origUnion = new Set([...itemTokens, ...originalTokens]).size;
+            const origJaccard = origUnion > 0 ? origIntersection / origUnion : 0;
+
+            // ج) الدمج: 60% مراجع + 40% عنوان أصلي
+            const combinedScore = (weightedSimilarity * 0.6 + origJaccard * 0.4) * 150;
+            
+            // سقف 85 لضمان بقاء منتجات AI دائماً في القمة
+            const finalScore = Math.min(combinedScore, 85);
+            
+            // معيار المطابقة المحلية (متساهل نسبياً)
+            const isExact = weightedSimilarity >= 0.25 || origJaccard >= 0.35;
+
+            return { ...it, finalScore, isExact };
+        });
+
+        // ترتيب المتبقي حسب الدرجة
+        scoredRemaining.sort((a, b) => b.finalScore - a.finalScore);
+
+        // ==========================================
+        // المرحلة 4: الدمج النهائي (منتجات AI في القمة دائماً)
+        // ==========================================
+        const finalItems = [...scoredAIItems, ...scoredRemaining];
+
+        return new Response(JSON.stringify({ success: true, data: finalItems }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
         });
 
@@ -137,7 +160,7 @@ export default {
     }
 
     // ==========================================
-    // الكود القديم الخاص بك (جلب المنتجات) - لم يتغير
+    // الكود القديم (جلب المنتجات) - لم يتغير
     // ==========================================
     let keyword = url.searchParams.get("q"); 
     const originalTitle = url.searchParams.get("originalTitle") || ""; 
@@ -198,7 +221,7 @@ export default {
 };
 
 // ==========================================
-// 🧠 دوال الذكاء الاصطناعي والاستخراج
+// 🧠 دوال الذكاء الاصطناعي والاستخراج (لم تتغير)
 // ==========================================
 async function extractKeywordsWithAI(title, env) {
     try {
