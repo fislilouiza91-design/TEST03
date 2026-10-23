@@ -12,7 +12,7 @@ export default {
 
     const url = new URL(request.url);
 
-    // 🔥 نقطة الفرز: 5 منتجات AI + ترتيب محلي ذكي للباقي
+    // 🔥 نقطة الفرز: 5 منتجات AI + ترتيب محلي ذكي
     if (request.method === "POST" && url.pathname === "/sort") {
       try {
         const body = await request.json();
@@ -33,22 +33,19 @@ export default {
         const modelName = '@cf/baai/bge-m3';
         const cleanOriginalTitle = originalTitle.toLowerCase();
         
-        // 🔥 قائمة كلمات الحشو (لتحسين دقة التطابق)
+        // 🔥 قائمة الملحقات - فقط هذه الكلمات تُصنّف كـ "مشابه"
+        const accessoryKeywords = /case|coque|housse|غطاء|حافظة|protector|sticker|skin|sleeve|stand|holder|حماية|ملصق|cable|charger|كابل|شاحن|bag|pouch|mount|clip|bracket|adapter|converter|replacement|repair|étui|film|verre|support|wire|connector|plug|port|strap|band|armband|holster|belt|chain|keychain|pendant/i;
+        
+        const originalIsAccessory = accessoryKeywords.test(cleanOriginalTitle);
+
+        // 🔥 دالة تجزئة بسيطة
         const STOP_WORDS = new Set([
-          'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping', 
-          'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece', 
-          'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible', 
-          'fits', 'fit', 'suitable', 'accessories', 'accessory', 'universal', 
-          'dual', 'purpose', 'large', 'screen', 'plug', 'creative', 'dedicated', 
-          'student', 'portable', 'multifunctional', 'design', 'style', 'luxury', 
-          'fast', 'quick', 'smart', 'waterproof', 'shockproof', 'gift', 'fashion', 
-          'good', 'perfect', '2023', '2024', '2025', 'sans', 'fil', 'sur', 'pour', 
-          'avec', 'les', 'des', 'une', 'dans', 'par', 'double', 'door', 'enclosed', 
-          'angle', 'flip', 'cover', 'removable', 'easy', 'clean', 'filter',
-          'with', 'from', 'that', 'this', 'have', 'will', 'your', 'their'
+          'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping',
+          'original', 'high', 'quality', 'best', 'pcs', 'set', 'pack', 'piece',
+          'pieces', 'items', 'item', 'wholesale', 'dropshipping', 'compatible',
+          'fits', 'fit', 'suitable', 'accessories', 'accessory', 'universal'
         ]);
         
-        // 🔥 دالة تجزئة النص مع إزالة كلمات الحشو
         const tokenize = (text) => {
             return text.toLowerCase()
                 .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
@@ -56,13 +53,12 @@ export default {
                 .filter(w => w.length > 2 && !STOP_WORDS.has(w));
         };
 
-        // الكلمات المهمة من العنوان الأصلي
         const originalTokensList = tokenize(originalTitle);
         const originalTokens = new Set(originalTokensList);
         const originalTokenCount = Math.max(originalTokensList.length, 1);
 
         // ==========================================
-        // المرحلة 1: فرز محلي سريع لاختيار أفضل 5 مرشحين
+        // المرحلة 1: فرز محلي لاختيار أفضل 5 مرشحين
         // ==========================================
         const preScoredItems = items.map(it => {
             const itemTokens = new Set(tokenize(it.title));
@@ -72,16 +68,11 @@ export default {
             const union = new Set([...itemTokens, ...originalTokens]).size;
             const jaccard = union > 0 ? intersection / union : 0;
             
-            // 🔥 نسبة تطابق الكلمات المهمة
-            const keyTermsRatio = intersection / originalTokenCount;
-            
-            // نأخذ أعلى قيمة من الاثنين
-            return { ...it, preScore: Math.max(jaccard, keyTermsRatio * 0.8) };
+            return { ...it, preScore: jaccard };
         });
 
         preScoredItems.sort((a, b) => b.preScore - a.preScore);
 
-        // أفضل 5 منتجات للذكاء الاصطناعي
         const aiItems = preScoredItems.slice(0, 5);
         const remainingItems = preScoredItems.slice(5);
 
@@ -94,17 +85,16 @@ export default {
         const aiTitles = aiItems.map(it => it.title);
         const aiEmbeddings = await env.AI.run(modelName, { text: aiTitles });
         
+        // 🔥 منطق جديد: افتراضياً "مطابق" إلا إذا كان ملحقاً
         let scoredAIItems = aiItems.map((it, index) => {
             const aiScore = cosineSimilarity(baseVector, aiEmbeddings.data[index]);
             const itemTitleLower = it.title.toLowerCase();
             
-            const isAccessory = 
-                (!/case|coque|housse|غطاء|حافظة/i.test(cleanOriginalTitle) && /case|coque|housse|غطاء|حافظة/i.test(itemTitleLower)) ||
-                (!/cable|charger|كابل|شاحن/i.test(cleanOriginalTitle) && /cable|charger|كابل|شاحن/i.test(itemTitleLower)) ||
-                /protector|sticker|skin|sleeve|stand|holder|حماية|ملصق/i.test(itemTitleLower);
-
-            // 🔥 تم تخفيض العتبة من 0.55 إلى 0.40
-            const isExact = !isAccessory && aiScore >= 0.40;
+            const itemIsAccessory = accessoryKeywords.test(itemTitleLower);
+            const isActualAccessory = itemIsAccessory && !originalIsAccessory;
+            
+            // المنتجات الـ 5 الأولى تعتبر "مطابقة" ما لم تكن ملحقاً
+            const isExact = !isActualAccessory;
             
             let finalScore = aiScore * 100;
             if (isExact) finalScore += 50;
@@ -112,11 +102,10 @@ export default {
             return { ...it, finalScore, isExact };
         });
 
-        // ترتيب أفضل 5 حسب AI
         scoredAIItems.sort((a, b) => b.finalScore - a.finalScore);
 
         // ==========================================
-        // المرحلة 3: ترتيب محلي للباقي بناءً على أفضل 5
+        // المرحلة 3: ترتيب محلي للباقي
         // ==========================================
         const referenceItems = scoredAIItems;
         const totalRefScore = referenceItems.reduce((sum, r) => sum + Math.max(r.finalScore, 1), 0) || 1;
@@ -126,16 +115,15 @@ export default {
             weight: Math.max(ref.finalScore, 1) / totalRefScore
         }));
 
-        // تقييم المنتجات المتبقية
         const scoredRemaining = remainingItems.map(it => {
-            const itemTokensList = tokenize(it.title);
-            const itemTokens = new Set(itemTokensList);
+            const itemTokens = new Set(tokenize(it.title));
+            const itemTitleLower = it.title.toLowerCase();
             
             if (itemTokens.size === 0) {
                 return { ...it, finalScore: 0, isExact: false };
             }
 
-            // أ) التشابه مع المراجع الـ 5 (مرجح بأوزان AI)
+            // حساب درجات التشابه
             let weightedSimilarity = 0;
             for (const ref of referenceData) {
                 const intersection = [...itemTokens].filter(w => ref.tokens.has(w)).length;
@@ -144,31 +132,20 @@ export default {
                 weightedSimilarity += jaccard * ref.weight;
             }
 
-            // ب) التشابه المباشر مع العنوان الأصلي
             const origIntersection = [...itemTokens].filter(w => originalTokens.has(w)).length;
             const origUnion = new Set([...itemTokens, ...originalTokens]).size;
             const origJaccard = origUnion > 0 ? origIntersection / origUnion : 0;
-            
-            // 🔥 ج) نسبة تطابق الكلمات المهمة
             const keyTermsRatio = origIntersection / originalTokenCount;
 
-            // د) الدمج
             const combinedScore = (weightedSimilarity * 0.5 + origJaccard * 0.2 + keyTermsRatio * 0.3) * 150;
-            
-            // سقف 85 لضمان بقاء منتجات AI دائماً في القمة
             const finalScore = Math.min(combinedScore, 85);
             
-            // 🔥 معايير متساهلة للمطابقة (أي شرط يكفي)
-            const isAccessory = /case|coque|housse|غطاء|حافظة|protector|sticker|skin|sleeve|stand|holder|حماية|ملصق|cable|charger|كابل|شاحن|bag|pouch|mount|clip|bracket|adapter/i.test(it.title.toLowerCase());
-            const originalIsAccessory = /case|coque|housse|غطاء|حافظة|protector|sticker|skin|sleeve|stand|holder|حماية|ملصق|cable|charger|كابل|شاحن|bag|pouch|mount|clip|bracket|adapter/i.test(cleanOriginalTitle);
+            // 🔥 منطق جديد: افتراضياً "مطابق" إلا إذا كان ملحقاً واضحاً
+            const itemIsAccessory = accessoryKeywords.test(itemTitleLower);
+            const isActualAccessory = itemIsAccessory && !originalIsAccessory;
             
-            const isActualAccessory = isAccessory && !originalIsAccessory;
-            
-            const isExact = !isActualAccessory && (
-                keyTermsRatio >= 0.35 ||       // 35% من الكلمات المهمة موجودة
-                origJaccard >= 0.15 ||         // تشابه Jaccard معقول جداً
-                weightedSimilarity >= 0.12     // تشابه مع المراجع
-            );
+            // فقط الملحقات الواضحة أو المنتجات المختلفة تماماً تُصنّف كمشابهة
+            const isExact = !isActualAccessory;
 
             return { ...it, finalScore, isExact };
         });
@@ -176,7 +153,7 @@ export default {
         scoredRemaining.sort((a, b) => b.finalScore - a.finalScore);
 
         // ==========================================
-        // المرحلة 4: الدمج النهائي
+        // المرحلة 4: الدمج
         // ==========================================
         const finalItems = [...scoredAIItems, ...scoredRemaining];
 
@@ -192,7 +169,7 @@ export default {
     }
 
     // ==========================================
-    // الكود القديم (جلب المنتجات) - لم يتغير
+    // الكود القديم (جلب المنتجات)
     // ==========================================
     let keyword = url.searchParams.get("q"); 
     const originalTitle = url.searchParams.get("originalTitle") || ""; 
@@ -253,7 +230,7 @@ export default {
 };
 
 // ==========================================
-// 🧠 دوال الذكاء الاصطناعي والاستخراج
+// 🧠 دوال مساعدة
 // ==========================================
 async function extractKeywordsWithAI(title, env) {
     try {
