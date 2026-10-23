@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Lean & Fast Worker (0.2 neurons/op)
+   Smart Shopper - Lean & Fast Worker (Fixed)
    ============================================ */
 
 const CORS = {
@@ -16,9 +16,6 @@ export default {
 
     const url = new URL(request.url);
 
-    // ==========================================
-    // 🔥 SORT ENDPOINT - Lean Hybrid (TF-IDF + 10 AI Anchors)
-    // ==========================================
     if (request.method === "POST" && url.pathname === "/sort") {
       const startTime = Date.now();
       
@@ -30,7 +27,7 @@ export default {
           return json({ success: true, data: items || [] });
         }
 
-        console.log(`\n⚡ === LEAN SORT START ===`);
+        console.log(`\n⚡ === SORT START ===`);
         console.log(`📝 Original: "${originalTitle}"`);
         console.log(`📦 Items: ${items.length}`);
 
@@ -51,9 +48,8 @@ export default {
           .split(/\s+/)
           .filter(w => w.length > 2 && !STOP_WORDS.has(w));
 
-        // Build vocabulary & IDF
         const docTokens = items.map(it => tokenize(it.title));
-        const df = {}; // document frequency
+        const df = {};
         const N = items.length;
 
         docTokens.forEach(tokens => {
@@ -66,7 +62,6 @@ export default {
           idf[term] = Math.log((N + 1) / (df[term] + 1)) + 1;
         }
 
-        // TF-IDF vectors (sparse)
         const tfidfVectors = docTokens.map(tokens => {
           const tf = {};
           tokens.forEach(t => { tf[t] = (tf[t] || 0) + 1; });
@@ -85,7 +80,6 @@ export default {
           if (idf[term]) originalVec[term] = originalTf[term] * idf[term];
         }
 
-        // Cosine similarity between original and each item
         const cosine = (vecA, vecB) => {
           let dot = 0, na = 0, nb = 0;
           for (const t in vecA) { na += vecA[t] * vecA[t]; }
@@ -105,7 +99,6 @@ export default {
           return inter / union;
         };
 
-        // Score each item locally
         let scored = items.map((it, i) => {
           const cos = cosine(originalVec, tfidfVectors[i]);
           const jac = jaccard(originalTokens, docTokens[i]);
@@ -117,7 +110,7 @@ export default {
         console.log(`📊 TextSim range: ${scored[0]?._textSim.toFixed(3)} → ${scored[scored.length-1]?._textSim.toFixed(3)}`);
 
         // ============================================
-        // PHASE 2: Select 10 Diverse Anchors (0 neurons)
+        // PHASE 2: Select 10 Diverse Anchors (FIXED)
         // ============================================
         const anchors = [];
         const n = scored.length;
@@ -126,20 +119,25 @@ export default {
         if (numAnchors <= 6) {
           anchors.push(...scored.slice(0, numAnchors));
         } else {
-          // 5 top
+          // 🔥 FIX: 5 top + 3 middle + 1 lower-middle + 1 random
+          // (تم تقليل bottom anchors لتجنب bias نحو Similar)
           anchors.push(...scored.slice(0, 5));
-          // 2 middle
-          const mid = Math.floor(n / 2);
+          
+          // 3 from middle range (not bottom!)
+          const mid = Math.floor(n * 0.4);
           anchors.push(scored[mid]);
           anchors.push(scored[Math.min(mid + 1, n - 1)]);
-          // 2 bottom
-          anchors.push(scored[n - 2]);
-          anchors.push(scored[n - 1]);
+          anchors.push(scored[Math.min(mid + 2, n - 1)]);
+          
+          // 1 lower-middle (not the absolute bottom)
+          const lowerMid = Math.floor(n * 0.75);
+          anchors.push(scored[lowerMid]);
+          
           // 1 random
-          anchors.push(scored[5 + Math.floor(Math.random() * Math.max(1, n - 10))]);
+          const randIdx = 5 + Math.floor(Math.random() * Math.max(1, n - 10));
+          anchors.push(scored[randIdx]);
         }
 
-        // Deduplicate
         const anchorIds = new Set();
         const uniqueAnchors = anchors.filter(a => {
           if (anchorIds.has(a.id)) return false;
@@ -152,23 +150,23 @@ export default {
         console.log(`🎯 Selected ${uniqueAnchors.length} anchors`);
 
         // ============================================
-        // PHASE 3: AI Embeddings for 10 Anchors Only (~0.2 neurons)
+        // PHASE 3: AI Embeddings for anchors only
         // ============================================
         let anchorVectors = [];
         try {
           const anchorTitles = uniqueAnchors.map(a => a.title);
           const emb = await env.AI.run('@cf/baai/bge-m3', { text: anchorTitles });
           anchorVectors = emb.data;
-          console.log(`🧠 Generated ${anchorVectors.length} anchor embeddings`);
         } catch (e) {
           console.log(`⚠️ Embedding failed: ${e.message.substring(0, 60)}`);
-          // Fallback: use TF-IDF vectors (already have)
         }
 
         // ============================================
-        // PHASE 4: Classify anchors by text similarity (local rules)
+        // PHASE 4: Classify anchors (FIXED classification)
         // ============================================
         const origClass = classifyTitle(originalTitle);
+        console.log(`🧠 Original: ${origClass.type}/${origClass.acc}`);
+        
         const exactAnchors = [];
         const similarAnchors = [];
 
@@ -178,9 +176,10 @@ export default {
           anchor._isExact = isExact;
           anchor._score = 1000 - i * 10;
           anchor._vec = anchorVectors[i] || null;
+          anchor._cls = cls;
           
           const icon = isExact ? '✅' : '❌';
-          console.log(`  ${icon} "${anchor.title.substring(0, 45)}" → ${isExact ? 'EXACT' : 'SIMILAR'}`);
+          console.log(`  ${icon} "${anchor.title.substring(0, 45)}" → ${cls.type}/${cls.acc}`);
           
           if (isExact) exactAnchors.push(anchor);
           else similarAnchors.push(anchor);
@@ -189,34 +188,14 @@ export default {
         console.log(`📌 Exact: ${exactAnchors.length}, Similar: ${similarAnchors.length}`);
 
         // ============================================
-        // PHASE 5: Classify remaining (Local TF-IDF + optional AI check)
+        // PHASE 5: Classify remaining (FIXED - no bias!)
         // ============================================
-        // Use anchor centroids (if embeddings available) OR text similarity
-        let exactCentroid = null;
-        let similarCentroid = null;
-
-        if (anchorVectors.length > 0) {
-          if (exactAnchors.length > 0) {
-            exactCentroid = averageVectors(exactAnchors.map(a => a._vec).filter(v => v));
-          }
-          if (similarAnchors.length > 0) {
-            similarCentroid = averageVectors(similarAnchors.map(a => a._vec).filter(v => v));
-          }
-        }
-
-        // Precompute TF-IDF for remaining (already have tfidfVectors)
-        remaining.forEach((item, idx) => {
-          // Find original index
+        remaining.forEach((item) => {
           const originalIdx = items.findIndex(x => x.id === item.id);
           const itemVec = tfidfVectors[originalIdx] || {};
-          
-          // Local text similarity (already computed)
           const textSim = item._textSim;
           
-          // If we have centroids, use them (requires embeddings for item, which we don't have)
-          // So we rely on textSim + anchor similarity via TF-IDF
-          
-          // Compute avg TF-IDF cosine to exact anchors & similar anchors
+          // Similarity to exact/similar anchors via TF-IDF
           const avgCosToExact = exactAnchors.length > 0
             ? exactAnchors.reduce((sum, a) => {
                 const aIdx = items.findIndex(x => x.id === a.id);
@@ -231,29 +210,38 @@ export default {
               }, 0) / similarAnchors.length
             : 0;
 
-          // Decision logic
+          // 🔥 FIX: Primary signal = local classification
+          const itemClass = classifyTitle(item.title);
+          const classMatch = isSameType(itemClass, origClass, textSim);
+          
           let isExact;
           
-          if (exactAnchors.length === 0) {
-            // No exact anchors → rely on textSim
-            isExact = textSim >= 0.12;
-          } else if (similarAnchors.length === 0) {
-            // No similar anchors → all similar to exact are exact
-            isExact = avgCosToExact >= 0.15 || textSim >= 0.10;
+          if (classMatch) {
+            // Classification says same type → likely Exact
+            // Require minimal text similarity to confirm
+            isExact = textSim >= 0.05 || avgCosToExact >= 0.10;
           } else {
-            // Compare to both
-            const exactScore = avgCosToExact * 0.5 + textSim * 0.5;
-            const similarScore = avgCosToSimilar * 0.7 + (1 - textSim) * 0.3;
-            isExact = exactScore > similarScore;
-          }
-
-          // Absolute floor
-          if (isExact && textSim < 0.04 && avgCosToExact < 0.10) {
+            // Classification says different → Similar
             isExact = false;
+          }
+          
+          // 🔥 Rescue 1: Very high text similarity always wins
+          if (!isExact && textSim >= 0.20) {
+            isExact = true;
+          }
+          
+          // 🔥 Rescue 2: Very close to exact anchors
+          if (!isExact && avgCosToExact >= 0.30 && textSim >= 0.04) {
+            isExact = true;
+          }
+          
+          // 🔥 Rescue 3: If similar anchors are absent, be more lenient
+          if (!isExact && similarAnchors.length === 0 && avgCosToExact >= 0.15) {
+            isExact = true;
           }
 
           item._isExact = isExact;
-          item._score = textSim * 100 + (isExact ? 40 : 0) + avgCosToExact * 20;
+          item._score = textSim * 100 + (isExact ? 60 : 0) + avgCosToExact * 40;
         });
 
         // ============================================
@@ -271,7 +259,7 @@ export default {
         console.log(`📊 Total: ${all.length} | Exact: ${exactCount} | Similar: ${all.length - exactCount}`);
 
         const final = all.map(it => {
-          const { _cos, _jac, _textSim, _isExact, _score, _vec, ...clean } = it;
+          const { _cos, _jac, _textSim, _isExact, _score, _vec, _cls, ...clean } = it;
           return { ...clean, isExact: _isExact || false, finalScore: _score || 0 };
         });
 
@@ -283,9 +271,7 @@ export default {
       }
     }
 
-    // ==========================================
-    // 🔍 FETCH ENDPOINT (unchanged)
-    // ==========================================
+    // FETCH ENDPOINT (unchanged)
     let keyword = url.searchParams.get("q");
     const originalTitle = url.searchParams.get("originalTitle") || "";
     const page = parseInt(url.searchParams.get("page") || "1");
@@ -329,7 +315,7 @@ export default {
 };
 
 // ============================================
-// 🧠 Helper: Local classification rules
+// 🧠 FIXED Classification - Handles compound patterns
 // ============================================
 function classifyTitle(title) {
   const lower = title.toLowerCase().trim();
@@ -337,17 +323,48 @@ function classifyTitle(title) {
   const accessories = ['case','cover','strap','band','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
   const mainProducts = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
   
+  // 🔥 FIX 1: Starts with "for"/"compatible" → accessory
   if (/^(for|compatible|replacement|suitable|fit for|fits)\s/i.test(lower)) {
     return { type: 'accessory', acc: true };
   }
   
+  // 🔥 FIX 2: Compound patterns (accessory + main product)
+  // e.g., "watch strap", "phone case", "camera lens protector"
+  // These MUST be checked BEFORE individual main products
+  for (const acc of accessories) {
+    for (const main of mainProducts) {
+      // "watch strap" or "watch leather strap"
+      const pattern1 = new RegExp(`\\b${main}\\b.*\\b${acc}\\b`, 'i');
+      // "strap for watch" - handled by "for" rule above
+      // "strap watch" (less common)
+      const pattern2 = new RegExp(`\\b${acc}\\b.*\\b${main}\\b`, 'i');
+      
+      if (pattern1.test(lower) || pattern2.test(lower)) {
+        // If found "X with Y", check for "with" → main product
+        if (/\bwith\b/i.test(lower)) {
+          return { type: main, acc: false };
+        }
+        return { type: acc, acc: true };
+      }
+    }
+  }
+  
+  // 3. "X with Y" → main product
   if (/\bwith\b/i.test(lower)) {
     for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
     return { type: 'main', acc: false };
   }
   
+  // 4. Only accessories (no main product mentioned)
+  let hasMain = false;
+  for (const w of mainProducts) if (lower.includes(w)) hasMain = true;
+  
+  if (!hasMain) {
+    for (const w of accessories) if (lower.includes(w)) return { type: w, acc: true };
+  }
+  
+  // 5. Main products only
   for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
-  for (const w of accessories) if (lower.includes(w)) return { type: w, acc: true };
   
   return { type: '', acc: false };
 }
@@ -383,30 +400,6 @@ function areSynonyms(t1, t2) {
   return false;
 }
 
-function averageVectors(vectors) {
-  if (!vectors.length) return null;
-  const dim = vectors[0].length;
-  const avg = new Array(dim).fill(0);
-  for (const v of vectors) {
-    for (let i = 0; i < dim; i++) avg[i] += v[i];
-  }
-  for (let i = 0; i < dim; i++) avg[i] /= vectors.length;
-  return avg;
-}
-
-function cosineSimilarity(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-// ============================================
-// 🧠 Extract keywords (for search - unchanged)
-// ============================================
 async function extractKeywordsWithAI(title, env) {
   try {
     const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
@@ -427,9 +420,6 @@ async function extractKeywordsWithAI(title, env) {
   }
 }
 
-// ============================================
-// 📦 Parse HTML (unchanged)
-// ============================================
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
