@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Strict 26 + US Fallback)
+   Smart Shopper - Cloudflare Worker (Multilingual AI Fixed)
    ============================================ */
 
 const CORS = {
@@ -15,7 +15,8 @@ const STOP_WORDS = new Set([
   'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
   'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
   'sans','fil','sur','pour','avec','les','des','une','dans','par','plus','gratuit','livraison',
-  'nouveau','promo','solde','chez','of','to','in','on','is','by','at','from','or','as'
+  'nouveau','promo','solde','chez','of','to','in','on','is','by','at','from','or','as',
+  've', 'ile', 'için', 'bir', 'bu', 've', 'en', 'çok', 'daha', 'gibi', 'olan', 'adet', 'takım'
 ]);
 
 // 🔥 قائمة الدول الناجحة فقط (26 دولة)
@@ -40,6 +41,16 @@ function cosineSimilarity(a, b) {
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// 🔥 دالة الاحتياطي المحلي (تنظيف العنوان الأصلي بدون AI)
+function cleanTitleFallback(title) {
+    const words = title.replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF]/g, ' ')
+                      .replace(/\s+/g, ' ')
+                      .trim()
+                      .split(' ');
+    const useful = words.filter(w => w.length > 1 && !STOP_WORDS.has(w.toLowerCase()));
+    return useful.slice(0, 5).join(' ');
 }
 
 export default {
@@ -99,7 +110,7 @@ export default {
     }
 
     // ==========================================
-    // 🔍 FETCH ENDPOINT (Strict 26 + US Fallback)
+    // 🔍 FETCH ENDPOINT (Multilingual AI Fixed)
     // ==========================================
     const originalTitle = url.searchParams.get("originalTitle") || url.searchParams.get("q") || "";
     const page = parseInt(url.searchParams.get("page") || "1");
@@ -112,49 +123,61 @@ export default {
     try {
       if (!originalTitle) return json({ success: false, message: "Missing title" }, 400);
 
-      let searchQuery = originalTitle;
+      let searchQuery = cleanTitleFallback(originalTitle); // القيمة الافتراضية
+      
+      // 🔥 تحسين الـ Prompt والتحقق من صحة النتيجة
       if (env.AI) {
         try {
           const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
             messages: [
-              { role: 'system', content: `Convert product titles into HIGHLY ACCURATE English search queries (3-6 words). Keep brands, models, and main product types. Output ONLY the query.` },
+              { 
+                role: 'system', 
+                content: `You are an e-commerce search expert. Translate and extract the main product type, brand, and model from the title into English. Output ONLY 3 to 5 English keywords separated by spaces. Do NOT include colors, sizes, numbers, or promotional words. Do NOT write sentences. If the input is already English, just clean it.`
+              },
               { role: 'user', content: originalTitle }
-            ], max_tokens: 30
+            ],
+            max_tokens: 30
           });
+          
           if (response?.response) {
-            const clean = response.response.trim().split(/\n/)[0].replace(/[^\w\s\-]/g, ' ').replace(/\s+/g, ' ').trim();
-            if (clean.split(' ').length >= 2) searchQuery = clean;
+            let clean = response.response.trim().split(/\n/)[0].replace(/[^\w\s\-]/g, ' ').replace(/\s+/g, ' ').trim();
+            
+            // التحقق من أن النتيجة صالحة (على الأقل كلمتان، وليست مجرد رموز)
+            if (clean.split(' ').length >= 2 && /[a-zA-Z]/.test(clean)) {
+              searchQuery = clean;
+              console.log(`🤖 AI Extracted: "${searchQuery}"`);
+            } else {
+              console.log(`⚠️ AI returned invalid query: "${clean}". Using local fallback.`);
+            }
           }
-        } catch (e) {}
+        } catch (e) {
+          console.log(`⚠️ AI failed: ${e.message}. Using local fallback.`);
+        }
       }
 
-      // 🔥 1. المنطق الصارم: 26 دولة فقط، وإلا أمريكا
       let finalCountry = reqCountry.toLowerCase();
-      let finalCurrency = reqCurrency;
+      let finalCurrency = reqCurrency; 
       let finalLang = 'en';
       
       if (!PASSED_PROXIES.includes(finalCountry)) {
           finalCountry = 'us';
           finalCurrency = 'USD';
           finalLang = 'en';
-          console.log(`⚠️ Country ${reqCountry} not in list. Forced fallback to US.`);
       } else {
-          // تعيين اللغة بناءً على الدولة الناجحة
           if (['sa', 'ae'].includes(finalCountry)) finalLang = 'ar';
           else if (['fr'].includes(finalCountry)) finalLang = 'fr';
           else if (['de'].includes(finalCountry)) finalLang = 'de';
           else if (['es', 'mx'].includes(finalCountry)) finalLang = 'es';
           else if (['it'].includes(finalCountry)) finalLang = 'it';
           else if (['nl'].includes(finalCountry)) finalLang = 'nl';
-          else if (['pl', 'cz', 'ro'].includes(finalCountry)) finalLang = 'en'; // نستخدم الإنجليزية للدول التي لا نملك لغتها
+          else if (['pl', 'cz', 'ro', 'ch'].includes(finalCountry)) finalLang = 'en';
           else if (['tr'].includes(finalCountry)) finalLang = 'tr';
           else if (['br'].includes(finalCountry)) finalLang = 'pt';
           else if (['jp'].includes(finalCountry)) finalLang = 'ja';
           else if (['kr'].includes(finalCountry)) finalLang = 'ko';
-          else if (['id', 'th', 'ph'].includes(finalCountry)) finalLang = 'en'; 
+          else if (['id', 'th', 'ph', 'hk', 'in', 'cn'].includes(finalCountry)) finalLang = 'en'; 
       }
 
-      // 🔥 2. تحديد النطاق المناسب
       let baseDomain = 'www.aliexpress.com';
       let useBrowser = 'false';
 
@@ -169,11 +192,11 @@ export default {
 
       const searchUrl = `https://${baseDomain}/w/wholesale-${searchQuery.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
       const acceptLang = `${finalLang}-${finalCountry.toUpperCase()},${finalLang};q=0.9,en;q=0.8`;
+      
       const cookieStr = `aep_usuc_f=site=glo&c_tp=${finalCurrency}&region=${finalCountry.toUpperCase()}&b_locale=${finalLang}_${finalCountry.toUpperCase()}`;
 
-      console.log(`🔍 Search: "${searchQuery}" | Country: ${finalCountry} | Currency: ${finalCurrency} | Domain: ${baseDomain}`);
+      console.log(`🔍 Final Search: "${searchQuery}" | Country: ${finalCountry} | Currency: ${finalCurrency} | Domain: ${baseDomain}`);
 
-      // 3. إرسال الطلب إلى ScrapingAnt
       const antUrl = new URL('https://api.scrapingant.com/v2/general');
       antUrl.searchParams.set('url', searchUrl);
       antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
@@ -196,7 +219,7 @@ export default {
       const products = parseItems(html);
       if (products.length === 0) return json({ success: false, message: "لا توجد منتجات.", aiQuery: searchQuery });
 
-      return json({ success: true, data: products, aiQuery: searchQuery });
+      return json({ success: true, data: products, aiQuery: searchQuery, currency: finalCurrency });
 
     } catch (error) {
       return json({ success: false, error: error.message }, 500);
