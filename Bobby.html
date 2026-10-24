@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Content Script (Localized & Fast)
+   Smart Shopper - Content Script (Country & Currency)
    ============================================ */
    (function () {
     'use strict';
@@ -221,30 +221,35 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
-    function getLocaleFromSubdomain() {
-        const host = location.hostname;
-        const sub = host.split('.')[0];
+    // 🔥 قراءة الدولة والعملة من المتجر
+    function getStoreSettings() {
+        let country = 'US';
+        let currency = 'USD';
 
-        const localeMap = {
-            'es': { country: 'ES', lang: 'es' },
-            'fr': { country: 'FR', lang: 'fr' },
-            'de': { country: 'DE', lang: 'de' },
-            'it': { country: 'IT', lang: 'it' },
-            'ru': { country: 'RU', lang: 'ru' },
-            'pt': { country: 'PT', lang: 'pt' },
-            'nl': { country: 'NL', lang: 'nl' },
-            'pl': { country: 'PL', lang: 'pl' },
-            'tr': { country: 'TR', lang: 'tr' },
-            'ar': { country: 'SA', lang: 'ar' },
-            'ja': { country: 'JP', lang: 'ja' },
-            'ko': { country: 'KR', lang: 'ko' },
-            'he': { country: 'IL', lang: 'he' },
-            'vi': { country: 'VN', lang: 'vi' },
-            'th': { country: 'TH', lang: 'th' },
-            'id': { country: 'ID', lang: 'id' }
-        };
+        try {
+            const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+            if (ck) {
+                const params = new URLSearchParams(decodeURIComponent(ck[1]));
+                const region = params.get('region');
+                const ctp = params.get('c_tp');
+                if (region && region.length === 2) country = region.toUpperCase();
+                if (ctp) currency = ctp.toUpperCase();
+                console.log(`[Smart Shopper] Cookie: Country=${country}, Currency=${currency}`);
+                return { country, currency };
+            }
+        } catch (e) {}
 
-        return localeMap[sub] || { country: 'US', lang: 'en' };
+        try {
+            if (window._dida_config_ && window._dida_config_._init_data_ && window._dida_config_._init_data_.data) {
+                const data = window._dida_config_._init_data_.data;
+                if (data.region) country = data.region.toUpperCase();
+                if (data.currency) currency = data.currency.toUpperCase();
+                console.log(`[Smart Shopper] Page JS: Country=${country}, Currency=${currency}`);
+                return { country, currency };
+            }
+        } catch (e) {}
+
+        return { country: 'US', currency: 'USD' };
     }
   
     function applySort() {
@@ -423,17 +428,15 @@
     function prefetchBackgroundPages() {
       if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) return;
       
-      // 🔥 تم إزالة شرط التوقف المبكر عن الصفحة 3 ليصبح الحد دائماً 3 صفحات
-      
       isBackgroundFetching = true; updateFooter(); syncFullscreen();
       const existingIds = allFetchedItems.map(x => x.id);
-      const locale = getLocaleFromSubdomain();
+      const locale = getStoreSettings();
   
       chrome.runtime.sendMessage({ 
           type: 'SMART_LOAD_MORE', title: currentSearchTitle, startPage: nextPageToFetch, 
           existingIds: existingIds, productId: currentProductId, 
           country: locale.country, 
-          lang: locale.lang, 
+          currency: locale.currency, 
           cookie: getAliExpressCookie()
       }, (resp) => {
           isBackgroundFetching = false;
@@ -465,12 +468,12 @@
       document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x.dataset.i === '0'));
       searchState = { running: true, complete: false, startTime: Date.now(), totalItems: 0 };
       skeleton(); updateProgress();
-      const locale = getLocaleFromSubdomain();
+      const locale = getStoreSettings();
   
       chrome.runtime.sendMessage({ 
           type: 'SMART_SEARCH', title, productId: productId, 
           country: locale.country, 
-          lang: locale.lang, 
+          currency: locale.currency, 
           cookie: getAliExpressCookie()
       }, resp => {
         if (!resp || !document.getElementById(PANEL_ID)) { searchState.running = false; updateFooter(); return; }
