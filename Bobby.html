@@ -1,7 +1,6 @@
 /* ============================================
    Smart Shopper - Cloudflare Worker
-   - Search: AI-powered (Llama analyzes title)
-   - Sort: Related-First logic (local)
+   AI selects 5 exact anchors → classifies all
    ============================================ */
 
 const CORS = {
@@ -20,31 +19,6 @@ const STOP_WORDS = new Set([
   'nouveau','promo','solde','chez','of','to','in','on','is','by','at','from','or','as'
 ]);
 
-const DOMAINS = {
-  watch: ['watch','wristwatch','smartwatch','wrist','montre','horloge','band','strap'],
-  phone: ['iphone','samsung','xiaomi','huawei','oneplus','galaxy','pixel','phone','smartphone','mobile','telephone','redmi','poco','oppo','vivo'],
-  audio: ['headphone','earphone','earbud','headset','speaker','airpod','casque','écouteur','enceinte','soundbar'],
-  computer: ['laptop','notebook','macbook','chromebook','desktop','computer','ordinateur','pc'],
-  camera: ['camera','lens','dslr','mirrorless','gopro','caméra','appareil','webcam'],
-  keyboard_mouse: ['keyboard','mouse','trackpad','keycap','clavier','souris'],
-  display: ['monitor','display','screen','television','écran','télé','tv','projector'],
-  storage: ['ssd','hdd','flash','usb drive','memory card','hard drive','disque','nvme'],
-  tablet: ['ipad','tablet','tab','tablette'],
-  gaming: ['playstation','xbox','nintendo','switch','gaming','gamer','console','controller','manette'],
-  printer: ['printer','imprimante','scanner','toner','cartridge','cartouche'],
-  smart_home: ['alexa','google home','smart plug','smart bulb','domotique','echo','nest'],
-  power: ['power bank','battery','powerbank','batterie','chargeur','charger'],
-  cable: ['usb cable','charging cable','type-c','lightning','hdmi','câble','cable','cord'],
-  bag: ['backpack','handbag','wallet','purse','sac','portefeuille','bag'],
-};
-
-const ACCESSORY_HINTS = {
-  watch: ['strap','band','bracelet','buckle','clasp'],
-  phone: ['case','cover','protector','shell','pouch','sleeve'],
-  tablet: ['case','cover','protector','shell'],
-  audio: ['case','cover','cushion','pad','earpads'],
-};
-
 function tokenize(text) {
   return text.toLowerCase()
     .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
@@ -52,127 +26,125 @@ function tokenize(text) {
     .filter(w => w.length > 2 && !STOP_WORDS.has(w));
 }
 
-function jaccardSimilarity(tokens1, tokens2) {
-  if (!tokens1.length || !tokens2.length) return 0;
-  const set1 = new Set(tokens1);
-  const set2 = new Set(tokens2);
-  const intersection = [...set1].filter(t => set2.has(t)).length;
-  const union = new Set([...set1, ...set2]).size;
-  return union > 0 ? intersection / union : 0;
+function jaccardSimilarity(a, b) {
+  if (!a.length || !b.length) return 0;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const inter = [...setA].filter(t => setB.has(t)).length;
+  const union = new Set([...setA, ...setB]).size;
+  return union > 0 ? inter / union : 0;
 }
 
-function classifyDomain(title) {
-  const lower = title.toLowerCase();
-  for (const [domain, keywords] of Object.entries(DOMAINS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw)) return domain;
-    }
+function cosineSimilarity(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
   }
-  for (const [domain, keywords] of Object.entries(ACCESSORY_HINTS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw)) return domain;
-    }
-  }
-  return null;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
 // ============================================
-// 🧠 AI: تحويل العنوان إلى query بحث ذكي
+// AI: تصنيف دفعة عناوين
 // ============================================
-async function aiGenerateSearchQuery(originalTitle, env) {
-  const systemPrompt = `You are an AliExpress search expert. Convert product titles into SHORT SEARCH QUERIES (3-6 words) to find the EXACT same product on AliExpress.
+async function classifyBatch(titles, env) {
+  const titlesList = titles.map((t, i) => `${i}: "${t}"`).join('\n');
+  
+  const prompt = `Classify each product title. Return ONLY a valid JSON array.
 
-CRITICAL RULES:
-1. Output in ENGLISH (translate from any language)
-2. KEEP brand names (Apple, Samsung, Xiaomi, Sony, Nike, etc.)
-3. KEEP model numbers (iPhone 15, Galaxy S24, Redmi Note 13, AirPods Pro)
-4. KEEP product type (watch, phone, headphones, strap, case, cable)
-5. KEEP key features (wireless, bluetooth, leather, 22mm, 5G)
-6. REMOVE promotions (hot sale, free shipping, best quality, new, original, wholesale, dropshipping, high quality, high copy)
-7. REMOVE vague adjectives (beautiful, luxury, premium, super, ultra)
-8. Output 3-6 words MAXIMUM
-9. Output ONLY the query. NO quotes, NO explanations, NO punctuation.
+${titlesList}
 
-Examples:
-"Hot Sale Wireless Bluetooth Headphones Noise Cancelling for iPhone"
-→ wireless bluetooth headphones noise cancelling
+Format: [{"i":0, "type":"<type>", "acc":<bool>}]
 
-"Smart Watch Leather Strap 22mm for Apple Watch Series 8"
-→ leather watch strap 22mm
+Rules:
+- type: 1-2 word product type (strap, case, cable, watch, phone, headphone, speaker, camera)
+- acc: true if ACCESSORY (strap, case, cable, charger, protector, holder, stand, mount, adapter, bag, sleeve, skin)
+- acc: false if MAIN PRODUCT (watch, phone, headphone, speaker, camera, laptop)
+- "X for Y" or "X compatible" → acc: true
+- "Y with X" → acc: false (the Y)
 
-"Original Xiaomi Redmi Note 13 Pro 5G Smartphone 256GB Global"
-→ xiaomi redmi note 13 pro 5g
-
-"Coque iPhone 15 Pro Max Silicone Souple Housse"
-→ iphone 15 pro max silicone case
-
-"حزام ساعة أبل جلد طبيعي 22 ملم للرجال"
-→ apple watch leather strap 22mm
-
-"New Original High Quality USB C Cable Fast Charging 3A Type-C"
-→ usb c cable 3a fast charging
-
-"2024 Men's Running Shoes Breathable Sneakers Casual Sport"
-→ running shoes breathable sneakers`;
+Return ONLY JSON array, no markdown.`;
 
   try {
     const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Convert this title: "${originalTitle}"` }
+        { role: 'system', content: 'Output ONLY valid JSON arrays. No markdown.' },
+        { role: 'user', content: prompt }
       ],
-      max_tokens: 30,
-      temperature: 0.1
+      max_tokens: 500
     });
     
-    if (!response?.response) return '';
-    
-    let query = response.response.trim()
-      .replace(/^["'`]|["'`]$/g, '')
-      .split(/\n/)[0]
-      .replace(/[^\w\s\-\.\u0600-\u06FF]/g, '')
-      .split(/\s+/)
-      .slice(0, 6)
-      .join(' ')
-      .trim();
-    
-    // التحقق من صحة النتيجة
-    if (query.length < 3 || query.split(' ').length < 2) return '';
-    
-    return query;
+    if (response?.response) {
+      let clean = response.response.trim()
+        .replace(/```json/gi, '').replace(/```/g, '').trim();
+      const start = clean.indexOf('[');
+      const end = clean.lastIndexOf(']');
+      if (start >= 0 && end > start) {
+        clean = clean.slice(start, end + 1);
+        const parsed = JSON.parse(clean);
+        if (Array.isArray(parsed)) {
+          const map = new Map();
+          parsed.forEach(p => {
+            if (typeof p.i === 'number') {
+              map.set(p.i, {
+                type: String(p.type || '').toLowerCase().trim(),
+                acc: p.acc === true
+              });
+            }
+          });
+          return titles.map((_, i) => map.get(i) || { type: '', acc: false });
+        }
+      }
+    }
   } catch (e) {
-    console.error('AI query generation failed:', e.message);
-    return '';
+    console.log(`Classify error: ${e.message}`);
   }
+  return titles.map(() => ({ type: '', acc: false }));
 }
 
 // ============================================
-// 🔧 Fallback: بحث محلي (إذا فشل AI)
+// مقارنة التصنيفين
 // ============================================
-function localSearchQuery(title) {
-  const words = title
-    .replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ');
+function isSameType(itemClass, origClass, textSim) {
+  if (!itemClass || !origClass) return textSim >= 0.12;
+  // If classification failed, fallback to text similarity
+  if (!itemClass.type || !origClass.type) return textSim >= 0.12;
   
-  const KEEP_SHORT = new Set(['usb','led','lcd','tv','pc','hd','uhd','4k','8k','2k','hdmi','sd','sim','ip','ai','pro','max','air','mini']);
+  // Different category → different
+  if (itemClass.acc !== origClass.acc) return false;
   
-  const useful = words.filter(w => {
-    if (!w) return false;
-    const lower = w.toLowerCase();
-    if (STOP_WORDS.has(lower)) return false;
-    if (KEEP_SHORT.has(lower)) return true;
-    if (w.length < 2) return false;
-    if (/^\d{1,2}$/.test(w)) return false;
-    return true;
-  });
+  return areSynonyms(itemClass.type, origClass.type);
+}
+
+function areSynonyms(t1, t2) {
+  if (!t1 || !t2) return false;
+  if (t1 === t2) return true;
+  if (t1.includes(t2) || t2.includes(t1)) return true;
   
-  return useful.slice(0, 6).join(' ');
+  const groups = [
+    ['strap', 'band', 'bracelet', 'belt', 'wristband'],
+    ['case', 'cover', 'shell', 'housing'],
+    ['cable', 'wire', 'cord', 'line'],
+    ['charger', 'adapter', 'power'],
+    ['headphone', 'headset', 'earphone', 'earbud'],
+    ['phone', 'smartphone', 'cellphone', 'cell'],
+    ['watch', 'smartwatch', 'wristwatch'],
+    ['protector', 'film', 'glass', 'tempered'],
+    ['holder', 'stand', 'mount', 'bracket'],
+    ['bag', 'pouch', 'sleeve', 'pocket'],
+  ];
+  
+  for (const g of groups) {
+    const t1In = g.some(x => t1.includes(x));
+    const t2In = g.some(x => t2.includes(x));
+    if (t1In && t2In) return true;
+  }
+  return false;
 }
 
 // ============================================
-// 🚀 MAIN HANDLER
+// MAIN HANDLER
 // ============================================
 export default {
   async fetch(request, env, ctx) {
@@ -183,7 +155,7 @@ export default {
     const url = new URL(request.url);
 
     // ==========================================
-    // 🔥 SORT ENDPOINT
+    // 🎯 SORT ENDPOINT - AI selects 5 anchors
     // ==========================================
     if (request.method === "POST" && url.pathname === "/sort") {
       const startTime = Date.now();
@@ -199,79 +171,127 @@ export default {
         console.log(`\n=== SORT START ===`);
         console.log(`Original: "${originalTitle}" | Items: ${items.length}`);
 
-        const originalDomain = classifyDomain(originalTitle);
-        const originalTokens = tokenize(originalTitle);
+        // 1. ترتيب محلي حسب التشابه النصي
+        const scored = items.map(it => ({
+          ...it,
+          _textSim: jaccardSimilarity(tokenize(originalTitle), tokenize(it.title))
+        })).sort((a, b) => b._textSim - a._textSim);
+
+        // 2. أفضل 10 مرشحين للتحليل بالذكاء
+        const candidates = scored.slice(0, Math.min(10, scored.length));
+        const rest = scored.slice(candidates.length);
+
+        // 3. AI يصنّف العنوان الأصلي + المرشحين
+        let origClass = { type: '', acc: false };
+        let candidatesClasses = [];
         
-        const scored = items.map(it => {
-          const itemTokens = tokenize(it.title);
-          const itemDomain = classifyDomain(it.title);
-          const textSim = jaccardSimilarity(originalTokens, itemTokens);
-          
-          let isRelated = false;
-          let reason = '';
-          
-          // 1. نفس المجال
-          if (originalDomain && itemDomain && originalDomain === itemDomain) {
-            isRelated = true;
-            reason = 'same_domain';
+        try {
+          const classes = await classifyBatch([originalTitle, ...candidates.map(c => c.title)], env);
+          origClass = classes[0] || { type: '', acc: false };
+          candidatesClasses = classes.slice(1);
+          console.log(`🧠 Original: ${origClass.type}/${origClass.acc}`);
+        } catch (e) {
+          console.log(`⚠️ AI failed: ${e.message}`);
+        }
+
+        // 4. اختيار حتى 5 مراجع دقيقة
+        const exactAnchors = [];
+        for (let i = 0; i < candidates.length && exactAnchors.length < 5; i++) {
+          const itemClass = candidatesClasses[i];
+          const isMatch = isSameType(itemClass, origClass, candidates[i]._textSim);
+          if (isMatch) {
+            candidates[i]._isAnchor = true;
+            exactAnchors.push(candidates[i]);
           }
-          
-          // 2. كلمة مشتركة (4+ أحرف)
-          if (!isRelated) {
-            const shared = originalTokens.filter(t => itemTokens.includes(t) && t.length >= 4);
-            if (shared.length >= 1) {
-              isRelated = true;
-              reason = `shared:${shared[0]}`;
-            }
+        }
+
+        // Fallback: إذا لم يجد AI مراجع → أفضل 5 نصياً
+        if (exactAnchors.length === 0) {
+          console.log(`⚠️ No AI anchors, using top 5 by text`);
+          for (let i = 0; i < Math.min(5, candidates.length); i++) {
+            candidates[i]._isAnchor = true;
+            exactAnchors.push(candidates[i]);
           }
+        }
+
+        console.log(`⚓ ${exactAnchors.length} anchors:`);
+        exactAnchors.forEach((a, i) => console.log(`  ${i+1}. "${a.title.substring(0, 55)}"`));
+
+        // 5. Embeddings للمراجع فقط (منخفض التكلفة)
+        let anchorVectors = [];
+        try {
+          const emb = await env.AI.run('@cf/baai/bge-m3', {
+            text: exactAnchors.map(a => a.title)
+          });
+          anchorVectors = emb.data;
+        } catch (e) {
+          console.log(`⚠️ Embedding failed: ${e.message}`);
+        }
+
+        // 6. رموز المراجع للمقارنة المحلية
+        const anchorTokens = exactAnchors.map(a => new Set(tokenize(a.title)));
+        const anchorVectorsArr = anchorVectors;
+
+        // 7. تصنيف كل منتج
+        const exactItems = [];
+        const similarItems = [];
+
+        const classifyItem = (item, isAnchor) => {
+          const itemTokens = new Set(tokenize(item.title));
           
-          // 3. تشابه نصي عالي
-          if (!isRelated && textSim >= 0.10) {
-            isRelated = true;
-            reason = 'high_textSim';
+          // أقصى تشابه نصي مع أي مرجع
+          let maxAnchorSim = 0;
+          for (const aTokens of anchorTokens) {
+            const inter = [...itemTokens].filter(t => aTokens.has(t)).length;
+            const union = new Set([...itemTokens, ...aTokens]).size;
+            const sim = union > 0 ? inter / union : 0;
+            if (sim > maxAnchorSim) maxAnchorSim = sim;
           }
+
+          // إذا كان مرجع → Exact مباشرة
+          // وإلا → Exact إذا كان قريباً من المراجع أو التشابه النصي عالي
+          const isExact = isAnchor || maxAnchorSim >= 0.25 || item._textSim >= 0.12;
           
-          // 4. مجالان مجهولان + تشابه
-          if (!isRelated && !originalDomain && !itemDomain && textSim >= 0.05) {
-            isRelated = true;
-            reason = 'unknown_similar';
-          }
+          item._isExact = isExact;
+          item._score = (isAnchor ? 10000 : 0) + maxAnchorSim * 1000 + item._textSim * 100;
           
-          // 5. عنوان واحد مجهول + تشابه متوسط
-          if (!isRelated && (originalDomain || itemDomain) && textSim >= 0.08) {
-            isRelated = true;
-            reason = 'partial_similar';
-          }
-          
-          const isExact = isRelated;
-          const score = (isExact ? 1000 : 0) + textSim * 100;
-          
-          return { ...it, _isExact: isExact, _score: score };
+          if (isExact) exactItems.push(item);
+          else similarItems.push(item);
+        };
+
+        // المراجع → Exact
+        exactAnchors.forEach(a => classifyItem(a, true));
+        
+        // المرشحون الباقون
+        candidates.filter(c => !c._isAnchor).forEach(c => classifyItem(c, false));
+        
+        // الباقي
+        rest.forEach(r => classifyItem(r, false));
+
+        // 8. ترتيب Exact: المراجع أولاً، ثم حسب النتيجة
+        exactItems.sort((a, b) => (b._score || 0) - (a._score || 0));
+        
+        // 9. ترتيب Similar حسب النتيجة
+        similarItems.sort((a, b) => (b._score || 0) - (a._score || 0));
+
+        // 10. الدمج النهائي (Exact في القمة)
+        const final = [...exactItems, ...similarItems].map(it => {
+          const { _textSim, _isExact, _score, _isAnchor, ...clean } = it;
+          return { ...clean, isExact: _isExact };
         });
 
-        scored.sort((a, b) => {
-          if (a._isExact !== b._isExact) return b._isExact ? 1 : -1;
-          return (b._score || 0) - (a._score || 0);
-        });
-
-        const exactCount = scored.filter(s => s._isExact).length;
-        console.log(`✅ Sort done in ${Date.now() - startTime}ms | Total: ${scored.length} | Exact: ${exactCount} | Similar: ${scored.length - exactCount}`);
-
-        const final = scored.map(it => {
-          const { _isExact, _score, ...clean } = it;
-          return { ...clean, isExact: _isExact, finalScore: _score };
-        });
+        console.log(`✅ DONE in ${Date.now() - startTime}ms | Total: ${final.length} | Exact: ${exactItems.length} | Similar: ${similarItems.length}`);
 
         return json({ success: true, data: final });
 
       } catch (error) {
-        console.error('Sort error:', error.message);
+        console.error('❌ Sort error:', error.message);
         return json({ success: false, error: error.message }, 500);
       }
     }
 
     // ==========================================
-    // 🔍 FETCH ENDPOINT - AI-powered search
+    // 🔍 FETCH ENDPOINT (unchanged)
     // ==========================================
     const originalTitle = url.searchParams.get("originalTitle") || url.searchParams.get("q") || "";
     const page = parseInt(url.searchParams.get("page") || "1");
@@ -285,28 +305,21 @@ export default {
         return json({ success: false, message: "Missing title" }, 400);
       }
 
-      let searchQuery = '';
-
-      // 🔥 المرحلة 1: AI يحلل العنوان (فقط للصفحة الأولى)
-      if (page === 1 && env.AI) {
+      let searchQuery = originalTitle;
+      if (env.AI) {
         try {
-          searchQuery = await aiGenerateSearchQuery(originalTitle, env);
-          if (searchQuery) {
-            console.log(`🤖 AI query: "${searchQuery}"`);
+          const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+            messages: [
+              { role: 'system', content: 'Extract 3-6 English keywords for AliExpress search. Keep brands and models. Remove promotional words. Output ONLY keywords separated by spaces.' },
+              { role: 'user', content: originalTitle }
+            ],
+            max_tokens: 30
+          });
+          if (response?.response) {
+            const clean = response.response.trim().split(/\n/)[0].replace(/[^\w\s\-]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (clean.split(' ').length >= 2) searchQuery = clean;
           }
-        } catch (e) {
-          console.log(`⚠️ AI failed: ${e.message}`);
-        }
-      }
-
-      // 🔥 المرحلة 2: Fallback محلي
-      if (!searchQuery) {
-        searchQuery = localSearchQuery(originalTitle);
-        console.log(`🔧 Local query: "${searchQuery}"`);
-      }
-
-      if (!searchQuery) {
-        return json({ success: false, message: "Cannot generate query" }, 400);
+        } catch (e) {}
       }
 
       console.log(`🔍 Search: "${searchQuery}" | Page: ${page}`);
@@ -324,8 +337,6 @@ export default {
       }
 
       const products = parseItems(html);
-      console.log(`📦 Found ${products.length} products`);
-
       if (products.length === 0) {
         return json({ success: false, message: "لا توجد منتجات.", aiQuery: searchQuery });
       }
@@ -339,7 +350,7 @@ export default {
 };
 
 // ============================================
-// 📦 Parse HTML
+// Parse HTML
 // ============================================
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
@@ -354,7 +365,6 @@ function parseItems(html) {
     try {
       const id = o.productId || o.id || (o.item && o.item.productId);
       if (!id) continue;
-      
       const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
       const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
       
@@ -390,7 +400,7 @@ function extractText(v) {
   if (typeof v === 'string') return v;
   if (typeof v === 'number') return String(v);
   if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    const keys = ['displayTitle','text','title','value','formatedActivityPrice','formatedPrice','minActivityPrice','minPrice','price'];
     for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
     for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
   }
@@ -408,7 +418,6 @@ function extractJsonArray(html, marker) {
   if (i < 0) return null;
   const j = html.indexOf('[', i);
   if (j < 0) return null;
-  
   let depth = 0, inStr = false, esc = false;
   for (let k = j; k < html.length; k++) {
     const c = html[k];
