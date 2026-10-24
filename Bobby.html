@@ -1,72 +1,433 @@
 /* ============================================
-   Smart Shopper - Background Service Worker
-   Search is done on Cloudflare Worker (with AI)
+   Smart Shopper - Cloudflare Worker
+   - Search: AI-powered (Llama analyzes title)
+   - Sort: Related-First logic (local)
    ============================================ */
 
-const WORKER_URL = 'https://extension.smailsuit11.workers.dev/'; 
-const MAX_PAGES_TO_FETCH = 3; 
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
+const STOP_WORDS = new Set([
+  'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
+  'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
+  'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
+  'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
+  'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
+  'sans','fil','sur','pour','avec','les','des','une','dans','par','plus','gratuit','livraison',
+  'nouveau','promo','solde','chez','of','to','in','on','is','by','at','from','or','as'
+]);
 
-  if (msg.type === 'CHECK_CACHE') {
-    sendResponse({ ok: false });
-    return true;
+const DOMAINS = {
+  watch: ['watch','wristwatch','smartwatch','wrist','montre','horloge','band','strap'],
+  phone: ['iphone','samsung','xiaomi','huawei','oneplus','galaxy','pixel','phone','smartphone','mobile','telephone','redmi','poco','oppo','vivo'],
+  audio: ['headphone','earphone','earbud','headset','speaker','airpod','casque','écouteur','enceinte','soundbar'],
+  computer: ['laptop','notebook','macbook','chromebook','desktop','computer','ordinateur','pc'],
+  camera: ['camera','lens','dslr','mirrorless','gopro','caméra','appareil','webcam'],
+  keyboard_mouse: ['keyboard','mouse','trackpad','keycap','clavier','souris'],
+  display: ['monitor','display','screen','television','écran','télé','tv','projector'],
+  storage: ['ssd','hdd','flash','usb drive','memory card','hard drive','disque','nvme'],
+  tablet: ['ipad','tablet','tab','tablette'],
+  gaming: ['playstation','xbox','nintendo','switch','gaming','gamer','console','controller','manette'],
+  printer: ['printer','imprimante','scanner','toner','cartridge','cartouche'],
+  smart_home: ['alexa','google home','smart plug','smart bulb','domotique','echo','nest'],
+  power: ['power bank','battery','powerbank','batterie','chargeur','charger'],
+  cable: ['usb cable','charging cable','type-c','lightning','hdmi','câble','cable','cord'],
+  bag: ['backpack','handbag','wallet','purse','sac','portefeuille','bag'],
+};
+
+const ACCESSORY_HINTS = {
+  watch: ['strap','band','bracelet','buckle','clasp'],
+  phone: ['case','cover','protector','shell','pouch','sleeve'],
+  tablet: ['case','cover','protector','shell'],
+  audio: ['case','cover','cushion','pad','earpads'],
+};
+
+function tokenize(text) {
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+function jaccardSimilarity(tokens1, tokens2) {
+  if (!tokens1.length || !tokens2.length) return 0;
+  const set1 = new Set(tokens1);
+  const set2 = new Set(tokens2);
+  const intersection = [...set1].filter(t => set2.has(t)).length;
+  const union = new Set([...set1, ...set2]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function classifyDomain(title) {
+  const lower = title.toLowerCase();
+  for (const [domain, keywords] of Object.entries(DOMAINS)) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return domain;
+    }
   }
+  for (const [domain, keywords] of Object.entries(ACCESSORY_HINTS)) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return domain;
+    }
+  }
+  return null;
+}
 
-  if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
-    const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
+// ============================================
+// 🧠 AI: تحويل العنوان إلى query بحث ذكي
+// ============================================
+async function aiGenerateSearchQuery(originalTitle, env) {
+  const systemPrompt = `You are an AliExpress search expert. Convert product titles into SHORT SEARCH QUERIES (3-6 words) to find the EXACT same product on AliExpress.
+
+CRITICAL RULES:
+1. Output in ENGLISH (translate from any language)
+2. KEEP brand names (Apple, Samsung, Xiaomi, Sony, Nike, etc.)
+3. KEEP model numbers (iPhone 15, Galaxy S24, Redmi Note 13, AirPods Pro)
+4. KEEP product type (watch, phone, headphones, strap, case, cable)
+5. KEEP key features (wireless, bluetooth, leather, 22mm, 5G)
+6. REMOVE promotions (hot sale, free shipping, best quality, new, original, wholesale, dropshipping, high quality, high copy)
+7. REMOVE vague adjectives (beautiful, luxury, premium, super, ultra)
+8. Output 3-6 words MAXIMUM
+9. Output ONLY the query. NO quotes, NO explanations, NO punctuation.
+
+Examples:
+"Hot Sale Wireless Bluetooth Headphones Noise Cancelling for iPhone"
+→ wireless bluetooth headphones noise cancelling
+
+"Smart Watch Leather Strap 22mm for Apple Watch Series 8"
+→ leather watch strap 22mm
+
+"Original Xiaomi Redmi Note 13 Pro 5G Smartphone 256GB Global"
+→ xiaomi redmi note 13 pro 5g
+
+"Coque iPhone 15 Pro Max Silicone Souple Housse"
+→ iphone 15 pro max silicone case
+
+"حزام ساعة أبل جلد طبيعي 22 ملم للرجال"
+→ apple watch leather strap 22mm
+
+"New Original High Quality USB C Cable Fast Charging 3A Type-C"
+→ usb c cable 3a fast charging
+
+"2024 Men's Running Shoes Breathable Sneakers Casual Sport"
+→ running shoes breathable sneakers`;
+
+  try {
+    const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Convert this title: "${originalTitle}"` }
+      ],
+      max_tokens: 30,
+      temperature: 0.1
+    });
     
-    if (page > MAX_PAGES_TO_FETCH) {
-      return sendResponse({ ok: true, items: [], hasMore: false });
+    if (!response?.response) return '';
+    
+    let query = response.response.trim()
+      .replace(/^["'`]|["'`]$/g, '')
+      .split(/\n/)[0]
+      .replace(/[^\w\s\-\.\u0600-\u06FF]/g, '')
+      .split(/\s+/)
+      .slice(0, 6)
+      .join(' ')
+      .trim();
+    
+    // التحقق من صحة النتيجة
+    if (query.length < 3 || query.split(' ').length < 2) return '';
+    
+    return query;
+  } catch (e) {
+    console.error('AI query generation failed:', e.message);
+    return '';
+  }
+}
+
+// ============================================
+// 🔧 Fallback: بحث محلي (إذا فشل AI)
+// ============================================
+function localSearchQuery(title) {
+  const words = title
+    .replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ');
+  
+  const KEEP_SHORT = new Set(['usb','led','lcd','tv','pc','hd','uhd','4k','8k','2k','hdmi','sd','sim','ip','ai','pro','max','air','mini']);
+  
+  const useful = words.filter(w => {
+    if (!w) return false;
+    const lower = w.toLowerCase();
+    if (STOP_WORDS.has(lower)) return false;
+    if (KEEP_SHORT.has(lower)) return true;
+    if (w.length < 2) return false;
+    if (/^\d{1,2}$/.test(w)) return false;
+    return true;
+  });
+  
+  return useful.slice(0, 6).join(' ');
+}
+
+// ============================================
+// 🚀 MAIN HANDLER
+// ============================================
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS });
     }
 
-    // 🔥 إرسال العنوان الأصلي كاملاً (بدون أي تصفية)
-    // الـ Cloudflare Worker هو من يقرر ماذا يفعل
-    const originalTitle = encodeURIComponent(msg.title || '');
-    
-    console.log(`🎯 [${msg.type}] Title: "${msg.title}" | Page: ${page}`);
+    const url = new URL(request.url);
 
-    fetch(`${WORKER_URL}?originalTitle=${originalTitle}&page=${page}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.data) {
-          const items = data.data.map(item => ({
-            id: item.id,
-            title: item.title,
-            img: item.img,
-            price: item.price, 
-            rating: item.rating,
-            sold: item.soldStr,
-            link: item.url,
-            isExact: true,    
-            finalScore: 100
-          }));
-
-          let hasMore = items.length >= 15;
-          if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
-          
-          console.log(`✅ Got ${items.length} items (query: "${data.aiQuery || '?'}")`);
-          sendResponse({ ok: true, items: items, hasMore: hasMore });
-        } else {
-          sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
-        }
-      }).catch(err => {
-        sendResponse({ ok: false, error: err.message, hasMore: false });
-      });
+    // ==========================================
+    // 🔥 SORT ENDPOINT
+    // ==========================================
+    if (request.method === "POST" && url.pathname === "/sort") {
+      const startTime = Date.now();
       
-    return true;
-  }
+      try {
+        const body = await request.json();
+        const { originalTitle, items } = body;
+        
+        if (!originalTitle || !items || !Array.isArray(items) || items.length === 0) {
+          return json({ success: true, data: items || [] });
+        }
 
-  if (msg.type === 'SORT_ITEMS') {
-    fetch(`${WORKER_URL}sort`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ originalTitle: msg.title, items: msg.items })
-    })
-    .then(res => res.json())
-    .then(data => sendResponse({ ok: data.success, items: data.data }))
-    .catch(err => sendResponse({ ok: false, error: err.message }));
-    return true;
+        console.log(`\n=== SORT START ===`);
+        console.log(`Original: "${originalTitle}" | Items: ${items.length}`);
+
+        const originalDomain = classifyDomain(originalTitle);
+        const originalTokens = tokenize(originalTitle);
+        
+        const scored = items.map(it => {
+          const itemTokens = tokenize(it.title);
+          const itemDomain = classifyDomain(it.title);
+          const textSim = jaccardSimilarity(originalTokens, itemTokens);
+          
+          let isRelated = false;
+          let reason = '';
+          
+          // 1. نفس المجال
+          if (originalDomain && itemDomain && originalDomain === itemDomain) {
+            isRelated = true;
+            reason = 'same_domain';
+          }
+          
+          // 2. كلمة مشتركة (4+ أحرف)
+          if (!isRelated) {
+            const shared = originalTokens.filter(t => itemTokens.includes(t) && t.length >= 4);
+            if (shared.length >= 1) {
+              isRelated = true;
+              reason = `shared:${shared[0]}`;
+            }
+          }
+          
+          // 3. تشابه نصي عالي
+          if (!isRelated && textSim >= 0.10) {
+            isRelated = true;
+            reason = 'high_textSim';
+          }
+          
+          // 4. مجالان مجهولان + تشابه
+          if (!isRelated && !originalDomain && !itemDomain && textSim >= 0.05) {
+            isRelated = true;
+            reason = 'unknown_similar';
+          }
+          
+          // 5. عنوان واحد مجهول + تشابه متوسط
+          if (!isRelated && (originalDomain || itemDomain) && textSim >= 0.08) {
+            isRelated = true;
+            reason = 'partial_similar';
+          }
+          
+          const isExact = isRelated;
+          const score = (isExact ? 1000 : 0) + textSim * 100;
+          
+          return { ...it, _isExact: isExact, _score: score };
+        });
+
+        scored.sort((a, b) => {
+          if (a._isExact !== b._isExact) return b._isExact ? 1 : -1;
+          return (b._score || 0) - (a._score || 0);
+        });
+
+        const exactCount = scored.filter(s => s._isExact).length;
+        console.log(`✅ Sort done in ${Date.now() - startTime}ms | Total: ${scored.length} | Exact: ${exactCount} | Similar: ${scored.length - exactCount}`);
+
+        const final = scored.map(it => {
+          const { _isExact, _score, ...clean } = it;
+          return { ...clean, isExact: _isExact, finalScore: _score };
+        });
+
+        return json({ success: true, data: final });
+
+      } catch (error) {
+        console.error('Sort error:', error.message);
+        return json({ success: false, error: error.message }, 500);
+      }
+    }
+
+    // ==========================================
+    // 🔍 FETCH ENDPOINT - AI-powered search
+    // ==========================================
+    const originalTitle = url.searchParams.get("originalTitle") || url.searchParams.get("q") || "";
+    const page = parseInt(url.searchParams.get("page") || "1");
+
+    if (page > 3) {
+      return json({ success: true, data: [], hasMore: false });
+    }
+
+    try {
+      if (!originalTitle) {
+        return json({ success: false, message: "Missing title" }, 400);
+      }
+
+      let searchQuery = '';
+
+      // 🔥 المرحلة 1: AI يحلل العنوان (فقط للصفحة الأولى)
+      if (page === 1 && env.AI) {
+        try {
+          searchQuery = await aiGenerateSearchQuery(originalTitle, env);
+          if (searchQuery) {
+            console.log(`🤖 AI query: "${searchQuery}"`);
+          }
+        } catch (e) {
+          console.log(`⚠️ AI failed: ${e.message}`);
+        }
+      }
+
+      // 🔥 المرحلة 2: Fallback محلي
+      if (!searchQuery) {
+        searchQuery = localSearchQuery(originalTitle);
+        console.log(`🔧 Local query: "${searchQuery}"`);
+      }
+
+      if (!searchQuery) {
+        return json({ success: false, message: "Cannot generate query" }, 400);
+      }
+
+      console.log(`🔍 Search: "${searchQuery}" | Page: ${page}`);
+
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(searchQuery)}&page=${page}`;
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
+      
+      const antResponse = await fetch(antUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt: ${antResponse.status}`);
+      
+      const html = await antResponse.text();
+
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
+        return json({ success: false, message: "كابتشا أو حظر مؤقت." });
+      }
+
+      const products = parseItems(html);
+      console.log(`📦 Found ${products.length} products`);
+
+      if (products.length === 0) {
+        return json({ success: false, message: "لا توجد منتجات.", aiQuery: searchQuery });
+      }
+
+      return json({ success: true, data: products, aiQuery: searchQuery });
+
+    } catch (error) {
+      return json({ success: false, error: error.message }, 500);
+    }
   }
-});
+};
+
+// ============================================
+// 📦 Parse HTML
+// ============================================
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
+  
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({
+        id: String(id),
+        title: title || 'Produit',
+        img,
+        price: priceNum,
+        rating: parseFloat(rating) || 0,
+        soldStr: sold,
+        url: `https://www.aliexpress.com/item/${id}.html`
+      });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+  }
+  return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const m = String(s).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" }
+  });
+}
