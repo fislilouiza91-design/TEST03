@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Strict Mapping)
+   Smart Shopper - Cloudflare Worker (RU Residential Fix)
    ============================================ */
 
 const CORS = {
@@ -182,17 +182,18 @@ Output ONLY the search query. Do not write sentences.`
       let searchUrl = '';
       let proxyCountry = 'us';
       let acceptLang = 'en-US,en;q=0.9';
+      let proxyType = 'datacenter'; // الافتراضي
 
       if (country === 'RU') {
          searchUrl = `https://aliexpress.ru/wholesale?SearchText=${encodeURIComponent(searchQuery)}&page=${page}`;
          proxyCountry = 'ru';
          acceptLang = 'ru-RU,ru;q=0.9';
+         proxyType = 'residential'; // 🔥 التغيير الجوهري: استخدام بروكسي سكني لروسيا
       } else if (country === 'US' || country === 'GB') {
          searchUrl = `https://www.aliexpress.com/w/wholesale-${searchQuery.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
          proxyCountry = country === 'GB' ? 'gb' : 'us';
          acceptLang = `${lang}-${country},${lang};q=0.9,en;q=0.8`;
       } else {
-         // باقي الدول (فرنسا، إسبانيا، إلخ) تستخدم النطاق الفرعي
          searchUrl = `https://${lang}.aliexpress.com/w/wholesale-${searchQuery.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
          const SUPPORTED_PROXIES = ['br', 'ca', 'cn', 'cz', 'fr', 'de', 'hk', 'in', 'id', 'it', 'il', 'jp', 'nl', 'pl', 'ru', 'sa', 'sg', 'kr', 'es', 'tr', 'gb', 'ae', 'us', 'vn'];
          proxyCountry = SUPPORTED_PROXIES.includes(country.toLowerCase()) ? country.toLowerCase() : 'us';
@@ -204,7 +205,7 @@ Output ONLY the search query. Do not write sentences.`
       antUrl.searchParams.set('url', searchUrl);
       antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
       antUrl.searchParams.set('return_page_source', 'true');
-      antUrl.searchParams.set('proxy_type', 'datacenter');
+      antUrl.searchParams.set('proxy_type', proxyType); // 🔥 سيصبح residential لروسيا
       antUrl.searchParams.set('browser', 'false');
       antUrl.searchParams.set('proxy_country', proxyCountry);
       antUrl.searchParams.set('ant-Accept-Language', acceptLang);
@@ -214,8 +215,9 @@ Output ONLY the search query. Do not write sentences.`
       
       const html = await antResponse.text();
 
-      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
-        return json({ success: false, message: "كابتشا أو حظر مؤقت." });
+      // 🔥 3. فحص إضافي للكابتشا الروسية (x5sec)
+      if (html.includes('punish') || html.includes('captcha') || html.includes('x5sec') || html.length < 5000) {
+        return json({ success: false, message: "كابتشا أو حظر مؤقت من AliExpress Russia." });
       }
 
       const products = parseItems(html);
