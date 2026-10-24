@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Content Script (Cookie-Aware)
+   Smart Shopper - Content Script (Strict Domain Priority)
    ============================================ */
    (function () {
     'use strict';
@@ -221,19 +221,23 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
-    // 🔥 دالة اكتشاف الدولة المحدثة (تدعم الكوكي)
+    // 🔥 الأولويات الصارمة لاكتشاف الدولة
     function getLocaleFromSubdomain() {
         const host = location.hostname;
 
-        // 1. النطاقات الصريحة
-        if (host === 'aliexpress.ru' || host.endsWith('.aliexpress.ru')) {
-            return { country: 'RU', lang: 'ru' };
-        }
+        // 1. النطاقات الأمريكية الصريحة (aliexpress.us)
         if (host === 'aliexpress.us' || host.endsWith('.aliexpress.us')) {
+            console.log("[Smart Shopper] Detected domain: aliexpress.us -> US");
             return { country: 'US', lang: 'en' };
         }
 
-        // 2. النطاقات الفرعية (مثل fr, es, de)
+        // 2. النطاق الروسي الصريح (aliexpress.ru)
+        if (host === 'aliexpress.ru' || host.endsWith('.aliexpress.ru')) {
+            console.log("[Smart Shopper] Detected domain: aliexpress.ru -> RU");
+            return { country: 'RU', lang: 'ru' };
+        }
+
+        // 3. النطاقات الفرعية للدول الأخرى (fr, es, de...)
         const sub = host.split('.')[0];
         const localeMap = {
             'fr': { country: 'FR', lang: 'fr' },
@@ -253,29 +257,33 @@
             'id': { country: 'ID', lang: 'id' }
         };
         if (localeMap[sub]) {
+            console.log(`[Smart Shopper] Detected subdomain: ${sub.toUpperCase()}`);
             return localeMap[sub];
         }
 
-        // 3. 🔥 قراءة الإعدادات من الكوكي (aep_usuc_f) إذا كان النطاق عاماً (www.aliexpress.com)
+        // 4. النطاقات العامة (aliexpress.com أو www.aliexpress.com)
+        // هنا نقرأ الدولة التي اختارها المستخدم من الإعدادات (الكوكيز)
+        console.log("[Smart Shopper] Base domain detected. Reading settings from cookies...");
         try {
             const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
             if (ck) {
                 const params = new URLSearchParams(decodeURIComponent(ck[1]));
-                const region = params.get('region'); // مثلا: RU, FR, ES
-                const bLocale = params.get('b_locale'); // مثلا: ru_RU, fr_FR
+                const region = params.get('region'); // RU, FR, US...
+                const bLocale = params.get('b_locale'); // ru_RU, fr_FR...
                 
                 if (region) {
                     let lang = 'en';
-                    if (bLocale) {
-                        lang = bLocale.split('_')[0].toLowerCase();
-                    }
-                    console.log(`[Smart Shopper] Detected from Cookie: Country=${region}, Lang=${lang}`);
+                    if (bLocale) lang = bLocale.split('_')[0].toLowerCase();
+                    console.log(`[Smart Shopper] Detected from settings cookie: Country=${region}, Lang=${lang}`);
                     return { country: region.toUpperCase(), lang: lang };
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+            console.log("[Smart Shopper] Error reading locale cookie:", e);
+        }
 
-        // 4. الافتراضي
+        // 5. الافتراضي (أمريكا)
+        console.log("[Smart Shopper] Defaulting to US/EN");
         return { country: 'US', lang: 'en' };
     }
   
