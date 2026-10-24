@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Smart AI)
+   Smart Shopper - Cloudflare Worker (Relaxed Classification)
    Phase 1: Smart Search Query (Llama-3)
    Phase 2: 5-Anchors Classification (BGE-M3)
    ============================================ */
@@ -55,7 +55,7 @@ export default {
     const url = new URL(request.url);
 
     // ==========================================
-    // 🎯 SORT ENDPOINT - 5 Anchors Classification
+    // 🎯 SORT ENDPOINT - Relaxed Classification
     // ==========================================
     if (request.method === "POST" && url.pathname === "/sort") {
       const startTime = Date.now();
@@ -75,7 +75,7 @@ export default {
         console.log(`\n=== SORT START ===`);
         console.log(`Original: "${originalTitle}" | Items: ${items.length}`);
 
-        // 1. الفرز المحلي الأولي (لاكتشاف أفضل 10 مرشحين للتحليل بالذكاء الاصطناعي)
+        // 1. الفرز المحلي الأولي (لاكتشاف أفضل 10 مرشحين)
         const origTokens = tokenize(originalTitle);
         const preScored = items.map(it => ({
           ...it,
@@ -97,17 +97,20 @@ export default {
         });
         top10Candidates.sort((a, b) => b._cos - a._cos);
 
-        // 4. اختيار أفضل 5 منتجات لبناء "مرساة التطابق" (Anchors)
+        // 4. اختيار أفضل 5 منتجات لبناء "مرساة التطابق"
         const top5 = top10Candidates.slice(0, Math.min(5, top10Candidates.length));
-        const minCosTop5 = top5.length > 0 ? top5[top5.length - 1]._cos : 0.6;
         
-        // العتبة الذكية: أي منتج يجب أن يكون قريباً من أفضل 5 بنسبة 96% على الأقل ليعتبر "مطابقاً تماماً"
-        const exactThreshold = Math.max(minCosTop5 * 0.96, 0.65);
+        // 🔥 حساب متوسط التشابه لأفضل 5
+        const avgCosTop5 = top5.reduce((sum, t) => sum + t._cos, 0) / top5.length;
+        
+        // 🔥 العتبة الذكية الجديدة: أكثر تساهلاً
+        // نأخذ 88% من متوسط أفضل 5، أو 0.55 كحد أدنى مطلق
+        const exactThreshold = Math.max(avgCosTop5 * 0.88, 0.55);
         
         console.log(`Top 5 Cosines: ${top5.map(t => t._cos.toFixed(3)).join(', ')}`);
-        console.log(`Adaptive Exact Threshold: ${exactThreshold.toFixed(3)}`);
+        console.log(`Avg Top 5: ${avgCosTop5.toFixed(3)} | Adaptive Exact Threshold: ${exactThreshold.toFixed(3)}`);
 
-        // 5. توليد Embeddings لجميع المنتجات لتصنيفها بدقة
+        // 5. توليد Embeddings لجميع المنتجات
         let allEmbeddings = [];
         for (let i = 0; i < items.length; i += 50) {
           const chunk = items.slice(i, i + 50);
@@ -115,21 +118,24 @@ export default {
           allEmbeddings = allEmbeddings.concat(emb.data);
         }
 
-        // 6. تصنيف كل منتج بناءً على العتبة المستخرجة من أفضل 5
+        // 6. تصنيف كل منتج
         const finalItems = items.map((it, index) => {
           const cos = cosineSimilarity(origVec, allEmbeddings[index]);
+          const textSim = jaccardSimilarity(origTokens, tokenize(it.title));
           
-          // مطابق إذا كان التشابه أكبر من العتبة، وإلا فهو شبه مطابق/مشابه
-          const isExact = cos >= exactThreshold;
+          // 🔥 مطابق إذا:
+          // 1. التشابه الدلالي (Cos) أكبر من العتبة
+          // 2. أو التشابه النصي (Jaccard) عالي جداً (0.35+) -> "إنقاذ نصي"
+          const isExact = cos >= exactThreshold || textSim >= 0.35;
           
           return {
             ...it,
             isExact: isExact,
-            finalScore: cos // نستخدم التشابه كدرجة للترتيب
+            finalScore: cos * 0.7 + textSim * 0.3 // درجة مركبة للترتيب
           };
         });
 
-        // 7. ترتيب المنتجات المطابقة أولاً، ثم شبه المطابقة
+        // 7. ترتيب المنتجات حسب الدرجة المركبة
         finalItems.sort((a, b) => b.finalScore - a.finalScore);
 
         const exactCount = finalItems.filter(i => i.isExact).length;
@@ -198,7 +204,7 @@ Examples:
 
       console.log(`🔍 Smart Search: "${searchQuery}" | Page: ${page}`);
 
-      // 2. جلب النتائج من AliExpress باستخدام ScrapingAnt
+      // 2. جلب النتائج من AliExpress
       const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(searchQuery)}&page=${page}`;
       const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
       
