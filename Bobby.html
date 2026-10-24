@@ -1,240 +1,317 @@
 /* ============================================
-   Smart Shopper - Fullscreen Page Module
-   - Tab 0 (All): Raw fetch order, no divider.
-   - Tabs 1-4: Exact top → divider → Close bottom.
+   Smart Shopper - Cloudflare Worker (Smart AI)
+   Phase 1: Smart Search Query (Llama-3)
+   Phase 2: 5-Anchors Classification (BGE-M3)
    ============================================ */
-   (function () {
-    'use strict';
-  
-    const FS_ID = 'ss-fullscreen';
-    let isOpen = false;
-    let items = [];
-    let activeTab = 0;
-    let fetching = false;
-    let currentProductPrice = 0;
-    let callbacks = {};
 
-    let currentCurrencySymbol = '$';
-    (function detectCurrency() {
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+const STOP_WORDS = new Set([
+  'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
+  'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
+  'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
+  'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
+  'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
+  'sans','fil','sur','pour','avec','les','des','une','dans','par','plus','gratuit','livraison',
+  'nouveau','promo','solde','chez','of','to','in','on','is','by','at','from','or','as'
+]);
+
+function tokenize(text) {
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+function jaccardSimilarity(a, b) {
+  if (!a.length || !b.length) return 0;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const inter = [...setA].filter(t => setB.has(t)).length;
+  const union = new Set([...setA, ...setB]).size;
+  return union > 0 ? inter / union : 0;
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS });
+    }
+
+    const url = new URL(request.url);
+
+    // ==========================================
+    // 🎯 SORT ENDPOINT - 5 Anchors Classification
+    // ==========================================
+    if (request.method === "POST" && url.pathname === "/sort") {
+      const startTime = Date.now();
+      
       try {
-        const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
-        if (ck) {
-          const params = new URLSearchParams(decodeURIComponent(ck[1]));
-          const cur = params.get('c_tp');
-          if (cur) currentCurrencySymbol = cur.toUpperCase();
+        const body = await request.json();
+        const { originalTitle, items } = body;
+        
+        if (!originalTitle || !items || !Array.isArray(items) || items.length === 0) {
+          return json({ success: true, data: items || [] });
         }
-      } catch (e) {}
-    })();
-  
-    const SVG = {
-      back: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
-      close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
-      all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
-      cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
-      rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
-      discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
-      selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>'
-    };
-  
-    const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
-    const U = () => window.SS_Utils || {};
-  
-    const esc = (s) => U().esc ? U().esc(s) : String(s || '');
-    const num = (s) => U().num ? U().num(s) : 0;
-    const stars = (r) => U().stars ? U().stars(r) : '';
-  
-    // 🔥 تصنيف منتجين فقط: Exact أو Close
-    function classify2Tier(it) {
-      if (!it.isExact) return { ...it, _tier: 'close' };
-      
-      const price = num(it.price);
-      const priceIsClose = currentProductPrice <= 0 || (price > 0 && price >= currentProductPrice * 0.5 && price <= currentProductPrice * 1.8);
-      
-      if (priceIsClose) return { ...it, _tier: 'exact' };
-      return { ...it, _tier: 'close' };
+
+        if (!env.AI) {
+          return json({ success: true, data: items });
+        }
+
+        console.log(`\n=== SORT START ===`);
+        console.log(`Original: "${originalTitle}" | Items: ${items.length}`);
+
+        // 1. الفرز المحلي الأولي (لاكتشاف أفضل 10 مرشحين للتحليل بالذكاء الاصطناعي)
+        const origTokens = tokenize(originalTitle);
+        const preScored = items.map(it => ({
+          ...it,
+          _textSim: jaccardSimilarity(origTokens, tokenize(it.title))
+        })).sort((a, b) => b._textSim - a._textSim);
+
+        const top10Candidates = preScored.slice(0, Math.min(10, preScored.length));
+
+        // 2. توليد Embeddings للعنوان الأصلي وأفضل 10 مرشحين
+        const modelName = '@cf/baai/bge-m3';
+        const origEmb = await env.AI.run(modelName, { text: [originalTitle] });
+        const origVec = origEmb.data[0];
+
+        const candEmbs = await env.AI.run(modelName, { text: top10Candidates.map(c => c.title) });
+        
+        // 3. حساب التشابه بين العنوان الأصلي والمرشحين
+        top10Candidates.forEach((c, i) => {
+          c._cos = cosineSimilarity(origVec, candEmbs.data[i]);
+        });
+        top10Candidates.sort((a, b) => b._cos - a._cos);
+
+        // 4. اختيار أفضل 5 منتجات لبناء "مرساة التطابق" (Anchors)
+        const top5 = top10Candidates.slice(0, Math.min(5, top10Candidates.length));
+        const minCosTop5 = top5.length > 0 ? top5[top5.length - 1]._cos : 0.6;
+        
+        // العتبة الذكية: أي منتج يجب أن يكون قريباً من أفضل 5 بنسبة 96% على الأقل ليعتبر "مطابقاً تماماً"
+        const exactThreshold = Math.max(minCosTop5 * 0.96, 0.65);
+        
+        console.log(`Top 5 Cosines: ${top5.map(t => t._cos.toFixed(3)).join(', ')}`);
+        console.log(`Adaptive Exact Threshold: ${exactThreshold.toFixed(3)}`);
+
+        // 5. توليد Embeddings لجميع المنتجات لتصنيفها بدقة
+        let allEmbeddings = [];
+        for (let i = 0; i < items.length; i += 50) {
+          const chunk = items.slice(i, i + 50);
+          const emb = await env.AI.run(modelName, { text: chunk.map(c => c.title) });
+          allEmbeddings = allEmbeddings.concat(emb.data);
+        }
+
+        // 6. تصنيف كل منتج بناءً على العتبة المستخرجة من أفضل 5
+        const finalItems = items.map((it, index) => {
+          const cos = cosineSimilarity(origVec, allEmbeddings[index]);
+          
+          // مطابق إذا كان التشابه أكبر من العتبة، وإلا فهو شبه مطابق/مشابه
+          const isExact = cos >= exactThreshold;
+          
+          return {
+            ...it,
+            isExact: isExact,
+            finalScore: cos // نستخدم التشابه كدرجة للترتيب
+          };
+        });
+
+        // 7. ترتيب المنتجات المطابقة أولاً، ثم شبه المطابقة
+        finalItems.sort((a, b) => b.finalScore - a.finalScore);
+
+        const exactCount = finalItems.filter(i => i.isExact).length;
+        console.log(`✅ DONE in ${Date.now() - startTime}ms | Total: ${finalItems.length} | Exact: ${exactCount} | Close: ${finalItems.length - exactCount}`);
+
+        const cleanItems = finalItems.map(it => {
+          const { _textSim, _cos, ...clean } = it;
+          return clean;
+        });
+
+        return json({ success: true, data: cleanItems });
+
+      } catch (error) {
+        console.error('❌ Sort error:', error.message);
+        return json({ success: false, error: error.message }, 500);
+      }
     }
+
+    // ==========================================
+    // 🔍 FETCH ENDPOINT - Smart AI Search
+    // ==========================================
+    const originalTitle = url.searchParams.get("originalTitle") || url.searchParams.get("q") || "";
+    const page = parseInt(url.searchParams.get("page") || "1");
+
+    if (page > 3) {
+      return json({ success: true, data: [], hasMore: false });
+    }
+
+    try {
+      if (!originalTitle) {
+        return json({ success: false, message: "Missing title" }, 400);
+      }
+
+      let searchQuery = originalTitle;
+
+      // 1. استخدام Llama-3 لاستخراج أفضل كلمة بحث
+      if (env.AI) {
+        try {
+          const response = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
+            messages: [
+              { 
+                role: 'system', 
+                content: `You are an AliExpress search expert. Convert product titles into HIGHLY ACCURATE English search queries (3-6 words).
+Keep brand names, models, and main product types. Remove all colors, sizes, and promotional words.
+Output ONLY the search query. Do not write sentences.
+Examples:
+"Hot Sale Wireless Bluetooth Headphones Noise Cancelling" -> wireless bluetooth headphones noise cancelling
+"Smart Watch Leather Strap 22mm for Apple Watch" -> leather watch strap 22mm
+"حزام ساعة أبل جلد طبيعي 22 ملم" -> apple watch leather strap 22mm` 
+              },
+              { role: 'user', content: originalTitle }
+            ],
+            max_tokens: 30
+          });
+          
+          if (response?.response) {
+            const clean = response.response.trim().split(/\n/)[0].replace(/[^\w\s\-]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (clean.split(' ').length >= 2) {
+              searchQuery = clean;
+            }
+          }
+        } catch (e) {
+          console.log(`⚠️ AI search query failed: ${e.message}`);
+        }
+      }
+
+      console.log(`🔍 Smart Search: "${searchQuery}" | Page: ${page}`);
+
+      // 2. جلب النتائج من AliExpress باستخدام ScrapingAnt
+      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(searchQuery)}&page=${page}`;
+      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
+      
+      const antResponse = await fetch(antUrl);
+      if (!antResponse.ok) throw new Error(`ScrapingAnt: ${antResponse.status}`);
+      
+      const html = await antResponse.text();
+
+      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
+        return json({ success: false, message: "كابتشا أو حظر مؤقت." });
+      }
+
+      const products = parseItems(html);
+      if (products.length === 0) {
+        return json({ success: false, message: "لا توجد منتجات.", aiQuery: searchQuery });
+      }
+
+      return json({ success: true, data: products, aiQuery: searchQuery });
+
+    } catch (error) {
+      return json({ success: false, error: error.message }, 500);
+    }
+  }
+};
+
+// ============================================
+// Parse HTML
+// ============================================
+function parseItems(html) {
+  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
+  if (!arrText) return [];
   
-    function buildDOM() {
-      let el = document.getElementById(FS_ID);
-      if (el) el.remove();
-  
-      el = document.createElement('div');
-      el.id = FS_ID;
-      el.innerHTML = `
-        <div class="ss-fs-header">
-          <div class="ss-fs-header-left">
-            <div class="ss-fs-logo">S</div>
-            <div class="ss-fs-titles">
-              <div class="ss-fs-title">${esc(T('panelTitle'))}</div>
-              <div class="ss-fs-sub">${esc(T('panelSubtitle'))}</div>
-            </div>
-          </div>
-          <div class="ss-fs-header-btns">
-            <button class="ss-fs-btn ss-fs-back" id="ss-fs-back" title="${esc(T('back') || 'Back')}">
-              ${SVG.back} <span>${esc(T('back') || 'Retour')}</span>
-            </button>
-            <button class="ss-fs-btn ss-fs-close" id="ss-fs-close" title="${esc(T('close'))}">${SVG.close}</button>
-          </div>
-        </div>
-        <div class="ss-fs-tabs" id="ss-fs-tabs">
-          <span class="ss-fs-tab" data-i="0">${SVG.all}<span>${esc(T('tabAll'))}</span></span>
-          <span class="ss-fs-tab" data-i="1">${SVG.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
-          <span class="ss-fs-tab" data-i="2">${SVG.rated}<span>${esc(T('tabBestRated'))}</span></span>
-          <span class="ss-fs-tab" data-i="3">${SVG.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
-          <span class="ss-fs-tab" data-i="4">${SVG.selling}<span>${esc(T('tabBestSelling'))}</span></span>
-        </div>
-        <div class="ss-fs-list" id="ss-fs-list"></div>
-        <div class="ss-fs-footer" id="ss-fs-footer"></div>
-      `;
-      document.documentElement.appendChild(el);
-  
-      document.getElementById('ss-fs-back').onclick = () => close();
-      document.getElementById('ss-fs-close').onclick = () => close();
-      document.getElementById('ss-fs-tabs').addEventListener('click', (e) => {
-        const tab = e.target.closest('.ss-fs-tab');
-        if (!tab) return;
-        const newTab = +tab.dataset.i;
-        if (newTab === activeTab) return;
-        activeTab = newTab;
-        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => x.classList.toggle('active', x === tab));
-        if (callbacks.onTabChange) callbacks.onTabChange(newTab);
+  let arr;
+  try { arr = JSON.parse(arrText); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  for (const o of arr) {
+    try {
+      const id = o.productId || o.id || (o.item && o.item.productId);
+      if (!id) continue;
+      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
+      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      
+      let img = '';
+      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
+      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
+      if (img && img.startsWith('//')) img = 'https:' + img;
+      
+      const p = o.prices || {};
+      const sale = p.salePrice || {};
+      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
+      const priceNum = extractPriceNumber(priceStr);
+
+      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
+      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
+      
+      out.push({
+        id: String(id),
+        title: title || 'Produit',
+        img,
+        price: priceNum,
+        rating: parseFloat(rating) || 0,
+        soldStr: sold,
+        url: `https://www.aliexpress.com/item/${id}.html`
       });
-  
-      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => {
-        x.classList.toggle('active', +x.dataset.i === activeTab);
-      });
+    } catch (e) {}
+  }
+  return out;
+}
+
+function extractText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'object') {
+    const keys = ['displayTitle','text','title','value','formatedActivityPrice','formatedPrice','minActivityPrice','minPrice','price'];
+    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
+    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+  }
+  return String(v);
+}
+
+function extractPriceNumber(s) {
+  if (!s) return 0;
+  const m = String(s).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+function extractJsonArray(html, marker) {
+  const i = html.indexOf(marker);
+  if (i < 0) return null;
+  const j = html.indexOf('[', i);
+  if (j < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let k = j; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
     }
-  
-    function buildCard(it) {
-      const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
-      const itemPrice = num(it.price);
-      const hasComparison = currentProductPrice > 0 && itemPrice > 0;
-      const isHigher = hasComparison && itemPrice > currentProductPrice;
-      const boxClass = isHigher ? 'ss-fs-price-box ss-fs-higher' : 'ss-fs-price-box';
-  
-      const priceBox = `
-        <div class="${boxClass}">
-          <div class="ss-fs-price">${it.price ? esc(it.price) + ' ' + currentCurrencySymbol : '—'}</div>
-          ${discountValue ? `<div class="ss-fs-discount">-${esc(discountValue)}%</div>` : ''}
-        </div>`;
-  
-      let metaHtml = '';
-      if (it.rating) metaHtml += `<span class="ss-fs-stars">${stars(it.rating)}</span><span class="ss-fs-rating">${esc(it.rating)}</span>`;
-      if (it.sold) metaHtml += `<span class="ss-fs-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
-      if (!metaHtml) metaHtml = `<span class="ss-fs-no-info">${esc(T('noReviews'))}</span>`;
-  
-      return `
-        <a class="ss-fs-card" href="${esc(it.link)}" target="_blank" rel="noopener">
-          <div class="ss-fs-thumb-wrapper">
-            ${it.img ? `<img class="ss-fs-thumb" src="${esc(it.img)}" alt="">` : `<div class="ss-fs-thumb ss-fs-thumb-empty">🛍</div>`}
-          </div>
-          <div class="ss-fs-card-content">
-            <div class="ss-fs-card-title">${esc(it.title || 'Produit similaire')}</div>
-            <div class="ss-fs-card-meta">${metaHtml}</div>
-          </div>
-          ${priceBox}
-        </a>`;
-    }
-  
-    function buildGrid(items) {
-      if (items.length === 0) return '';
-      return `<div class="ss-fs-grid">${items.map(buildCard).join('')}</div>`;
-    }
-  
-    function renderList() {
-      const l = document.getElementById('ss-fs-list'); if (!l) return;
-  
-      if (items.length === 0) {
-        l.innerHTML = `<div class="ss-fs-msg">${esc(T('noResults'))}</div>`;
-        updateFooter();
-        return;
-      }
-  
-      let html = '';
-      
-      // Tab 0 (All): عرض خام بدون فاصل
-      if (activeTab === 0) {
-        html = buildGrid(items);
-      } else {
-        // Tabs 1-4: Exact → فاصل → Close
-        const classified = items.map(classify2Tier);
-        const exactGroup = classified.filter(it => it._tier === 'exact');
-        const closeGroup = classified.filter(it => it._tier === 'close');
-        
-        if (exactGroup.length > 0) {
-          html += buildGrid(exactGroup);
-        }
-        
-        if (exactGroup.length > 0 && closeGroup.length > 0) {
-          html += `<div class="ss-fs-divider"></div>`;
-        }
-        
-        if (closeGroup.length > 0) {
-          html += buildGrid(closeGroup);
-        }
-      }
-  
-      l.innerHTML = html;
-      updateFooter();
-    }
-  
-    function updateFooter() {
-      const f = document.getElementById('ss-fs-footer'); if (!f) return;
-      let html = '';
-  
-      if (fetching) {
-        html += `<div class="ss-fs-loading" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:13px; padding:15px;">
-          <span class="ss-fs-spinner"></span>
-          <span>${esc(T('loading'))}</span>
-        </div>`;
-      } else if (items.length > 0) {
-        html += `<div class="ss-fs-counter">${items.length} ${esc(T('soldSuffix')) === 'vendus' ? 'produits' : 'items'}</div>`;
-      }
-  
-      f.innerHTML = html;
-    }
-  
-    function open(opts) {
-      opts = opts || {};
-      items = opts.items || [];
-      activeTab = opts.activeTab || 0;
-      fetching = !!opts.fetching;
-      currentProductPrice = opts.currentProductPrice || 0;
-      callbacks = {
-        onTabChange: opts.onTabChange || null,
-        onRefresh: opts.onRefresh || null,
-        onClose: opts.onClose || null
-      };
-  
-      buildDOM();
-      renderList();
-      isOpen = true;
-      document.documentElement.style.overflow = 'hidden';
-    }
-  
-    function close() {
-      const el = document.getElementById(FS_ID);
-      if (el) el.remove();
-      isOpen = false;
-      document.documentElement.style.overflow = '';
-      if (callbacks.onClose) callbacks.onClose();
-    }
-  
-    function updateItems(newItems) {
-      items = newItems || [];
-      if (isOpen) renderList();
-    }
-  
-    function setState(state) {
-      if (state.fetching !== undefined) fetching = state.fetching;
-      if (state.activeTab !== undefined) {
-        activeTab = state.activeTab;
-        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x =>
-          x.classList.toggle('active', +x.dataset.i === activeTab)
-        );
-      }
-      if (isOpen) updateFooter();
-    }
-  
-    window.SS_Fullscreen = { open, close, updateItems, setState, isOpen: () => isOpen };
-  })();
+    if (c === '"') { inStr = true; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
+  }
+  return null;
+}
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" }
+  });
+}
