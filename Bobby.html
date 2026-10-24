@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Content Script (Strict Country Detection)
+   Smart Shopper - Content Script (Read Store Settings Only)
    ============================================ */
    (function () {
     'use strict';
@@ -221,56 +221,57 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
-    // 🔥 قراءة الدولة من إعدادات المتجر (يدعم aliexpress.com و النطاقات الفرعية)
+    // 🔥 قراءة الدولة حصرياً من إعدادات المتجر (الكوكيز وبيانات الصفحة) بغض النظر عن الرابط
     function getStoreSettings() {
-        const host = location.hostname;
-        const sub = host.split('.')[0];
+        let country = 'US';
+        let lang = 'en';
 
-        // 1. النطاقات الصريحة
-        if (host === 'aliexpress.us' || host.endsWith('.aliexpress.us')) return { country: 'US', lang: 'en', subdomain: 'us' };
-        if (host === 'aliexpress.ru' || host.endsWith('.aliexpress.ru')) return { country: 'RU', lang: 'ru', subdomain: 'ru' };
-
-        // 2. النطاقات الفرعية للدول
-        const countrySubdomains = { 'fr': 'FR', 'es': 'ES', 'de': 'DE', 'it': 'IT', 'pt': 'PT', 'nl': 'NL', 'pl': 'PL', 'tr': 'TR', 'ja': 'JP', 'ko': 'KR', 'he': 'IL', 'vi': 'VN', 'th': 'TH', 'id': 'ID' };
-        if (countrySubdomains[sub]) return { country: countrySubdomains[sub], lang: sub, subdomain: sub };
-
-        // 3. قراءة الكوكيز (تعمل مع aliexpress.com و ar.aliexpress.com)
+        // 1. قراءة الكوكيز
         try {
             const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
             if (ck) {
                 const params = new URLSearchParams(decodeURIComponent(ck[1]));
                 const region = params.get('region');
                 const bLocale = params.get('b_locale');
+                
                 if (region && region.length === 2) {
-                    let lang = (sub === 'ar') ? 'ar' : 'en';
-                    if (bLocale) lang = bLocale.split('_')[0].toLowerCase();
-                    const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
-                    console.log(`[Smart Shopper] Country from Cookie (region): ${region}`);
-                    return { country: region.toUpperCase(), lang: lang, subdomain: actualSub };
+                    country = region.toUpperCase();
+                    lang = bLocale ? bLocale.split('_')[0].toLowerCase() : (country === 'RU' ? 'ru' : 'en');
+                    console.log(`[Smart Shopper] Read from Store Cookies: Country=${country}, Lang=${lang}`);
+                    return { country, lang };
                 }
             }
         } catch (e) {}
 
-        // 4. قراءة المتغيرات الداخلية للصفحة
+        // 2. قراءة بيانات الصفحة الداخلية (إذا فشلت الكوكيز)
         try {
             if (window._dida_config_ && window._dida_config_._init_data_ && window._dida_config_._init_data_.data) {
                 const data = window._dida_config_._init_data_.data;
                 if (data.region) {
-                    const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
-                    console.log(`[Smart Shopper] Country from Page JS: ${data.region}`);
-                    return { country: data.region.toUpperCase(), lang: (sub === 'ar') ? 'ar' : 'en', subdomain: actualSub };
+                    country = data.region.toUpperCase();
+                    lang = (country === 'RU') ? 'ru' : (country === 'SA' ? 'ar' : 'en');
+                    console.log(`[Smart Shopper] Read from Page JS: Country=${country}, Lang=${lang}`);
+                    return { country, lang };
                 }
             }
         } catch (e) {}
 
-        // 5. النطاق العربي
-        if (sub === 'ar') {
-            return { country: 'SA', lang: 'ar', subdomain: 'ar' };
-        }
+        // 3. إذا فشل كل شيء، نقرأ من النص على الشاشة (مثل كلمة Ship to)
+        try {
+            const textElements = document.querySelectorAll('.ship-to, [data-role="ship-to"], .product-ship-to');
+            for (const el of textElements) {
+                const txt = el.textContent.toLowerCase();
+                if (txt.includes('algeria') || txt.includes('الجزائر')) return { country: 'DZ', lang: 'ar' };
+                if (txt.includes('saudi') || txt.includes('السعودية')) return { country: 'SA', lang: 'ar' };
+                if (txt.includes('emirates') || txt.includes('الإمارات')) return { country: 'AE', lang: 'ar' };
+                if (txt.includes('egypt') || txt.includes('مصر')) return { country: 'EG', lang: 'ar' };
+                if (txt.includes('morocco') || txt.includes('المغرب')) return { country: 'MA', lang: 'ar' };
+                if (txt.includes('france') || txt.includes('فرنسا')) return { country: 'FR', lang: 'fr' };
+            }
+        } catch(e) {}
 
-        // 6. الافتراضي
-        const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
-        return { country: 'US', lang: 'en', subdomain: actualSub };
+        console.log(`[Smart Shopper] Default Fallback: Country=US, Lang=en`);
+        return { country, lang };
     }
   
     function applySort() {
@@ -466,7 +467,6 @@
           existingIds: existingIds, productId: currentProductId, 
           country: locale.country, 
           lang: locale.lang, 
-          subdomain: locale.subdomain,
           cookie: getAliExpressCookie()
       }, (resp) => {
           isBackgroundFetching = false;
@@ -504,7 +504,6 @@
           type: 'SMART_SEARCH', title, productId: productId, 
           country: locale.country, 
           lang: locale.lang, 
-          subdomain: locale.subdomain,
           cookie: getAliExpressCookie()
       }, resp => {
         if (!resp || !document.getElementById(PANEL_ID)) { searchState.running = false; updateFooter(); return; }
