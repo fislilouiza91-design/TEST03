@@ -1,5 +1,5 @@
 /* ============================================
-   Smart Shopper - Cloudflare Worker (Strict 26 + US Fallback)
+   Smart Shopper - Cloudflare Worker (Respect User Currency)
    ============================================ */
 
 const CORS = {
@@ -99,7 +99,7 @@ export default {
     }
 
     // ==========================================
-    // 🔍 FETCH ENDPOINT (Strict 26 + US Fallback)
+    // 🔍 FETCH ENDPOINT (Respect User Currency)
     // ==========================================
     const originalTitle = url.searchParams.get("originalTitle") || url.searchParams.get("q") || "";
     const page = parseInt(url.searchParams.get("page") || "1");
@@ -128,33 +128,33 @@ export default {
         } catch (e) {}
       }
 
-      // 🔥 1. المنطق الصارم: 26 دولة فقط، وإلا أمريكا
       let finalCountry = reqCountry.toLowerCase();
-      let finalCurrency = reqCurrency;
+      let finalCurrency = reqCurrency; // 🔥 نحترم العملة المطلوبة من المستخدم
       let finalLang = 'en';
       
+      // 1. إذا كانت الدولة غير مدعومة، نعود لأمريكا والدولار
       if (!PASSED_PROXIES.includes(finalCountry)) {
           finalCountry = 'us';
-          finalCurrency = 'USD';
+          finalCurrency = 'USD'; // إجبار الدولار فقط هنا
           finalLang = 'en';
-          console.log(`⚠️ Country ${reqCountry} not in list. Forced fallback to US.`);
+          console.log(`⚠️ Country ${reqCountry} not supported. Fallback to US & USD.`);
       } else {
-          // تعيين اللغة بناءً على الدولة الناجحة
+          // 2. تعيين اللغة بناءً على الدولة الناجحة
           if (['sa', 'ae'].includes(finalCountry)) finalLang = 'ar';
           else if (['fr'].includes(finalCountry)) finalLang = 'fr';
           else if (['de'].includes(finalCountry)) finalLang = 'de';
           else if (['es', 'mx'].includes(finalCountry)) finalLang = 'es';
           else if (['it'].includes(finalCountry)) finalLang = 'it';
           else if (['nl'].includes(finalCountry)) finalLang = 'nl';
-          else if (['pl', 'cz', 'ro'].includes(finalCountry)) finalLang = 'en'; // نستخدم الإنجليزية للدول التي لا نملك لغتها
+          else if (['pl', 'cz', 'ro', 'ch'].includes(finalCountry)) finalLang = 'en';
           else if (['tr'].includes(finalCountry)) finalLang = 'tr';
           else if (['br'].includes(finalCountry)) finalLang = 'pt';
           else if (['jp'].includes(finalCountry)) finalLang = 'ja';
           else if (['kr'].includes(finalCountry)) finalLang = 'ko';
-          else if (['id', 'th', 'ph'].includes(finalCountry)) finalLang = 'en'; 
+          else if (['id', 'th', 'ph', 'hk', 'in', 'cn'].includes(finalCountry)) finalLang = 'en'; 
       }
 
-      // 🔥 2. تحديد النطاق المناسب
+      // 3. تحديد النطاق المناسب
       let baseDomain = 'www.aliexpress.com';
       let useBrowser = 'false';
 
@@ -169,11 +169,12 @@ export default {
 
       const searchUrl = `https://${baseDomain}/w/wholesale-${searchQuery.replace(/\s+/g, '-').toLowerCase()}.html?page=${page}`;
       const acceptLang = `${finalLang}-${finalCountry.toUpperCase()},${finalLang};q=0.9,en;q=0.8`;
+      
+      // 🔥 استخدام العملة التي طلبها المستخدم (أو USD إذا تم إجبار أمريكا)
       const cookieStr = `aep_usuc_f=site=glo&c_tp=${finalCurrency}&region=${finalCountry.toUpperCase()}&b_locale=${finalLang}_${finalCountry.toUpperCase()}`;
 
-      console.log(`🔍 Search: "${searchQuery}" | Country: ${finalCountry} | Currency: ${finalCurrency} | Domain: ${baseDomain}`);
+      console.log(`🔍 Search: "${searchQuery}" | Country: ${finalCountry} | User Currency: ${reqCurrency} | Used Currency: ${finalCurrency} | Domain: ${baseDomain}`);
 
-      // 3. إرسال الطلب إلى ScrapingAnt
       const antUrl = new URL('https://api.scrapingant.com/v2/general');
       antUrl.searchParams.set('url', searchUrl);
       antUrl.searchParams.set('x-api-key', env.SCRAPINGANT_API_KEY);
@@ -196,7 +197,8 @@ export default {
       const products = parseItems(html);
       if (products.length === 0) return json({ success: false, message: "لا توجد منتجات.", aiQuery: searchQuery });
 
-      return json({ success: true, data: products, aiQuery: searchQuery });
+      // 🔥 إرجاع العملة للواجهة لكي تعرضها
+      return json({ success: true, data: products, aiQuery: searchQuery, currency: finalCurrency });
 
     } catch (error) {
       return json({ success: false, error: error.message }, 500);
