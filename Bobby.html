@@ -1,334 +1,268 @@
 /* ============================================
-   Smart Shopper - Fullscreen Page Styles
+   Smart Shopper - Fullscreen Page Module
    With AI-Controlled Sectioning
    ============================================ */
+   (function () {
+    'use strict';
+  
+    const FS_ID = 'ss-fullscreen';
+    let isOpen = false;
+    let items = [];
+    let activeTab = 0;
+    let fetching = false;
+    let currentProductPrice = 0;
+    let callbacks = {};
 
-#ss-fullscreen {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    z-index: 2147483647;
-    background: #f8fafc;
-    display: flex;
-    flex-direction: column;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    direction: ltr;
-    user-select: none;
-}
-
-/* ============================================
-   Header
-   ============================================ */
-.ss-fs-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 32px;
-    background: #ffffff;
-    border-bottom: 1px solid #e2e8f0;
-    flex-shrink: 0;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-    z-index: 10;
-}
-
-.ss-fs-header-left { display: flex; align-items: center; gap: 16px; }
-
-.ss-fs-logo {
-    background: linear-gradient(135deg, #ff4757, #ff6b81);
-    color: white;
-    font-weight: 900;
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    flex-shrink: 0;
-    box-shadow: 0 4px 12px rgba(255, 71, 87, 0.2);
-}
-
-.ss-fs-titles { display: flex; flex-direction: column; }
-.ss-fs-title { font-size: 20px; font-weight: 800; line-height: 1.2; color: #0f172a; }
-.ss-fs-sub { font-size: 13px; color: #64748b; margin-top: 2px; }
-
-.ss-fs-header-btns { display: flex; gap: 12px; align-items: center; }
-
-.ss-fs-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: #f1f5f9;
-    border: 1px solid #e2e8f0;
-    color: #334155;
-    padding: 10px 16px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
-    transition: all 0.2s;
-    font-family: inherit;
-}
-.ss-fs-btn:hover { background: #e2e8f0; color: #0f172a; }
-.ss-fs-btn:active { transform: scale(0.97); }
-
-.ss-fs-back { background: #0f172a; color: #ffffff; border-color: #0f172a; }
-.ss-fs-back:hover { background: #1e293b; color: #ffffff; }
-
-.ss-fs-close { background: #fee2e2; color: #dc2626; border-color: #fecaca; }
-.ss-fs-close:hover { background: #ef4444; color: #ffffff; border-color: #ef4444; }
-
-/* ============================================
-   Tabs
-   ============================================ */
-.ss-fs-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    padding: 16px 32px;
-    background: #f8fafc;
-    border-bottom: 1px solid #e2e8f0;
-    flex-shrink: 0;
-}
-
-.ss-fs-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
-    font-size: 13.5px;
-    font-weight: 600;
-    color: #64748b;
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 24px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    white-space: nowrap;
-}
-.ss-fs-tab svg { display: block; color: #94a3b8; transition: color 0.2s; }
-
-.ss-fs-tab:hover:not(.active) { 
-    background: #f1f5f9; 
-    border-color: #cbd5e1; 
-    color: #334155;
-}
-.ss-fs-tab:hover:not(.active) svg { color: #475569; }
-
-.ss-fs-tab.active { 
-    background: #0f172a; 
-    border-color: #0f172a; 
-    color: #ffffff; 
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.25); 
-    transform: translateY(-1px);
-}
-.ss-fs-tab.active svg { color: #ffffff; }
-
-/* ============================================
-   List - Grid Layout
-   ============================================ */
-.ss-fs-list {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 24px 32px;
-    display: block;
-    background: #f8fafc;
-    max-width: 1600px;
-    margin: 0 auto;
-    width: 100%;
-}
-
-.ss-fs-list::-webkit-scrollbar { width: 10px; }
-.ss-fs-list::-webkit-scrollbar-track { background: #f8fafc; }
-.ss-fs-list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid #f8fafc; }
-.ss-fs-list::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-
-/* Grid wrapper inside list */
-.ss-fs-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-    gap: 16px;
-    align-content: start;
-}
-
-/* ============================================
-   🔥 Section Headers (AI-Controlled)
-   ============================================ */
-.ss-fs-section-header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 18px 24px;
-    margin: 8px 0 18px;
-    border-radius: 16px;
-    position: relative;
-    border: 1.5px solid;
-    overflow: hidden;
-    animation: ss-fs-section-in 0.4s ease-out;
-}
-
-@keyframes ss-fs-section-in {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.ss-fs-section-header::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0;
-    width: 5px; height: 100%;
-}
-
-/* Best matches (green) */
-.ss-fs-section-best {
-    background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
-    border-color: #86efac;
-    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.10);
-}
-.ss-fs-section-best::before { background: linear-gradient(180deg, #10b981, #059669); }
-.ss-fs-section-best .ss-fs-section-title { color: #047857; }
-.ss-fs-section-best .ss-fs-section-subtitle { color: #059669; }
-.ss-fs-section-best .ss-fs-section-count {
-    background: rgba(16, 185, 129, 0.15);
-    color: #047857;
-}
-
-/* You may like (neutral) */
-.ss-fs-section-similar {
-    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-    border-color: #cbd5e1;
-}
-.ss-fs-section-similar::before { background: linear-gradient(180deg, #94a3b8, #64748b); }
-.ss-fs-section-similar .ss-fs-section-title { color: #475569; }
-.ss-fs-section-similar .ss-fs-section-subtitle { color: #64748b; }
-.ss-fs-section-similar .ss-fs-section-count {
-    background: rgba(100, 116, 139, 0.15);
-    color: #475569;
-}
-
-.ss-fs-section-icon { font-size: 32px; flex-shrink: 0; line-height: 1; }
-.ss-fs-section-info { flex: 1; min-width: 0; }
-.ss-fs-section-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    font-size: 18px;
-    font-weight: 800;
-    line-height: 1.3;
-    letter-spacing: 0.3px;
-}
-.ss-fs-section-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 34px;
-    height: 28px;
-    padding: 0 10px;
-    border-radius: 14px;
-    font-size: 13px;
-    font-weight: 800;
-}
-.ss-fs-section-subtitle {
-    font-size: 13px;
-    margin-top: 4px;
-    font-weight: 500;
-}
-
-/* ============================================
-   Product Card
-   ============================================ */
-.ss-fs-card {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 16px;
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    text-decoration: none;
-    color: inherit;
-    cursor: pointer;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    min-height: 120px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.03);
-    animation: ss-fs-fade-in 0.4s ease-out;
-}
-
-@keyframes ss-fs-fade-in { 
-    from { opacity: 0; transform: translateY(10px); } 
-    to { opacity: 1; transform: translateY(0); } 
-}
-
-.ss-fs-card:hover { 
-    border-color: #cbd5e1; 
-    transform: translateY(-3px); 
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08); 
-}
-
-.ss-fs-thumb-wrapper { flex-shrink: 0; width: 96px; height: 96px; border-radius: 12px; overflow: hidden; background: #f8fafc; border: 1px solid #f1f5f9; }
-.ss-fs-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
-.ss-fs-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: 36px; color: #cbd5e1; }
-
-.ss-fs-card-content { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px; overflow: hidden; }
-.ss-fs-card-title { font-size: 14px; font-weight: 600; color: #1e293b; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
-.ss-fs-card-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #64748b; white-space: nowrap; }
-.ss-fs-stars { color: #f59e0b; font-size: 14px; letter-spacing: -0.5px; }
-.ss-fs-rating { color: #334155; font-weight: 700; font-size: 12.5px; }
-.ss-fs-sold { color: #94a3b8; font-size: 12px; }
-.ss-fs-no-info { color: #cbd5e1; font-size: 12px; font-style: italic; }
-
-/* ============================================
-   Price Boxes
-   ============================================ */
-.ss-fs-price-box { 
-    flex-shrink: 0; 
-    background: #ecfdf5; 
-    border: 1px solid #a7f3d0; 
-    border-radius: 12px; 
-    padding: 14px 18px; 
-    min-width: 120px; 
-    max-width: 150px; 
-    text-align: center; 
-    display: flex; 
-    flex-direction: column; 
-    justify-content: center; 
-    gap: 6px; 
-}
-.ss-fs-price { font-size: 20px; font-weight: 800; color: #059669; line-height: 1.1; letter-spacing: -0.5px; }
-.ss-fs-discount { font-size: 12px; font-weight: 700; color: #10b981; line-height: 1.1; }
-
-.ss-fs-price-box.ss-fs-higher { background: #fef2f2; border-color: #fecaca; }
-.ss-fs-price-box.ss-fs-higher .ss-fs-price { color: #dc2626; }
-.ss-fs-price-box.ss-fs-higher .ss-fs-discount { color: #ef4444; }
-
-/* ============================================
-   Footer
-   ============================================ */
-.ss-fs-footer { 
-    flex-shrink: 0; 
-    padding: 16px 32px; 
-    background: #ffffff; 
-    border-top: 1px solid #e2e8f0; 
-    display: flex; 
-    justify-content: center; 
-    align-items: center; 
-    gap: 8px; 
-    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.02); 
-}
-.ss-fs-loading { background: #f1f5f9 !important; color: #64748b !important; box-shadow: none !important; border-radius: 20px; padding: 10px 20px; font-weight: 600; }
-.ss-fs-spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #cbd5e1; border-top-color: #0f172a; border-radius: 50%; animation: ss-fs-spin 0.7s linear infinite; margin-right: 8px; }
-@keyframes ss-fs-spin { to { transform: rotate(360deg); } }
-
-.ss-fs-counter { font-size: 13px; color: #64748b; font-weight: 600; background: #f1f5f9; padding: 8px 16px; border-radius: 20px; }
-.ss-fs-msg { text-align: center; padding: 80px 20px; font-size: 16px; color: #64748b; font-weight: 500; }
-
-@media (max-width: 1024px) {
-    .ss-fs-header { padding: 16px 20px; }
-    .ss-fs-tabs { padding: 16px 20px; }
-    .ss-fs-list { padding: 20px; }
-    .ss-fs-grid { grid-template-columns: 1fr; }
-    .ss-fs-back span { display: none; }
-    .ss-fs-section-title { font-size: 15px; }
-    .ss-fs-section-icon { font-size: 26px; }
-}
+    // قراءة العملة ديناميكياً
+    let currentCurrencySymbol = '$';
+    (function detectCurrency() {
+      try {
+        const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+        if (ck) {
+          const params = new URLSearchParams(decodeURIComponent(ck[1]));
+          const cur = params.get('c_tp');
+          if (cur) currentCurrencySymbol = cur.toUpperCase();
+        }
+      } catch (e) {}
+    })();
+  
+    const SVG = {
+      back: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
+      close: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+      all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
+      cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
+      rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
+      discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
+      selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
+      similar: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>'
+    };
+  
+    const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
+    const U = () => window.SS_Utils || {};
+  
+    const esc = (s) => U().esc ? U().esc(s) : String(s || '');
+    const num = (s) => U().num ? U().num(s) : 0;
+    const stars = (r) => U().stars ? U().stars(r) : '';
+  
+    function buildDOM() {
+      let el = document.getElementById(FS_ID);
+      if (el) el.remove();
+  
+      el = document.createElement('div');
+      el.id = FS_ID;
+      el.innerHTML = `
+        <div class="ss-fs-header">
+          <div class="ss-fs-header-left">
+            <div class="ss-fs-logo">S</div>
+            <div class="ss-fs-titles">
+              <div class="ss-fs-title">${esc(T('panelTitle'))}</div>
+              <div class="ss-fs-sub">${esc(T('panelSubtitle'))}</div>
+            </div>
+          </div>
+          <div class="ss-fs-header-btns">
+            <button class="ss-fs-btn ss-fs-back" id="ss-fs-back" title="${esc(T('back') || 'Back')}">
+              ${SVG.back} <span>${esc(T('back') || 'Retour')}</span>
+            </button>
+            <button class="ss-fs-btn ss-fs-close" id="ss-fs-close" title="${esc(T('close'))}">${SVG.close}</button>
+          </div>
+        </div>
+        <div class="ss-fs-tabs" id="ss-fs-tabs">
+          <span class="ss-fs-tab" data-i="0">${SVG.all}<span>${esc(T('tabAll'))}</span></span>
+          <span class="ss-fs-tab" data-i="1">${SVG.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
+          <span class="ss-fs-tab" data-i="2">${SVG.rated}<span>${esc(T('tabBestRated'))}</span></span>
+          <span class="ss-fs-tab" data-i="3">${SVG.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
+          <span class="ss-fs-tab" data-i="4">${SVG.selling}<span>${esc(T('tabBestSelling'))}</span></span>
+          <span class="ss-fs-tab" data-i="5">${SVG.similar}<span>${esc(T('tabSimilar') || 'Similar')}</span></span>
+        </div>
+        <div class="ss-fs-list" id="ss-fs-list"></div>
+        <div class="ss-fs-footer" id="ss-fs-footer"></div>
+      `;
+      document.documentElement.appendChild(el);
+  
+      document.getElementById('ss-fs-back').onclick = () => close();
+      document.getElementById('ss-fs-close').onclick = () => close();
+      document.getElementById('ss-fs-tabs').addEventListener('click', (e) => {
+        const tab = e.target.closest('.ss-fs-tab');
+        if (!tab) return;
+        const newTab = +tab.dataset.i;
+        if (newTab === activeTab) return;
+        activeTab = newTab;
+        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => x.classList.toggle('active', x === tab));
+        if (callbacks.onTabChange) callbacks.onTabChange(newTab);
+      });
+  
+      document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x => {
+        x.classList.toggle('active', +x.dataset.i === activeTab);
+      });
+    }
+  
+    // 🔥 بناء رأس القسم
+    function buildSectionHeader(type, count) {
+      if (type === 'best') {
+        return `<div class="ss-fs-section-header ss-fs-section-best">
+          <div class="ss-fs-section-icon">🎯</div>
+          <div class="ss-fs-section-info">
+            <div class="ss-fs-section-title">
+              <span>${esc(T('sectionBestMatch') || 'Best matches')}</span>
+              <span class="ss-fs-section-count">${count}</span>
+            </div>
+            <div class="ss-fs-section-subtitle">${esc(T('sectionBestMatchSub') || 'Same product, other sellers')}</div>
+          </div>
+        </div>`;
+      }
+      return `<div class="ss-fs-section-header ss-fs-section-similar">
+        <div class="ss-fs-section-icon">💡</div>
+        <div class="ss-fs-section-info">
+          <div class="ss-fs-section-title">
+            <span>${esc(T('sectionYouMayLike') || 'You may like')}</span>
+            <span class="ss-fs-section-count">${count}</span>
+          </div>
+          <div class="ss-fs-section-subtitle">${esc(T('sectionYouMayLikeSub') || 'Similar products')}</div>
+        </div>
+      </div>`;
+    }
+  
+    function buildCard(it) {
+      const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
+      const itemPrice = num(it.price);
+      const hasComparison = currentProductPrice > 0 && itemPrice > 0;
+      const isHigher = hasComparison && itemPrice > currentProductPrice;
+      const boxClass = isHigher ? 'ss-fs-price-box ss-fs-higher' : 'ss-fs-price-box';
+  
+      const priceBox = `
+        <div class="${boxClass}">
+          <div class="ss-fs-price">${it.price ? esc(it.price) + ' ' + currentCurrencySymbol : '—'}</div>
+          ${discountValue ? `<div class="ss-fs-discount">-${esc(discountValue)}%</div>` : ''}
+        </div>`;
+  
+      let metaHtml = '';
+      if (it.rating) metaHtml += `<span class="ss-fs-stars">${stars(it.rating)}</span><span class="ss-fs-rating">${esc(it.rating)}</span>`;
+      if (it.sold) metaHtml += `<span class="ss-fs-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
+      if (!metaHtml) metaHtml = `<span class="ss-fs-no-info">${esc(T('noReviews'))}</span>`;
+  
+      return `
+        <a class="ss-fs-card" href="${esc(it.link)}" target="_blank" rel="noopener">
+          <div class="ss-fs-thumb-wrapper">
+            ${it.img ? `<img class="ss-fs-thumb" src="${esc(it.img)}" alt="">` : `<div class="ss-fs-thumb ss-fs-thumb-empty">🛍</div>`}
+          </div>
+          <div class="ss-fs-card-content">
+            <div class="ss-fs-card-title">${esc(it.title || 'Produit similaire')}</div>
+            <div class="ss-fs-card-meta">${metaHtml}</div>
+          </div>
+          ${priceBox}
+        </a>`;
+    }
+  
+    // 🔥 بناء مجموعة بطاقات داخل شبكة
+    function buildGrid(items) {
+      if (items.length === 0) return '';
+      return `<div class="ss-fs-grid">${items.map(buildCard).join('')}</div>`;
+    }
+  
+    function renderList() {
+      const l = document.getElementById('ss-fs-list'); if (!l) return;
+  
+      if (items.length === 0) {
+        l.innerHTML = `<div class="ss-fs-msg">${esc(T('noResults'))}</div>`;
+        updateFooter();
+        return;
+      }
+  
+      let html = '';
+      
+      // 🔥 التقسيم في تبويب "All" فقط (activeTab === 0)
+      const shouldGroup = (activeTab === 0) && items.some(it => it.isExact !== undefined);
+      
+      if (shouldGroup) {
+        const exactItems = items.filter(it => it.isExact);
+        const similarItems = items.filter(it => !it.isExact);
+        
+        // ترتيب Exact: الأقرب سعراً للأصلي
+        exactItems.sort((a, b) => {
+          const pa = num(a.price), pb = num(b.price), po = currentProductPrice;
+          if (po > 0 && pa > 0 && pb > 0) {
+            return Math.abs(pa - po) - Math.abs(pb - po);
+          }
+          return (b.finalScore || 0) - (a.finalScore || 0);
+        });
+        
+        // القسم العلوي: Best matches
+        if (exactItems.length > 0) {
+          html += buildSectionHeader('best', exactItems.length);
+          html += buildGrid(exactItems);
+        }
+        
+        // القسم السفلي: You may like
+        if (similarItems.length > 0) {
+          html += buildSectionHeader('similar', similarItems.length);
+          html += buildGrid(similarItems);
+        }
+      } else {
+        // بدون تقسيم
+        html = buildGrid(items);
+      }
+  
+      l.innerHTML = html;
+      updateFooter();
+    }
+  
+    function updateFooter() {
+      const f = document.getElementById('ss-fs-footer'); if (!f) return;
+      let html = '';
+  
+      if (fetching) {
+        html += `<div class="ss-fs-loading" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:13px; padding:15px;">
+          <span class="ss-fs-spinner"></span>
+          <span>${esc(T('loading'))}</span>
+        </div>`;
+      } else if (items.length > 0) {
+        html += `<div class="ss-fs-counter">${items.length} ${esc(T('soldSuffix')) === 'vendus' ? 'produits' : 'items'}</div>`;
+      }
+  
+      f.innerHTML = html;
+    }
+  
+    function open(opts) {
+      opts = opts || {};
+      items = opts.items || [];
+      activeTab = opts.activeTab || 0;
+      fetching = !!opts.fetching;
+      currentProductPrice = opts.currentProductPrice || 0;
+      callbacks = {
+        onTabChange: opts.onTabChange || null,
+        onRefresh: opts.onRefresh || null,
+        onClose: opts.onClose || null
+      };
+  
+      buildDOM();
+      renderList();
+      isOpen = true;
+      document.documentElement.style.overflow = 'hidden';
+    }
+  
+    function close() {
+      const el = document.getElementById(FS_ID);
+      if (el) el.remove();
+      isOpen = false;
+      document.documentElement.style.overflow = '';
+      if (callbacks.onClose) callbacks.onClose();
+    }
+  
+    function updateItems(newItems) {
+      items = newItems || [];
+      if (isOpen) renderList();
+    }
+  
+    function setState(state) {
+      if (state.fetching !== undefined) fetching = state.fetching;
+      if (state.activeTab !== undefined) {
+        activeTab = state.activeTab;
+        document.querySelectorAll('#ss-fs-tabs .ss-fs-tab').forEach(x =>
+          x.classList.toggle('active', +x.dataset.i === activeTab)
+        );
+      }
+      if (isOpen) updateFooter();
+    }
+  
+    window.SS_Fullscreen = { open, close, updateItems, setState, isOpen: () => isOpen };
+  })();
