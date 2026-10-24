@@ -221,19 +221,20 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
-    // 🔥 قراءة الدولة (وليس العملة) من إعدادات المتجر
+    // 🔥 قراءة الدولة من إعدادات المتجر (يدعم aliexpress.com و النطاقات الفرعية)
     function getStoreSettings() {
         const host = location.hostname;
         const sub = host.split('.')[0];
 
-        // 1. النطاقات الثابتة
+        // 1. النطاقات الصريحة
         if (host === 'aliexpress.us' || host.endsWith('.aliexpress.us')) return { country: 'US', lang: 'en', subdomain: 'us' };
         if (host === 'aliexpress.ru' || host.endsWith('.aliexpress.ru')) return { country: 'RU', lang: 'ru', subdomain: 'ru' };
 
+        // 2. النطاقات الفرعية للدول
         const countrySubdomains = { 'fr': 'FR', 'es': 'ES', 'de': 'DE', 'it': 'IT', 'pt': 'PT', 'nl': 'NL', 'pl': 'PL', 'tr': 'TR', 'ja': 'JP', 'ko': 'KR', 'he': 'IL', 'vi': 'VN', 'th': 'TH', 'id': 'ID' };
         if (countrySubdomains[sub]) return { country: countrySubdomains[sub], lang: sub, subdomain: sub };
 
-        // 2. قراءة الكوكيز (حقل region يمثل دولة الشحن)
+        // 3. قراءة الكوكيز (تعمل مع aliexpress.com و ar.aliexpress.com)
         try {
             const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
             if (ck) {
@@ -243,43 +244,33 @@
                 if (region && region.length === 2) {
                     let lang = (sub === 'ar') ? 'ar' : 'en';
                     if (bLocale) lang = bLocale.split('_')[0].toLowerCase();
+                    const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
                     console.log(`[Smart Shopper] Country from Cookie (region): ${region}`);
-                    return { country: region.toUpperCase(), lang: lang, subdomain: sub };
+                    return { country: region.toUpperCase(), lang: lang, subdomain: actualSub };
                 }
             }
         } catch (e) {}
 
-        // 3. قراءة المتغيرات الداخلية للموقع (JS)
+        // 4. قراءة المتغيرات الداخلية للصفحة
         try {
             if (window._dida_config_ && window._dida_config_._init_data_ && window._dida_config_._init_data_.data) {
                 const data = window._dida_config_._init_data_.data;
                 if (data.region) {
+                    const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
                     console.log(`[Smart Shopper] Country from Page JS: ${data.region}`);
-                    return { country: data.region.toUpperCase(), lang: (sub === 'ar') ? 'ar' : 'en', subdomain: sub };
+                    return { country: data.region.toUpperCase(), lang: (sub === 'ar') ? 'ar' : 'en', subdomain: actualSub };
                 }
             }
         } catch (e) {}
 
-        // 4. النطاق العربي: إذا فشل كل شيء، نقرأ النص من شاشة الشحن
+        // 5. النطاق العربي
         if (sub === 'ar') {
-            try {
-                // محاولة قراءة الكلمة بجانب أيقونة الشحن
-                const shipEl = document.querySelector('.ship-to') || document.querySelector('.product-ship-to');
-                if (shipEl) {
-                    const txt = shipEl.textContent.toLowerCase();
-                    if (txt.includes('السعودية') || txt.includes('saudi')) return { country: 'SA', lang: 'ar', subdomain: 'ar' };
-                    if (txt.includes('الإمارات') || txt.includes('emirates')) return { country: 'AE', lang: 'ar', subdomain: 'ar' };
-                    if (txt.includes('مصر') || txt.includes('egypt')) return { country: 'EG', lang: 'ar', subdomain: 'ar' };
-                    if (txt.includes('الجزائر') || txt.includes('algeria')) return { country: 'DZ', lang: 'ar', subdomain: 'ar' };
-                    if (txt.includes('المغرب') || txt.includes('morocco')) return { country: 'MA', lang: 'ar', subdomain: 'ar' };
-                }
-            } catch(e){}
-            
-            // افتراضي للنطاق العربي إذا فشل كل شيء
             return { country: 'SA', lang: 'ar', subdomain: 'ar' };
         }
 
-        return { country: 'US', lang: 'en', subdomain: 'www' };
+        // 6. الافتراضي
+        const actualSub = (sub === 'aliexpress' || sub === 'www') ? 'www' : sub;
+        return { country: 'US', lang: 'en', subdomain: actualSub };
     }
   
     function applySort() {
