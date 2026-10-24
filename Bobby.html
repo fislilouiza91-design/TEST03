@@ -1,7 +1,8 @@
 /* ============================================
-   Smart Shopper - Content Script (FIXED)
-   - Calls SORT_ITEMS after fetching
-   - Divider between Exact and Similar
+   Smart Shopper - Content Script (Raw All Tab)
+   - Tab 0 (All): Raw fetch order, no divider, no sort.
+   - Tabs 1-4: Exact top → divider → Close bottom.
+   - Tab 5: Similar only.
    ============================================ */
    (function () {
     'use strict';
@@ -225,6 +226,16 @@
   
     function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
   
+    function classify3Tier(it) {
+      if (!it.isExact) return { ...it, _tier: 'similar' };
+      
+      const price = num(it.price);
+      const priceIsClose = currentProductPrice <= 0 || (price > 0 && price >= currentProductPrice * 0.5 && price <= currentProductPrice * 1.8);
+      
+      if (priceIsClose) return { ...it, _tier: 'exact' };
+      return { ...it, _tier: 'close' };
+    }
+  
     function applySort() {
       const p = detectProduct();
       const getOriginalProduct = () => {
@@ -236,26 +247,29 @@
               price: p.price > 0 ? p.price.toString() : '',
               rating: '0', sold: '',
               link: window.location.href,
-              isExact: true, finalScore: 999
+              isExact: true, finalScore: 999, _tier: 'exact'
           }];
       };
   
-      if (activeTab === 0) { 
-          const exact = allFetchedItems.filter(it => it.isExact).sort((a,b) => (b.finalScore||0)-(a.finalScore||0));
-          const similar = allFetchedItems.filter(it => !it.isExact).sort((a,b) => (b.finalScore||0)-(a.finalScore||0));
-          cachedSortedItems = [...exact, ...similar];
+      // 🔥 Tab 0 (All): خام - بدون أي فرز
+      if (activeTab === 0) {
+          cachedSortedItems = [...allFetchedItems];
           if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
-          return; 
+          return;
       }
+  
+      const classified = allFetchedItems.map(classify3Tier);
       
+      // Tab 5 (Similar): مشابه فقط
       if (activeTab === 5) {
-          cachedSortedItems = allFetchedItems.filter(it => !it.isExact);
+          cachedSortedItems = classified.filter(it => it._tier === 'similar');
           if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
           return;
       }
       
-      const exactMatches = allFetchedItems.filter(it => it.isExact);
-      const similarMatches = allFetchedItems.filter(it => !it.isExact);
+      // Tabs 1-4: Exact + Close مع فرز
+      const exactGroup = classified.filter(it => it._tier === 'exact');
+      const closeGroup = classified.filter(it => it._tier === 'close');
       
       const sorters = [ 
           null, 
@@ -266,11 +280,10 @@
       ];
       const sortFn = sorters[activeTab] || sorters[1];
       
-      exactMatches.sort(sortFn);
-      similarMatches.sort(sortFn);
+      exactGroup.sort(sortFn);
+      closeGroup.sort(sortFn);
       
-      cachedSortedItems = [...exactMatches, ...similarMatches];
-      
+      cachedSortedItems = [...exactGroup, ...closeGroup];
       if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
     }
   
@@ -320,25 +333,25 @@
   
       const temp = document.createElement('div');
       
-      const shouldGroup = (activeTab === 0) && cachedSortedItems.length > 0;
-      
-      if (shouldGroup) {
-        const exactItems = cachedSortedItems.filter(it => it.isExact);
-        const similarItems = cachedSortedItems.filter(it => !it.isExact);
+      // 🔥 Tab 0 (All): عرض خام بدون فاصل
+      if (activeTab === 0 || activeTab === 5) {
+        cachedSortedItems.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
+      } else {
+        // Tabs 1-4: Exact → فاصل → Close
+        const exactGroup = cachedSortedItems.filter(it => it._tier === 'exact');
+        const closeGroup = cachedSortedItems.filter(it => it._tier === 'close');
         
-        if (exactItems.length > 0) {
-          exactItems.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
+        if (exactGroup.length > 0) {
+          exactGroup.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
         }
         
-        if (exactItems.length > 0 && similarItems.length > 0) {
+        if (exactGroup.length > 0 && closeGroup.length > 0) {
           temp.innerHTML += `<div class="ss-divider"></div>`;
         }
         
-        if (similarItems.length > 0) {
-          similarItems.forEach((it, i) => { temp.innerHTML += buildCard(it, exactItems.length + i); });
+        if (closeGroup.length > 0) {
+          closeGroup.forEach((it, i) => { temp.innerHTML += buildCard(it, exactGroup.length + i); });
         }
-      } else {
-        cachedSortedItems.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
       }
   
       l.innerHTML = '';
@@ -372,9 +385,8 @@
       return '';
     }
 
-    // 🔥 دالة إرسال المنتجات للذكاء الاصطناعي (كانت مفقودة)
     function triggerAISort() {
-      if (isBackgroundFetching) return; // لا تفرز إذا كان الجلب مستمراً
+      if (isBackgroundFetching) return; 
       
       searchState.running = true;
       updateProgress();
@@ -395,7 +407,16 @@
           
           if (sortResp && sortResp.ok && sortResp.items) {
               allFetchedItems = sortResp.items;
-              renderList(true); updateProgress(); syncFullscreen();
+              // 🔥 لا نعيد عرض Tab 0 إذا كان المستخدم فيه (يبقى كما هو بدون تغيير الترتيب)
+              if (activeTab === 0) {
+                  // تحديث العلامات الداخلية فقط (isExact) بدون إعادة ترتيب
+                  // لكن التحديث سيعيد ترتيب Tab 1-4 عند التبديل إليها
+                  updateProgress();
+                  updateFooter();
+              } else {
+                  renderList(true);
+              }
+              syncFullscreen();
           }
           updateFooter();
       });
@@ -406,7 +427,7 @@
       
       if (nextPageToFetch === 3 && allFetchedItems.length <= 220) {
           hasMoreResults = false;
-          triggerAISort(); // 🔥 الفرز بعد التوقف
+          triggerAISort(); 
           updateFooter();
           syncFullscreen();
           return;
@@ -428,13 +449,13 @@
   
               if (!resp.hasMore || nextPageToFetch > MAX_PAGES_TO_FETCH || resp.items.length === 0) {
                   hasMoreResults = false; 
-                  triggerAISort(); // 🔥 الفرز بعد انتهاء كل الصفحات
+                  triggerAISort(); 
               } else {
                   setTimeout(prefetchBackgroundPages, 2000); 
               }
           } else { 
               hasMoreResults = false; 
-              triggerAISort(); // 🔥 الفرز عند فشل الجلب
+              triggerAISort(); 
           }
           updateFooter(); syncFullscreen();
       });
@@ -468,16 +489,15 @@
         
         if (allFetchedItems.length <= 40) {
             hasMoreResults = false;
-            triggerAISort(); // 🔥 الفرز إذا كانت المنتجات قليلة
+            triggerAISort(); 
             return;
         }
 
         if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
-            // ننتظر قليلاً ثم نجلب الصفحة التالية، وبعدها يتم الفرز
             setTimeout(prefetchBackgroundPages, 1000);
         } else {
             hasMoreResults = false;
-            triggerAISort(); // 🔥 الفرز إذا لم تكن هناك صفحات أخرى
+            triggerAISort(); 
         }
       });
     }
