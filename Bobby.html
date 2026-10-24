@@ -1,5 +1,6 @@
 /* ============================================
-   Smart Shopper - Lean & Fast Worker (Fixed)
+   Smart Shopper - Related-First Worker
+   Default: Exact | Similar only for unrelated
    ============================================ */
 
 const CORS = {
@@ -7,6 +8,82 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
+
+// 🔥 كلمات الحشو
+const STOP_WORDS = new Set([
+  'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
+  'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
+  'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
+  'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
+  'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
+  'sans','fil','sur','pour','avec','les','des','une','dans','par','plus','gratuit','livraison'
+]);
+
+// 🔥 مجالات المنتجات (domains)
+const DOMAINS = {
+  watch: ['watch','wristwatch','smartwatch','wrist','horloge','montre'],
+  phone: ['iphone','samsung','xiaomi','huawei','oneplus','galaxy','pixel','phone','smartphone','mobile','telephone'],
+  audio: ['headphone','earphone','earbud','headset','speaker','airpod','casque','écouteur'],
+  computer: ['laptop','notebook','macbook','chromebook','desktop','computer','ordinateur'],
+  camera: ['camera','lens','dslr','mirrorless','gopro','caméra','appareil photo'],
+  keyboard_mouse: ['keyboard','mouse','trackpad','keycap','clavier','souris'],
+  display: ['monitor','display','screen','television','écran','télé'],
+  storage: ['ssd','hdd','flash drive','usb drive','memory card','hard drive','disque'],
+  tablet: ['ipad','tablet','tab','tablette'],
+  gaming: ['playstation','xbox','nintendo','switch','gaming','gamer','jeu'],
+  printer: ['printer','imprimante','scanner','toner','ink cartridge'],
+  smart_home: ['alexa','google home','smart plug','smart bulb','domotique'],
+  power: ['power bank','battery','powerbank','batterie','chargeur'],
+  cable: ['usb cable','charging cable','type-c','lightning','hdmi','câble'],
+  bag: ['backpack','handbag','wallet','purse','sac','portefeuille'],
+};
+
+// 🔥 مؤشرات الملحقات (تُلحق بالمجال الذي تسبقه)
+const ACCESSORY_HINTS = {
+  watch: ['strap','band','bracelet','buckle','clasp'],
+  phone: ['case','cover','protector','shell','pouch','sleeve'],
+  tablet: ['case','cover','protector','shell','keyboard case'],
+  audio: ['case','cover','cushion','pad','earpads'],
+};
+
+// 🔥 تصنيف المجال
+function classifyDomain(title) {
+  const lower = title.toLowerCase();
+  
+  // فحص المجالات الأساسية أولاً
+  for (const [domain, keywords] of Object.entries(DOMAINS)) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return domain;
+    }
+  }
+  
+  // فحص مؤشرات الملحقات
+  for (const [domain, keywords] of Object.entries(ACCESSORY_HINTS)) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return domain;
+    }
+  }
+  
+  return null;
+}
+
+// 🔥 تطبيع الكلمات (للمقارنة النصية)
+function tokenize(text) {
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+// 🔥 Jaccard similarity
+function jaccardSimilarity(tokens1, tokens2) {
+  if (!tokens1.length || !tokens2.length) return 0;
+  const set1 = new Set(tokens1);
+  const set2 = new Set(tokens2);
+  const intersection = [...set1].filter(t => set2.has(t)).length;
+  const union = new Set([...set1, ...set2]).size;
+  return union > 0 ? intersection / union : 0;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -16,6 +93,9 @@ export default {
 
     const url = new URL(request.url);
 
+    // ==========================================
+    // 🔥 SORT ENDPOINT
+    // ==========================================
     if (request.method === "POST" && url.pathname === "/sort") {
       const startTime = Date.now();
       
@@ -27,251 +107,107 @@ export default {
           return json({ success: true, data: items || [] });
         }
 
-        console.log(`\n⚡ === SORT START ===`);
-        console.log(`📝 Original: "${originalTitle}"`);
-        console.log(`📦 Items: ${items.length}`);
+        console.log(`\n=== SORT START ===`);
+        console.log(`Original: "${originalTitle}"`);
+        console.log(`Items: ${items.length}`);
 
-        // ============================================
-        // PHASE 1: TF-IDF Vectorization (Local, 0 neurons)
-        // ============================================
-        const STOP_WORDS = new Set([
-          'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
-          'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
-          'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
-          'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
-          'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
-          'sans','fil','sur','pour','avec','les','des','une','dans','par'
-        ]);
-
-        const tokenize = (text) => text.toLowerCase()
-          .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
-          .split(/\s+/)
-          .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-
-        const docTokens = items.map(it => tokenize(it.title));
-        const df = {};
-        const N = items.length;
-
-        docTokens.forEach(tokens => {
-          const unique = new Set(tokens);
-          unique.forEach(t => { df[t] = (df[t] || 0) + 1; });
-        });
-
-        const idf = {};
-        for (const term in df) {
-          idf[term] = Math.log((N + 1) / (df[term] + 1)) + 1;
-        }
-
-        const tfidfVectors = docTokens.map(tokens => {
-          const tf = {};
-          tokens.forEach(t => { tf[t] = (tf[t] || 0) + 1; });
-          const vec = {};
-          for (const term in tf) {
-            if (idf[term]) vec[term] = tf[term] * idf[term];
-          }
-          return vec;
-        });
-
+        // 🔥 تصنيف العنوان الأصلي
+        const originalDomain = classifyDomain(originalTitle);
         const originalTokens = tokenize(originalTitle);
-        const originalTf = {};
-        originalTokens.forEach(t => { originalTf[t] = (originalTf[t] || 0) + 1; });
-        const originalVec = {};
-        for (const term in originalTf) {
-          if (idf[term]) originalVec[term] = originalTf[term] * idf[term];
-        }
-
-        const cosine = (vecA, vecB) => {
-          let dot = 0, na = 0, nb = 0;
-          for (const t in vecA) { na += vecA[t] * vecA[t]; }
-          for (const t in vecB) { nb += vecB[t] * vecB[t]; }
-          for (const t in vecA) {
-            if (vecB[t]) dot += vecA[t] * vecB[t];
-          }
-          return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
-        };
-
-        const jaccard = (a, b) => {
-          const setA = new Set(a);
-          const setB = new Set(b);
-          if (!setA.size || !setB.size) return 0;
-          const inter = [...setA].filter(x => setB.has(x)).length;
-          const union = new Set([...setA, ...setB]).size;
-          return inter / union;
-        };
-
-        let scored = items.map((it, i) => {
-          const cos = cosine(originalVec, tfidfVectors[i]);
-          const jac = jaccard(originalTokens, docTokens[i]);
-          return { ...it, _cos: cos, _jac: jac, _textSim: cos * 0.6 + jac * 0.4 };
-        });
-
-        scored.sort((a, b) => b._textSim - a._textSim);
-
-        console.log(`📊 TextSim range: ${scored[0]?._textSim.toFixed(3)} → ${scored[scored.length-1]?._textSim.toFixed(3)}`);
-
-        // ============================================
-        // PHASE 2: Select 10 Diverse Anchors (FIXED)
-        // ============================================
-        const anchors = [];
-        const n = scored.length;
-        const numAnchors = Math.min(10, n);
         
-        if (numAnchors <= 6) {
-          anchors.push(...scored.slice(0, numAnchors));
-        } else {
-          // 🔥 FIX: 5 top + 3 middle + 1 lower-middle + 1 random
-          // (تم تقليل bottom anchors لتجنب bias نحو Similar)
-          anchors.push(...scored.slice(0, 5));
-          
-          // 3 from middle range (not bottom!)
-          const mid = Math.floor(n * 0.4);
-          anchors.push(scored[mid]);
-          anchors.push(scored[Math.min(mid + 1, n - 1)]);
-          anchors.push(scored[Math.min(mid + 2, n - 1)]);
-          
-          // 1 lower-middle (not the absolute bottom)
-          const lowerMid = Math.floor(n * 0.75);
-          anchors.push(scored[lowerMid]);
-          
-          // 1 random
-          const randIdx = 5 + Math.floor(Math.random() * Math.max(1, n - 10));
-          anchors.push(scored[randIdx]);
-        }
+        console.log(`🎯 Original domain: ${originalDomain || 'unknown'}`);
 
-        const anchorIds = new Set();
-        const uniqueAnchors = anchors.filter(a => {
-          if (anchorIds.has(a.id)) return false;
-          anchorIds.add(a.id);
-          return true;
+        // 🔥 حساب الصلة لكل منتج
+        const scored = items.map(it => {
+          const itemTokens = tokenize(it.title);
+          const itemDomain = classifyDomain(it.title);
+          const textSim = jaccardSimilarity(originalTokens, itemTokens);
+          
+          // ============================================
+          // 🔥 قرار الصلة (RELATED vs UNRELATED)
+          // ============================================
+          let isRelated = false;
+          let reason = '';
+          
+          // 🟢 القاعدة 1: نفس المجال → مرتبط (أقوى إشارة)
+          if (originalDomain && itemDomain && originalDomain === itemDomain) {
+            isRelated = true;
+            reason = 'same_domain';
+          }
+          
+          // 🟢 القاعدة 2: كلمة مفتاحية مشتركة (4+ أحرف) → مرتبط
+          if (!isRelated) {
+            const sharedKeywords = originalTokens.filter(t => 
+              itemTokens.includes(t) && t.length >= 4
+            );
+            if (sharedKeywords.length >= 1) {
+              isRelated = true;
+              reason = `shared:${sharedKeywords.slice(0, 2).join(',')}`;
+            }
+          }
+          
+          // 🟢 القاعدة 3: تشابه نصي عالي → مرتبط (إنقاذ)
+          if (!isRelated && textSim >= 0.10) {
+            isRelated = true;
+            reason = 'high_textSim';
+          }
+          
+          // 🟢 القاعدة 4: المجالان مجهولان لكن التشابه معقول → مرتبط
+          if (!isRelated && !originalDomain && !itemDomain && textSim >= 0.05) {
+            isRelated = true;
+            reason = 'unknown_but_similar';
+          }
+          
+          // 🟢 القاعدة 5: عنوان واحد مجهول + تشابه متوسط → مرتبط
+          if (!isRelated && (originalDomain || itemDomain) && textSim >= 0.08) {
+            isRelated = true;
+            reason = 'partial_domain_similar';
+          }
+          
+          // 🔴 غير مرتبط فقط إذا فشلت كل القواعد
+          const isExact = isRelated;
+          
+          // سجل تفصيلي (فقط أول 10 للتوضيح)
+          if (scored.length < 10 || isRelated === false) {
+            const icon = isExact ? '✅' : '❌';
+            console.log(`  ${icon} "${it.title.substring(0, 45)}" [${itemDomain || '?'}] sim=${textSim.toFixed(2)} → ${reason || 'UNRELATED'}`);
+          }
+          
+          // الترتيب: Exact أولاً، ثم الأعلى تشابهاً
+          const score = (isExact ? 1000 : 0) + textSim * 100;
+          
+          return { ...it, _isExact: isExact, _textSim: textSim, _score: score, _reason: reason };
         });
 
-        const remaining = scored.filter(s => !anchorIds.has(s.id));
-
-        console.log(`🎯 Selected ${uniqueAnchors.length} anchors`);
-
-        // ============================================
-        // PHASE 3: AI Embeddings for anchors only
-        // ============================================
-        let anchorVectors = [];
-        try {
-          const anchorTitles = uniqueAnchors.map(a => a.title);
-          const emb = await env.AI.run('@cf/baai/bge-m3', { text: anchorTitles });
-          anchorVectors = emb.data;
-        } catch (e) {
-          console.log(`⚠️ Embedding failed: ${e.message.substring(0, 60)}`);
-        }
-
-        // ============================================
-        // PHASE 4: Classify anchors (FIXED classification)
-        // ============================================
-        const origClass = classifyTitle(originalTitle);
-        console.log(`🧠 Original: ${origClass.type}/${origClass.acc}`);
-        
-        const exactAnchors = [];
-        const similarAnchors = [];
-
-        uniqueAnchors.forEach((anchor, i) => {
-          const cls = classifyTitle(anchor.title);
-          const isExact = isSameType(cls, origClass, anchor._textSim);
-          anchor._isExact = isExact;
-          anchor._score = 1000 - i * 10;
-          anchor._vec = anchorVectors[i] || null;
-          anchor._cls = cls;
-          
-          const icon = isExact ? '✅' : '❌';
-          console.log(`  ${icon} "${anchor.title.substring(0, 45)}" → ${cls.type}/${cls.acc}`);
-          
-          if (isExact) exactAnchors.push(anchor);
-          else similarAnchors.push(anchor);
-        });
-
-        console.log(`📌 Exact: ${exactAnchors.length}, Similar: ${similarAnchors.length}`);
-
-        // ============================================
-        // PHASE 5: Classify remaining (FIXED - no bias!)
-        // ============================================
-        remaining.forEach((item) => {
-          const originalIdx = items.findIndex(x => x.id === item.id);
-          const itemVec = tfidfVectors[originalIdx] || {};
-          const textSim = item._textSim;
-          
-          // Similarity to exact/similar anchors via TF-IDF
-          const avgCosToExact = exactAnchors.length > 0
-            ? exactAnchors.reduce((sum, a) => {
-                const aIdx = items.findIndex(x => x.id === a.id);
-                return sum + cosine(itemVec, tfidfVectors[aIdx] || {});
-              }, 0) / exactAnchors.length
-            : 0;
-          
-          const avgCosToSimilar = similarAnchors.length > 0
-            ? similarAnchors.reduce((sum, a) => {
-                const aIdx = items.findIndex(x => x.id === a.id);
-                return sum + cosine(itemVec, tfidfVectors[aIdx] || {});
-              }, 0) / similarAnchors.length
-            : 0;
-
-          // 🔥 FIX: Primary signal = local classification
-          const itemClass = classifyTitle(item.title);
-          const classMatch = isSameType(itemClass, origClass, textSim);
-          
-          let isExact;
-          
-          if (classMatch) {
-            // Classification says same type → likely Exact
-            // Require minimal text similarity to confirm
-            isExact = textSim >= 0.05 || avgCosToExact >= 0.10;
-          } else {
-            // Classification says different → Similar
-            isExact = false;
-          }
-          
-          // 🔥 Rescue 1: Very high text similarity always wins
-          if (!isExact && textSim >= 0.20) {
-            isExact = true;
-          }
-          
-          // 🔥 Rescue 2: Very close to exact anchors
-          if (!isExact && avgCosToExact >= 0.30 && textSim >= 0.04) {
-            isExact = true;
-          }
-          
-          // 🔥 Rescue 3: If similar anchors are absent, be more lenient
-          if (!isExact && similarAnchors.length === 0 && avgCosToExact >= 0.15) {
-            isExact = true;
-          }
-
-          item._isExact = isExact;
-          item._score = textSim * 100 + (isExact ? 60 : 0) + avgCosToExact * 40;
-        });
-
-        // ============================================
-        // PHASE 6: Merge and sort
-        // ============================================
-        const all = [...uniqueAnchors, ...remaining];
-        all.sort((a, b) => {
+        // 🔥 الترتيب
+        scored.sort((a, b) => {
           if (a._isExact !== b._isExact) return b._isExact ? 1 : -1;
           return (b._score || 0) - (a._score || 0);
         });
 
-        const exactCount = all.filter(a => a._isExact).length;
+        const exactCount = scored.filter(s => s._isExact).length;
         const elapsed = Date.now() - startTime;
-        console.log(`✅ === DONE in ${elapsed}ms ===`);
-        console.log(`📊 Total: ${all.length} | Exact: ${exactCount} | Similar: ${all.length - exactCount}`);
+        
+        console.log(`=== DONE in ${elapsed}ms ===`);
+        console.log(`Total: ${scored.length} | Exact: ${exactCount} | Similar: ${scored.length - exactCount}`);
 
-        const final = all.map(it => {
-          const { _cos, _jac, _textSim, _isExact, _score, _vec, _cls, ...clean } = it;
-          return { ...clean, isExact: _isExact || false, finalScore: _score || 0 };
+        // 🔥 التنظيف
+        const final = scored.map(it => {
+          const { _isExact, _textSim, _score, _reason, ...clean } = it;
+          return { ...clean, isExact: _isExact, finalScore: _score };
         });
 
         return json({ success: true, data: final });
 
       } catch (error) {
-        console.error('❌ Sort error:', error.message);
+        console.error('Sort error:', error.message);
         return json({ success: false, error: error.message }, 500);
       }
     }
 
-    // FETCH ENDPOINT (unchanged)
+    // ==========================================
+    // 🔍 FETCH ENDPOINT (unchanged)
+    // ==========================================
     let keyword = url.searchParams.get("q");
     const originalTitle = url.searchParams.get("originalTitle") || "";
     const page = parseInt(url.searchParams.get("page") || "1");
@@ -315,91 +251,8 @@ export default {
 };
 
 // ============================================
-// 🧠 FIXED Classification - Handles compound patterns
+// 🧠 استخراج الكلمات (للبحث)
 // ============================================
-function classifyTitle(title) {
-  const lower = title.toLowerCase().trim();
-  
-  const accessories = ['case','cover','strap','band','cable','charger','protector','film','glass','holder','stand','mount','adapter','bag','pouch','sleeve','skin','sticker','replacement','repair','part','clip','bracket','wire','connector','plug','port','keychain','pendant','armband','holster','belt','chain','loop','ring','shell','lid','cap'];
-  const mainProducts = ['watch','phone','tablet','laptop','headphone','earbud','speaker','camera','tv','monitor','keyboard','mouse','printer','router','drone','console','controller','lamp','light','fan','heater','vacuum','robot','toy','doll','figure','clock','radio','microphone','headset','projector'];
-  
-  // 🔥 FIX 1: Starts with "for"/"compatible" → accessory
-  if (/^(for|compatible|replacement|suitable|fit for|fits)\s/i.test(lower)) {
-    return { type: 'accessory', acc: true };
-  }
-  
-  // 🔥 FIX 2: Compound patterns (accessory + main product)
-  // e.g., "watch strap", "phone case", "camera lens protector"
-  // These MUST be checked BEFORE individual main products
-  for (const acc of accessories) {
-    for (const main of mainProducts) {
-      // "watch strap" or "watch leather strap"
-      const pattern1 = new RegExp(`\\b${main}\\b.*\\b${acc}\\b`, 'i');
-      // "strap for watch" - handled by "for" rule above
-      // "strap watch" (less common)
-      const pattern2 = new RegExp(`\\b${acc}\\b.*\\b${main}\\b`, 'i');
-      
-      if (pattern1.test(lower) || pattern2.test(lower)) {
-        // If found "X with Y", check for "with" → main product
-        if (/\bwith\b/i.test(lower)) {
-          return { type: main, acc: false };
-        }
-        return { type: acc, acc: true };
-      }
-    }
-  }
-  
-  // 3. "X with Y" → main product
-  if (/\bwith\b/i.test(lower)) {
-    for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
-    return { type: 'main', acc: false };
-  }
-  
-  // 4. Only accessories (no main product mentioned)
-  let hasMain = false;
-  for (const w of mainProducts) if (lower.includes(w)) hasMain = true;
-  
-  if (!hasMain) {
-    for (const w of accessories) if (lower.includes(w)) return { type: w, acc: true };
-  }
-  
-  // 5. Main products only
-  for (const w of mainProducts) if (lower.includes(w)) return { type: w, acc: false };
-  
-  return { type: '', acc: false };
-}
-
-function isSameType(itemClass, origClass, textSim) {
-  if (!itemClass.type || !origClass.type) return textSim >= 0.12;
-  if (itemClass.acc !== origClass.acc) return false;
-  return areSynonyms(itemClass.type, origClass.type);
-}
-
-function areSynonyms(t1, t2) {
-  if (!t1 || !t2) return false;
-  if (t1 === t2 || t1.includes(t2) || t2.includes(t1)) return true;
-  
-  const groups = [
-    ['strap', 'band', 'bracelet', 'belt', 'wristband'],
-    ['case', 'cover', 'shell', 'housing'],
-    ['cable', 'wire', 'cord', 'line'],
-    ['charger', 'adapter', 'power'],
-    ['headphone', 'headset', 'earphone', 'earbud'],
-    ['phone', 'smartphone', 'cellphone', 'cell'],
-    ['watch', 'smartwatch', 'wristwatch'],
-    ['protector', 'film', 'glass', 'tempered'],
-    ['holder', 'stand', 'mount', 'bracket'],
-    ['bag', 'pouch', 'sleeve', 'pocket'],
-  ];
-  
-  for (const g of groups) {
-    const t1In = g.some(x => t1.includes(x));
-    const t2In = g.some(x => t2.includes(x));
-    if (t1In && t2In) return true;
-  }
-  return false;
-}
-
 async function extractKeywordsWithAI(title, env) {
   try {
     const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
@@ -420,6 +273,9 @@ async function extractKeywordsWithAI(title, env) {
   }
 }
 
+// ============================================
+// 📦 Parse HTML
+// ============================================
 function parseItems(html) {
   const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
   if (!arrText) return [];
