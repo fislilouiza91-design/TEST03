@@ -1,368 +1,121 @@
 /* ============================================
-   Smart Shopper - Related-First Worker
-   Default: Exact | Similar only for unrelated
+   Smart Shopper - Background Service Worker
+   Local Search (no AI) - 8 keywords optimized
    ============================================ */
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+const WORKER_URL = 'https://extension.smailsuit11.workers.dev/'; 
+const MAX_PAGES_TO_FETCH = 3; 
 
-// 🔥 كلمات الحشو
-const STOP_WORDS = new Set([
-  'the','and','for','with','new','hot','sale','free','shipping','original','high','quality','best',
-  'pcs','set','pack','piece','pieces','items','item','wholesale','dropshipping','compatible','fits','fit',
-  'suitable','accessories','accessory','universal','dual','purpose','large','screen','plug','creative',
-  'dedicated','student','portable','multifunctional','design','style','luxury','fast','quick','smart',
-  'waterproof','shockproof','gift','fashion','good','perfect','2023','2024','2025','2026',
-  'sans','fil','sur','pour','avec','les','des','une','dans','par','plus','gratuit','livraison'
-]);
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg) return;
 
-// 🔥 مجالات المنتجات (domains)
-const DOMAINS = {
-  watch: ['watch','wristwatch','smartwatch','wrist','horloge','montre'],
-  phone: ['iphone','samsung','xiaomi','huawei','oneplus','galaxy','pixel','phone','smartphone','mobile','telephone'],
-  audio: ['headphone','earphone','earbud','headset','speaker','airpod','casque','écouteur'],
-  computer: ['laptop','notebook','macbook','chromebook','desktop','computer','ordinateur'],
-  camera: ['camera','lens','dslr','mirrorless','gopro','caméra','appareil photo'],
-  keyboard_mouse: ['keyboard','mouse','trackpad','keycap','clavier','souris'],
-  display: ['monitor','display','screen','television','écran','télé'],
-  storage: ['ssd','hdd','flash drive','usb drive','memory card','hard drive','disque'],
-  tablet: ['ipad','tablet','tab','tablette'],
-  gaming: ['playstation','xbox','nintendo','switch','gaming','gamer','jeu'],
-  printer: ['printer','imprimante','scanner','toner','ink cartridge'],
-  smart_home: ['alexa','google home','smart plug','smart bulb','domotique'],
-  power: ['power bank','battery','powerbank','batterie','chargeur'],
-  cable: ['usb cable','charging cable','type-c','lightning','hdmi','câble'],
-  bag: ['backpack','handbag','wallet','purse','sac','portefeuille'],
-};
-
-// 🔥 مؤشرات الملحقات (تُلحق بالمجال الذي تسبقه)
-const ACCESSORY_HINTS = {
-  watch: ['strap','band','bracelet','buckle','clasp'],
-  phone: ['case','cover','protector','shell','pouch','sleeve'],
-  tablet: ['case','cover','protector','shell','keyboard case'],
-  audio: ['case','cover','cushion','pad','earpads'],
-};
-
-// 🔥 تصنيف المجال
-function classifyDomain(title) {
-  const lower = title.toLowerCase();
-  
-  // فحص المجالات الأساسية أولاً
-  for (const [domain, keywords] of Object.entries(DOMAINS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw)) return domain;
-    }
+  if (msg.type === 'CHECK_CACHE') {
+    sendResponse({ ok: false });
+    return true;
   }
-  
-  // فحص مؤشرات الملحقات
-  for (const [domain, keywords] of Object.entries(ACCESSORY_HINTS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw)) return domain;
-    }
-  }
-  
-  return null;
-}
 
-// 🔥 تطبيع الكلمات (للمقارنة النصية)
-function tokenize(text) {
-  return text.toLowerCase()
-    .replace(/[^a-z0-9\u0600-\u06FF\u0400-\u04FF\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-}
-
-// 🔥 Jaccard similarity
-function jaccardSimilarity(tokens1, tokens2) {
-  if (!tokens1.length || !tokens2.length) return 0;
-  const set1 = new Set(tokens1);
-  const set2 = new Set(tokens2);
-  const intersection = [...set1].filter(t => set2.has(t)).length;
-  const union = new Set([...set1, ...set2]).size;
-  return union > 0 ? intersection / union : 0;
-}
-
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: CORS });
-    }
-
-    const url = new URL(request.url);
-
-    // ==========================================
-    // 🔥 SORT ENDPOINT
-    // ==========================================
-    if (request.method === "POST" && url.pathname === "/sort") {
-      const startTime = Date.now();
-      
-      try {
-        const body = await request.json();
-        const { originalTitle, items } = body;
-        
-        if (!originalTitle || !items || !Array.isArray(items) || items.length === 0) {
-          return json({ success: true, data: items || [] });
-        }
-
-        console.log(`\n=== SORT START ===`);
-        console.log(`Original: "${originalTitle}"`);
-        console.log(`Items: ${items.length}`);
-
-        // 🔥 تصنيف العنوان الأصلي
-        const originalDomain = classifyDomain(originalTitle);
-        const originalTokens = tokenize(originalTitle);
-        
-        console.log(`🎯 Original domain: ${originalDomain || 'unknown'}`);
-
-        // 🔥 حساب الصلة لكل منتج
-        const scored = items.map(it => {
-          const itemTokens = tokenize(it.title);
-          const itemDomain = classifyDomain(it.title);
-          const textSim = jaccardSimilarity(originalTokens, itemTokens);
-          
-          // ============================================
-          // 🔥 قرار الصلة (RELATED vs UNRELATED)
-          // ============================================
-          let isRelated = false;
-          let reason = '';
-          
-          // 🟢 القاعدة 1: نفس المجال → مرتبط (أقوى إشارة)
-          if (originalDomain && itemDomain && originalDomain === itemDomain) {
-            isRelated = true;
-            reason = 'same_domain';
-          }
-          
-          // 🟢 القاعدة 2: كلمة مفتاحية مشتركة (4+ أحرف) → مرتبط
-          if (!isRelated) {
-            const sharedKeywords = originalTokens.filter(t => 
-              itemTokens.includes(t) && t.length >= 4
-            );
-            if (sharedKeywords.length >= 1) {
-              isRelated = true;
-              reason = `shared:${sharedKeywords.slice(0, 2).join(',')}`;
-            }
-          }
-          
-          // 🟢 القاعدة 3: تشابه نصي عالي → مرتبط (إنقاذ)
-          if (!isRelated && textSim >= 0.10) {
-            isRelated = true;
-            reason = 'high_textSim';
-          }
-          
-          // 🟢 القاعدة 4: المجالان مجهولان لكن التشابه معقول → مرتبط
-          if (!isRelated && !originalDomain && !itemDomain && textSim >= 0.05) {
-            isRelated = true;
-            reason = 'unknown_but_similar';
-          }
-          
-          // 🟢 القاعدة 5: عنوان واحد مجهول + تشابه متوسط → مرتبط
-          if (!isRelated && (originalDomain || itemDomain) && textSim >= 0.08) {
-            isRelated = true;
-            reason = 'partial_domain_similar';
-          }
-          
-          // 🔴 غير مرتبط فقط إذا فشلت كل القواعد
-          const isExact = isRelated;
-          
-          // سجل تفصيلي (فقط أول 10 للتوضيح)
-          if (scored.length < 10 || isRelated === false) {
-            const icon = isExact ? '✅' : '❌';
-            console.log(`  ${icon} "${it.title.substring(0, 45)}" [${itemDomain || '?'}] sim=${textSim.toFixed(2)} → ${reason || 'UNRELATED'}`);
-          }
-          
-          // الترتيب: Exact أولاً، ثم الأعلى تشابهاً
-          const score = (isExact ? 1000 : 0) + textSim * 100;
-          
-          return { ...it, _isExact: isExact, _textSim: textSim, _score: score, _reason: reason };
-        });
-
-        // 🔥 الترتيب
-        scored.sort((a, b) => {
-          if (a._isExact !== b._isExact) return b._isExact ? 1 : -1;
-          return (b._score || 0) - (a._score || 0);
-        });
-
-        const exactCount = scored.filter(s => s._isExact).length;
-        const elapsed = Date.now() - startTime;
-        
-        console.log(`=== DONE in ${elapsed}ms ===`);
-        console.log(`Total: ${scored.length} | Exact: ${exactCount} | Similar: ${scored.length - exactCount}`);
-
-        // 🔥 التنظيف
-        const final = scored.map(it => {
-          const { _isExact, _textSim, _score, _reason, ...clean } = it;
-          return { ...clean, isExact: _isExact, finalScore: _score };
-        });
-
-        return json({ success: true, data: final });
-
-      } catch (error) {
-        console.error('Sort error:', error.message);
-        return json({ success: false, error: error.message }, 500);
-      }
-    }
-
-    // ==========================================
-    // 🔍 FETCH ENDPOINT (unchanged)
-    // ==========================================
-    let keyword = url.searchParams.get("q");
-    const originalTitle = url.searchParams.get("originalTitle") || "";
-    const page = parseInt(url.searchParams.get("page") || "1");
-
-    if (page > 3) {
-      return json({ success: true, data: [], hasMore: false });
-    }
-
-    try {
-      if (originalTitle && env.AI) {
-        keyword = await extractKeywordsWithAI(originalTitle, env);
-      }
-
-      if (!keyword) {
-        return json({ success: false, message: "Missing keyword" }, 400);
-      }
-
-      const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&page=${page}`;
-      const antUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(searchUrl)}&x-api-key=${env.SCRAPINGANT_API_KEY}&return_page_source=true&proxy_type=datacenter&browser=false`;
-      
-      const antResponse = await fetch(antUrl);
-      if (!antResponse.ok) throw new Error(`ScrapingAnt: ${antResponse.status}`);
-      
-      const html = await antResponse.text();
-
-      if (html.includes('punish') || html.includes('captcha') || html.length < 5000) {
-        return json({ success: false, message: "كابتشا أو حظر مؤقت." });
-      }
-
-      const products = parseItems(html);
-      if (products.length === 0) {
-        return json({ success: false, message: "لا توجد منتجات." });
-      }
-
-      return json({ success: true, data: products, aiQuery: keyword });
-
-    } catch (error) {
-      return json({ success: false, error: error.message }, 500);
-    }
-  }
-};
-
-// ============================================
-// 🧠 استخراج الكلمات (للبحث)
-// ============================================
-async function extractKeywordsWithAI(title, env) {
-  try {
-    const response = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
-      messages: [
-        { role: 'system', content: 'Extract 3-4 English keywords for e-commerce search. Output ONLY the keywords separated by spaces. No sentences.' },
-        { role: 'user', content: title }
-      ],
-      max_tokens: 20
-    });
+  if (msg.type === 'SMART_SEARCH' || msg.type === 'SMART_LOAD_MORE') {
+    const searchQuery = buildSmartSearchQuery(msg.title);
+    const page = msg.type === 'SMART_SEARCH' ? 1 : (parseInt(msg.startPage) || 1);
     
-    if (response?.response) {
-      const clean = response.response.trim().replace(/[^a-zA-Z0-9\s]/g, '');
-      return clean.split(/\s+/).slice(0, 4).join(' ');
+    if (page > MAX_PAGES_TO_FETCH) {
+      return sendResponse({ ok: true, items: [], hasMore: false });
     }
-    return '';
-  } catch (e) {
-    return '';
-  }
-}
 
-// ============================================
-// 📦 Parse HTML
-// ============================================
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-  if (!arrText) return [];
-  
-  let arr;
-  try { arr = JSON.parse(arrText); } catch (e) { return []; }
-  if (!Array.isArray(arr)) return [];
+    console.log(`🎯 [${msg.type}] Query: [${searchQuery}] | Page: ${page}`);
+    console.log(`📝 Original: "${msg.title}"`);
 
-  const out = [];
-  for (const o of arr) {
-    try {
-      const id = o.productId || o.id || (o.item && o.item.productId);
-      if (!id) continue;
-      
-      const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-      const title = String(extractText(rawTitle)).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-      
-      let img = '';
-      if (o.image) img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
-      if (!img && o.picUrl) img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
-      if (img && img.startsWith('//')) img = 'https:' + img;
-      
-      const p = o.prices || {};
-      const sale = p.salePrice || {};
-      const priceStr = extractText(sale.formatedActivityPrice || sale.formatedPrice || sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-      const priceNum = extractPriceNumber(priceStr);
+    const q = encodeURIComponent(searchQuery);
+    
+    // 🔥 لا نرسل originalTitle (البحث محلي بالكامل)
+    fetch(`${WORKER_URL}?q=${q}&page=${page}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.data) {
+          const items = data.data.map(item => ({
+            id: item.id,
+            title: item.title,
+            img: item.img,
+            price: item.price, 
+            rating: item.rating,
+            sold: item.soldStr,
+            link: item.url,
+            isExact: true,    
+            finalScore: 100
+          }));
 
-      const rating = extractText((o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) || o.averageStarRate || o.starRating || '');
-      const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-      
-      out.push({
-        id: String(id),
-        title: title || 'Produit',
-        img,
-        price: priceNum,
-        rating: parseFloat(rating) || 0,
-        soldStr: sold,
-        url: `https://www.aliexpress.com/item/${id}.html`
+          let hasMore = items.length >= 15;
+          if (page >= MAX_PAGES_TO_FETCH) hasMore = false; 
+          
+          sendResponse({ ok: true, items: items, hasMore: hasMore });
+        } else {
+          sendResponse({ ok: false, error: data.message || 'No results', hasMore: false });
+        }
+      }).catch(err => {
+        sendResponse({ ok: false, error: err.message, hasMore: false });
       });
-    } catch (e) {}
+      
+    return true;
   }
-  return out;
-}
 
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice', 'price'];
-    for (const k of keys) if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
-    for (const k in v) if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
+  if (msg.type === 'SORT_ITEMS') {
+    fetch(`${WORKER_URL}sort`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ originalTitle: msg.title, items: msg.items })
+    })
+    .then(res => res.json())
+    .then(data => sendResponse({ ok: data.success, items: data.data }))
+    .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
   }
-  return String(v);
-}
+});
 
-function extractPriceNumber(s) {
-  if (!s) return 0;
-  const m = String(s).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
-  return m ? parseFloat(m[1]) : 0;
-}
-
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
+// 🔥 استخراج الكلمة الدقيقة (محسّن - 8 كلمات، يحافظ على Brand/Model)
+function buildSmartSearchQuery(title) {
+  if (!title) return '';
   
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
-}
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS, "Content-Type": "application/json" }
+  const STOP_WORDS = new Set([
+    'the', 'and', 'for', 'with', 'new', 'hot', 'sale', 'free', 'shipping', 
+    'original', 'high', 'quality', 'best', 'wholesale', 'dropshipping', 
+    'fast', 'quick', 'good', 'perfect', 'gift', 'fashion', 'luxury', 'premium',
+    '2020', '2021', '2022', '2023', '2024', '2025', '2026',
+    'pcs', 'piece', 'pieces', 'set', 'pack', 'items', 'item', 'lot', 'bundle',
+    'waterproof', 'shockproof', 'multifunctional', 'portable', 'heavy', 'duty',
+    'sans', 'fil', 'sur', 'pour', 'avec', 'les', 'des', 'une', 'dans', 'par',
+    'gratuit', 'livraison', 'nouveau', 'promo', 'solde', 'chez', 'plus'
+  ]);
+  
+  // كلمات قصيرة مهمة (تُحفظ رغم قصرها)
+  const KEEP_SHORT = new Set([
+    'usb', 'led', 'lcd', 'tv', 'pc', 'hd', 'uhd', '4k', '8k', '2k',
+    'hdmi', 'sd', 'sim', 'ip', 'ai', 'pro', 'max', 'air', 'mini', 'gen'
+  ]);
+  
+  const cleanTitle = title
+    .replace(/[^\w\s\-\u0600-\u06FF\u0400-\u04FF\u00C0-\u017F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  const words = cleanTitle.split(' ');
+  
+  const usefulWords = words.filter(w => {
+    if (!w) return false;
+    const lower = w.toLowerCase();
+    if (STOP_WORDS.has(lower)) return false;
+    if (KEEP_SHORT.has(lower)) return true;
+    if (w.length < 2) return false;
+    // احتفظ بالأرقام الطويلة (موديلات مثل 22mm, 1080p)
+    if (/^\d{1,2}$/.test(w) && w.length < 3) return false;
+    return true;
   });
+  
+  // 🔥 الحفاظ على 8 كلمات (بدلاً من 4)
+  const finalQuery = usefulWords.slice(0, 8).join(' ');
+  
+  if (!finalQuery) {
+    return words.slice(0, 4).join(' ');
+  }
+  
+  return finalQuery;
 }
