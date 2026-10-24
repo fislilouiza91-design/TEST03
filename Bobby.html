@@ -1,349 +1,527 @@
 /* ============================================
-   Smart Shopper - Content Styles (Modern UI)
+   Smart Shopper - Content Script (No Similar Tab)
+   - Tab 0 (All): Raw fetch order, no divider.
+   - Tabs 1-4: Exact top → divider → Close bottom.
    ============================================ */
+   (function () {
+    'use strict';
+    if (window.__smartShopper) return;
+    window.__smartShopper = true;
+  
+    const PANEL_ID = 'ss-panel';
+    const T = (key, vars) => (window.SS_I18N ? window.SS_I18N.t(key, vars) : key);
+  
+    let currentKey = '';
+    let currentSearchTitle = '';
+    let currentProductId = null;
+    
+    let allFetchedItems = [];    
+    let cachedSortedItems = [];  
+    let activeTab = 0;
+    let closed = false;
+    let imageObserver = null;
+  
+    let currentProductPrice = 0;
+    let isBackgroundFetching = false;
+    let nextPageToFetch = 2;
+    let hasMoreResults = true;
+    const MAX_PAGES_TO_FETCH = 3; 
+  
+    let searchState = { running: false, complete: false, startTime: 0, totalItems: 0 };
+  
+    const SVG_ICONS = {
+      all: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>',
+      cheapest: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5 6.3 6.3a1 1 0 0 1 0 1.4L15 19"/><path d="M9 5 2.7 11.3a1 1 0 0 0 0 1.4L9 19"/></svg>',
+      rated: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.6 1.6 7-6.2-3.7-6.2 3.7 1.6-7L2 9.5l7.1-.6z"/></svg>',
+      discount: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/></svg>',
+      selling: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
+      minimize: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+      close: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+      expand: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>'
+    };
+  
+    let currentCurrencySymbol = '$';
+    (function detectCurrency() {
+      try {
+        const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+        if (ck) {
+          const params = new URLSearchParams(decodeURIComponent(ck[1]));
+          const cur = params.get('c_tp');
+          if (cur) currentCurrencySymbol = cur.toUpperCase();
+        }
+      } catch (e) {}
+    })();
+  
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const num = s => { const m = String(s || '').replace(/,/g, '').match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+    const soldNum = s => { const t = String(s || '').toLowerCase().replace(/,/g, ''); const m = t.match(/(\d+(?:\.\d+)?)\s*(k)?/); if (!m) return 0; let v = parseFloat(m[1]); if (m[2]) v *= 1000; return v; };
+    const discNum = s => num(String(s || '').replace('-', ''));
+  
+    function stars(rating) {
+      const r = parseFloat(rating) || 0; const full = Math.floor(r); const half = (r - full) >= 0.5; let out = '';
+      for (let i = 0; i < 5; i++) { if (i < full) out += '★'; else if (i === full && half) out += '★'; else out += '☆'; }
+      return out;
+    }
+  
+    window.SS_Utils = { esc, num, soldNum, discNum, stars };
+  
+    function isProductPage() { 
+      if (location.href.includes('/punish') || location.href.includes('captcha')) return false;
+      return /aliexpress\.(com|us)\/(item|i)\/\d+/i.test(location.href); 
+    }
+  
+    function extractCurrentPrice() {
+      try {
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        for (const sc of scripts) {
+          const data = JSON.parse(sc.textContent); const arr = Array.isArray(data) ? data : [data];
+          for (const node of arr) {
+            const g = n => {
+              if (!n) return null; if (n['@type'] === 'Product') return n;
+              if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } }
+              if (n['@graph']) { const r = g(n['@graph']); if (r) return r; }
+              return null;
+            };
+            const p = g(node);
+            if (p && p.offers) {
+              const off = Array.isArray(p.offers) ? p.offers[0] : p.offers;
+              if (off && off.price) { const v = parseFloat(String(off.price).replace(/[^\d.]/g, '')); if (v > 0) return v; }
+            }
+          }
+        }
+      } catch (e) {}
+      return 0;
+    }
+  
+    function detectProduct() {
+      if (!isProductPage()) return null;
+      const price = extractCurrentPrice();
+      try {
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        for (const sc of scripts) {
+          const data = JSON.parse(sc.textContent); const arr = Array.isArray(data) ? data : [data];
+          for (const node of arr) {
+            const g = n => {
+              if (!n) return null; if (n['@type'] === 'Product') return n;
+              if (Array.isArray(n)) { for (const x of n) { const r = g(x); if (r) return r; } }
+              if (n['@graph']) { const r = g(n['@graph']); if (r) return r; }
+              return null;
+            };
+            const p = g(node);
+            if (p && p.name) return { title: String(p.name).slice(0, 160), price: price };
+          }
+        }
+      } catch (e) {}
+      const ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle && ogTitle.content && ogTitle.content.trim().length > 8) return { title: ogTitle.content.trim().slice(0, 160), price: price };
+      const title = (document.title || '').replace(/[|\-–—].*$/, '').trim();
+      if (title.length > 8) return { title: title.slice(0, 160), price: price };
+      return null;
+    }
+  
+    function buildPanel() {
+      if (document.getElementById(PANEL_ID)) return;
+      const panel = document.createElement('div');
+      panel.id = PANEL_ID;
+      panel.innerHTML = `
+        <div class="ss-header" id="ss-header">
+          <div class="ss-logo">S</div>
+          <div class="ss-titles"><div class="ss-title">${esc(T('panelTitle'))}</div><div class="ss-sub">${esc(T('panelSubtitle'))}</div></div>
+          <div class="ss-header-btns">
+            <button class="ss-wbtn" id="ss-expand">${SVG_ICONS.expand}</button>
+            <button class="ss-wbtn" id="ss-minimize">${SVG_ICONS.minimize}</button>
+            <button class="ss-wbtn ss-wbtn-close" id="ss-close">${SVG_ICONS.close}</button>
+          </div>
+        </div>
+        <div class="ss-body" id="ss-body">
+          <div class="ss-tabs" id="ss-tabs">
+            <span class="ss-tab active" data-i="0">${SVG_ICONS.all}<span>${esc(T('tabAll'))}</span></span>
+            <span class="ss-tab" data-i="1">${SVG_ICONS.cheapest}<span>${esc(T('tabCheapest'))}</span></span>
+            <span class="ss-tab" data-i="2">${SVG_ICONS.rated}<span>${esc(T('tabBestRated'))}</span></span>
+            <span class="ss-tab" data-i="3">${SVG_ICONS.discount}<span>${esc(T('tabBestDiscount'))}</span></span>
+            <span class="ss-tab" data-i="4">${SVG_ICONS.selling}<span>${esc(T('tabBestSelling'))}</span></span>
+          </div>
+          <div class="ss-progress" id="ss-progress"></div>
+          <div class="ss-list" id="ss-list"></div>
+          <div class="ss-footer" id="ss-footer"></div>
+        </div>`;
+      document.documentElement.appendChild(panel);
+      document.getElementById('ss-close').onclick = () => { closed = true; panel.remove(); };
+      document.getElementById('ss-minimize').onclick = () => { const b = document.getElementById('ss-body'); b.style.display = b.style.display === 'none' ? '' : 'none'; };
+      document.getElementById('ss-expand').onclick = openFullscreen;
+      document.getElementById('ss-tabs').addEventListener('click', onTabClick);
+      makeDraggable(panel, document.getElementById('ss-header'));
+  
+      document.getElementById('ss-list').addEventListener('scroll', (e) => {
+          const list = e.target;
+          if (list.scrollTop + list.clientHeight >= list.scrollHeight - 100) {
+              if (hasMoreResults && !isBackgroundFetching && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
+                  prefetchBackgroundPages(); 
+              }
+          }
+      }, { passive: true });
+    }
+  
+    function syncFullscreen() {
+      if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) {
+          window.SS_Fullscreen.updateItems(cachedSortedItems);
+          window.SS_Fullscreen.setState({ fetching: isBackgroundFetching, activeTab: activeTab });
+      }
+    }
+  
+    function openFullscreen() {
+      if (!window.SS_Fullscreen) return;
+      const panel = document.getElementById(PANEL_ID);
+      if (panel) panel.style.display = 'none';
+      window.SS_Fullscreen.open({
+        items: cachedSortedItems, activeTab: activeTab, fetching: isBackgroundFetching, currentProductPrice: currentProductPrice,
+        onTabChange: (newTab) => { activeTab = newTab; document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', +x.dataset.i === newTab)); renderList(true); syncFullscreen(); },
+        onRefresh: () => { currentKey = ''; if (window.SS_Fullscreen) window.SS_Fullscreen.close(); const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; scan(); },
+        onClose: () => { const p = document.getElementById(PANEL_ID); if (p) p.style.display = ''; }
+      });
+    }
+  
+    function updateProgress() {
+      const p = document.getElementById('ss-progress'); if (!p) return;
+      if (!searchState.running && !searchState.complete) { p.innerHTML = ''; return; }
+      if (searchState.complete) {
+        p.innerHTML = `<span class="ss-progress-done">${esc(T('resultsText', { n: allFetchedItems.length }))}</span>`;
+        setTimeout(() => { if (p) p.innerHTML = ''; }, 3000);
+        return;
+      }
+      p.innerHTML = `<span class="ss-progress-text">${esc(T('loading'))}</span>`;
+    }
+  
+    function onTabClick(e) {
+      const t = e.target.closest('.ss-tab'); if (!t) return;
+      activateTab(t, +t.dataset.i);
+    }
+  
+    function activateTab(t, newTab) {
+      activeTab = newTab;
+      document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x === t));
+      renderList(true); const list = document.getElementById('ss-list'); if (list) list.scrollTop = 0; syncFullscreen();
+    }
+  
+    function makeDraggable(el, handle) {
+      let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
+      handle.addEventListener('mousedown', e => {
+        if (e.target.closest('button')) return;
+        drag = true; sx = e.clientX; sy = e.clientY;
+        const r = el.getBoundingClientRect(); ox = r.left; oy = r.top;
+        el.style.right = 'auto'; el.style.left = ox + 'px'; el.style.top = oy + 'px'; el.style.bottom = 'auto';
+        e.preventDefault();
+      });
+      window.addEventListener('mousemove', e => { if (!drag) return; el.style.left = Math.max(0, ox + e.clientX - sx) + 'px'; el.style.top = Math.max(0, oy + e.clientY - sy) + 'px'; });
+      window.addEventListener('mouseup', () => drag = false);
+    }
+  
+    function skeleton() {
+      const l = document.getElementById('ss-list'); if (!l) return;
+      l.innerHTML = Array.from({ length: 4 }, () => `<div class="ss-card"><div class="ss-thumb-wrapper skel"></div><div class="ss-card-content"><div class="skel line"></div><div class="skel line short"></div></div><div class="ss-discount-box skel"></div></div>`).join('');
+    }
+  
+    function message(msg) { const l = document.getElementById('ss-list'); if (!l) return; l.innerHTML = `<div class="ss-msg"><div class="ss-msg-icon">🔍</div>${esc(msg)}</div>`; }
+  
+    // 🔥 تصنيف منتجين فقط: Exact أو Close (يشمل المشابه)
+    function classify2Tier(it) {
+      if (!it.isExact) return { ...it, _tier: 'close' };
+      
+      const price = num(it.price);
+      const priceIsClose = currentProductPrice <= 0 || (price > 0 && price >= currentProductPrice * 0.5 && price <= currentProductPrice * 1.8);
+      
+      if (priceIsClose) return { ...it, _tier: 'exact' };
+      return { ...it, _tier: 'close' };
+    }
+  
+    function applySort() {
+      const p = detectProduct();
+      const getOriginalProduct = () => {
+          if (!p) return [];
+          return [{
+              id: currentProductId || 'original',
+              title: p.title,
+              img: document.querySelector('meta[property="og:image"]')?.content || '',
+              price: p.price > 0 ? p.price.toString() : '',
+              rating: '0', sold: '',
+              link: window.location.href,
+              isExact: true, finalScore: 999, _tier: 'exact'
+          }];
+      };
+  
+      // Tab 0 (All): خام - بدون أي فرز
+      if (activeTab === 0) {
+          cachedSortedItems = [...allFetchedItems];
+          if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
+          return;
+      }
+  
+      // Tabs 1-4: Exact + Close (مع فرز)
+      const classified = allFetchedItems.map(classify2Tier);
+      
+      const exactGroup = classified.filter(it => it._tier === 'exact');
+      const closeGroup = classified.filter(it => it._tier === 'close');
+      
+      const sorters = [ 
+          null, 
+          (a, b) => num(a.price) - num(b.price), 
+          (a, b) => num(b.rating) - num(a.rating), 
+          (a, b) => discNum(b.discount) - discNum(a.discount), 
+          (a, b) => soldNum(b.sold) - soldNum(a.sold) 
+      ];
+      const sortFn = sorters[activeTab] || sorters[1];
+      
+      exactGroup.sort(sortFn);
+      closeGroup.sort(sortFn);
+      
+      cachedSortedItems = [...exactGroup, ...closeGroup];
+      if (cachedSortedItems.length === 0) cachedSortedItems = getOriginalProduct();
+    }
+  
+    function buildCard(it, i) {
+      const discountValue = it.discount ? String(it.discount).replace('-', '').replace('%', '') : '';
+      const itemPrice = num(it.price);
+      const hasComparison = currentProductPrice > 0 && itemPrice > 0;
+      const isHigher = hasComparison && itemPrice > currentProductPrice;
+      const boxClass = isHigher ? 'ss-discount-box ss-higher-price' : 'ss-discount-box';
+      
+      const discountBoxHtml = `<div class="${boxClass}"><div class="ss-price-main">${it.price ? esc(it.price) + ' ' + currentCurrencySymbol : '—'}</div>${discountValue ? `<div class="ss-discount-label">-${esc(discountValue)}%</div>` : ''}</div>`;
+      
+      let metaHtml = '';
+      if (it.rating) metaHtml += `<span class="ss-stars">${stars(it.rating)}</span><span class="ss-rating-num">${esc(it.rating)}</span>`;
+      if (it.sold) metaHtml += `<span class="ss-sold">· ${esc(it.sold)} ${esc(T('soldSuffix'))}</span>`;
+      if (!metaHtml) metaHtml = `<span class="ss-no-info">${esc(T('noReviews'))}</span>`;
+  
+      return `<a class="ss-card" href="${esc(it.link)}" target="_blank" rel="noopener">
+          <div class="ss-thumb-wrapper">${it.img ? `<img class="ss-thumb" data-src="${esc(it.img)}" alt="">` : `<div class="ss-thumb ss-thumb-empty">🛍</div>`}</div>
+          <div class="ss-card-content">
+              <div class="ss-card-title">${esc(it.title || 'Produit similaire')}</div>
+              <div class="ss-card-meta">${metaHtml}</div>
+          </div>
+          ${discountBoxHtml}
+      </a>`;
+    }
+  
+    function setupImageObserver() {
+      if (imageObserver) imageObserver.disconnect();
+      imageObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) { const img = entry.target; if (img.dataset.src) { img.src = img.dataset.src; img.removeAttribute('data-src'); } imageObserver.unobserve(img); }
+        });
+      }, { root: document.getElementById('ss-list'), rootMargin: '300px' });
+    }
+  
+    function renderList(reset) {
+      const l = document.getElementById('ss-list'); if (!l) return;
+      applySort();
+      
+      if (reset) { 
+        if (cachedSortedItems.length === 0) { message(T('noResults')); return; } 
+        l.innerHTML = ''; 
+        setupImageObserver(); 
+      }
+      if (!cachedSortedItems.length) return;
+  
+      const temp = document.createElement('div');
+      
+      // Tab 0 (All): عرض خام بدون فاصل
+      if (activeTab === 0) {
+        cachedSortedItems.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
+      } else {
+        // Tabs 1-4: Exact → فاصل → Close
+        const exactGroup = cachedSortedItems.filter(it => it._tier === 'exact');
+        const closeGroup = cachedSortedItems.filter(it => it._tier === 'close');
+        
+        if (exactGroup.length > 0) {
+          exactGroup.forEach((it, i) => { temp.innerHTML += buildCard(it, i); });
+        }
+        
+        if (exactGroup.length > 0 && closeGroup.length > 0) {
+          temp.innerHTML += `<div class="ss-divider"></div>`;
+        }
+        
+        if (closeGroup.length > 0) {
+          closeGroup.forEach((it, i) => { temp.innerHTML += buildCard(it, exactGroup.length + i); });
+        }
+      }
+  
+      l.innerHTML = '';
+      while (temp.firstChild) l.appendChild(temp.firstChild);
+      
+      if (imageObserver) l.querySelectorAll('img[data-src]').forEach(img => imageObserver.observe(img));
+      updateFooter();
+    }
+  
+    function updateFooter() {
+      const f = document.getElementById('ss-footer'); if (!f) return;
+      let html = '';
+      if (!searchState.running) {
+        if (isBackgroundFetching) {
+          html += `<div class="ss-loading-more" style="display:flex; justify-content:center; align-items:center; gap:8px; color:#666; font-size:12px; padding:10px;">
+            <span class="ss-spinner" style="border-top-color:#ff4747;"></span>
+            <span>${esc(T('loading'))}</span>
+          </div>`;
+        } else if (!hasMoreResults && cachedSortedItems.length > 0) {
+          html += `<div class="ss-no-more" style="font-size:11px; color:#999; text-align:center; padding:10px;">${esc(T('noMoreResults'))}</div>`;
+        }
+      }
+      f.innerHTML = html;
+    }
+  
+    function getAliExpressCookie() {
+      try {
+        const ck = document.cookie.match(/(?:^|;\s*)aep_usuc_f=([^;]+)/);
+        if (ck) return `aep_usuc_f=${ck[1]}`;
+      } catch (e) {}
+      return '';
+    }
 
-* { box-sizing: border-box; }
+    function triggerAISort() {
+      if (isBackgroundFetching) return; 
+      
+      searchState.running = true;
+      updateProgress();
+      updateFooter();
+      syncFullscreen();
+      
+      const ogImage = document.querySelector('meta[property="og:image"]');
+      const originalImage = ogImage ? ogImage.content : '';
+      
+      chrome.runtime.sendMessage({
+          type: 'SORT_ITEMS',
+          title: currentSearchTitle,
+          originalImage: originalImage,
+          items: allFetchedItems
+      }, sortResp => {
+          searchState.running = false;
+          searchState.complete = true;
+          
+          if (sortResp && sortResp.ok && sortResp.items) {
+              allFetchedItems = sortResp.items;
+              if (activeTab === 0) {
+                  updateProgress();
+                  updateFooter();
+              } else {
+                  renderList(true);
+              }
+              syncFullscreen();
+          }
+          updateFooter();
+      });
+    }
 
-#ss-panel {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    width: 400px;
-    max-width: calc(100vw - 40px);
-    max-height: calc(100vh - 100px);
-    background: #ffffff;
-    border-radius: 16px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.05);
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    direction: ltr;
-    user-select: none;
-    border: 1px solid rgba(0, 0, 0, 0.05);
-}
+    function prefetchBackgroundPages() {
+      if (isBackgroundFetching || nextPageToFetch > MAX_PAGES_TO_FETCH || !hasMoreResults) return;
+      
+      if (nextPageToFetch === 3 && allFetchedItems.length <= 220) {
+          hasMoreResults = false;
+          triggerAISort(); 
+          updateFooter();
+          syncFullscreen();
+          return;
+      }
+      
+      isBackgroundFetching = true; updateFooter(); syncFullscreen();
+      const existingIds = allFetchedItems.map(x => x.id);
+  
+      chrome.runtime.sendMessage({ 
+          type: 'SMART_LOAD_MORE', title: currentSearchTitle, startPage: nextPageToFetch, 
+          existingIds: existingIds, productId: currentProductId, cookie: getAliExpressCookie()
+      }, (resp) => {
+          isBackgroundFetching = false;
+          
+          if (resp && resp.ok) {
+              if (resp.items) allFetchedItems = allFetchedItems.concat(resp.items);
+              nextPageToFetch++;
+              renderList(true); updateProgress(); syncFullscreen();
+  
+              if (!resp.hasMore || nextPageToFetch > MAX_PAGES_TO_FETCH || resp.items.length === 0) {
+                  hasMoreResults = false; 
+                  triggerAISort(); 
+              } else {
+                  setTimeout(prefetchBackgroundPages, 2000); 
+              }
+          } else { 
+              hasMoreResults = false; 
+              triggerAISort(); 
+          }
+          updateFooter(); syncFullscreen();
+      });
+    }
+  
+    function runSearch(title, productPrice, productId) {
+      currentSearchTitle = title; currentProductPrice = productPrice || 0;
+      allFetchedItems = []; cachedSortedItems = []; nextPageToFetch = 2;
+      isBackgroundFetching = false; hasMoreResults = true; activeTab = 0;
+  
+      let originalImage = '';
+      const ogImage = document.querySelector('meta[property="og:image"]');
+      if (ogImage) originalImage = ogImage.content;
+  
+      document.querySelectorAll('.ss-tab').forEach(x => x.classList.toggle('active', x.dataset.i === '0'));
+      searchState = { running: true, complete: false, startTime: Date.now(), totalItems: 0 };
+      skeleton(); updateProgress();
+  
+      chrome.runtime.sendMessage({ 
+          type: 'SMART_SEARCH', title, productId: productId, originalImage: originalImage, cookie: getAliExpressCookie()
+      }, resp => {
+        if (!resp || !document.getElementById(PANEL_ID)) { searchState.running = false; updateFooter(); return; }
+        if (!resp.ok) { searchState.running = false; message(T('errorContact')); updateFooter(); return; }
+  
+        allFetchedItems = resp.items || [];
+        hasMoreResults = resp.hasMore !== false;
+        searchState.totalItems = allFetchedItems.length;
+  
+        renderList(true); updateFooter(); syncFullscreen();
+        if (allFetchedItems.length === 0) { searchState.running = false; message(T('noResults')); return; }
+        
+        if (allFetchedItems.length <= 40) {
+            hasMoreResults = false;
+            triggerAISort(); 
+            return;
+        }
 
-/* ============================================
-   Header
-   ============================================ */
-.ss-header {
-    display: flex;
-    align-items: center;
-    padding: 12px 16px;
-    background: #0f172a; /* لون كحلي داكن احترافي */
-    cursor: grab;
-    flex-shrink: 0;
-    color: white;
-}
-.ss-header:active { cursor: grabbing; }
-
-.ss-logo {
-    background: linear-gradient(135deg, #ff4757, #ff6b81);
-    color: white;
-    font-weight: 900;
-    width: 28px;
-    height: 28px;
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    margin-right: 10px;
-    flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(255, 71, 87, 0.3);
-}
-
-.ss-titles { flex-grow: 1; min-width: 0; overflow: hidden; }
-.ss-header .ss-title { font-size: 14px; font-weight: 700; color: #f8fafc; line-height: 1.2; letter-spacing: 0.3px; }
-.ss-sub { font-size: 10px; color: #94a3b8; margin-top: 2px; }
-
-/* ============================================
-   Window Control Buttons
-   ============================================ */
-.ss-header-btns {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-shrink: 0;
-}
-
-.ss-wbtn {
-    width: 28px;
-    height: 28px;
-    border: none;
-    background: rgba(255, 255, 255, 0.08);
-    color: #cbd5e1;
-    cursor: pointer;
-    border-radius: 6px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    transition: all 0.2s ease;
-    font-family: inherit;
-    flex-shrink: 0;
-}
-
-.ss-wbtn svg { display: block; pointer-events: none; }
-
-.ss-wbtn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
-.ss-wbtn:active { transform: scale(0.92); }
-.ss-wbtn-close:hover { background: #ef4444; color: #fff; }
-
-/* ============================================
-   Body
-   ============================================ */
-.ss-body {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    flex-grow: 1;
-    background: #f8fafc;
-    min-height: 0;
-}
-
-/* ============================================
-   Tabs
-   ============================================ */
-.ss-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    padding: 12px 12px 8px;
-    gap: 8px;
-    background: #ffffff;
-    border-bottom: 1px solid #e2e8f0;
-    flex-shrink: 0;
-}
-
-.ss-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    font-size: 11.5px;
-    color: #64748b;
-    cursor: pointer;
-    border-radius: 20px;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    font-weight: 600;
-    background: #f1f5f9;
-    border: 1px solid transparent;
-    white-space: nowrap;
-}
-
-.ss-tab svg { flex-shrink: 0; display: block; color: #94a3b8; transition: color 0.2s; }
-.ss-tab span { line-height: 1; }
-
-.ss-tab:hover:not(.active) { background: #e2e8f0; color: #334155; }
-.ss-tab:hover:not(.active) svg { color: #475569; }
-
-.ss-tab.active {
-    color: #ffffff;
-    background: #0f172a;
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.2);
-    transform: translateY(-1px);
-}
-
-.ss-tab.active svg { color: #ffffff; }
-
-/* ============================================
-   List
-   ============================================ */
-.ss-list {
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: calc(100vh - 280px);
-    min-height: 200px;
-    overscroll-behavior: contain;
-    flex-grow: 1;
-}
-.ss-list::-webkit-scrollbar { width: 6px; }
-.ss-list::-webkit-scrollbar-track { background: transparent; }
-.ss-list::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 10px; }
-.ss-list::-webkit-scrollbar-thumb:hover { background-color: #94a3b8; }
-
-/* ============================================
-   🔥 Divider - Clear Dashed Line
-   ============================================ */
-.ss-divider {
-    position: relative;
-    margin: 20px 0;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-}
-.ss-divider::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 50%;
-    border-top: 2px dashed #cbd5e1;
-    transform: translateY(-50%);
-}
-.ss-divider::after {
-    content: '▼';
-    position: relative;
-    background: #f8fafc;
-    color: #94a3b8;
-    font-size: 12px;
-    padding: 0 12px;
-    z-index: 1;
-    font-weight: 900;
-    letter-spacing: 2px;
-}
-
-/* ============================================
-   Product Card
-   ============================================ */
-.ss-card {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    padding: 10px;
-    position: relative;
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.2s ease;
-    min-height: 80px;
-    cursor: pointer;
-    width: 100%;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-}
-
-.ss-card:hover { 
-    border-color: #cbd5e1; 
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.06); 
-    transform: translateY(-2px);
-}
-
-.ss-thumb-wrapper {
-    flex-shrink: 0;
-    width: 70px;
-    height: 70px;
-    border-radius: 8px;
-    overflow: hidden;
-    background: #f8fafc;
-    border: 1px solid #f1f5f9;
-}
-.ss-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
-.ss-thumb-empty { display: flex; align-items: center; justify-content: center; font-size: 28px; color: #cbd5e1; }
-
-.ss-card-content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 8px;
-    overflow: hidden;
-}
-
-.ss-card-title {
-    font-size: 12px;
-    color: #1e293b;
-    line-height: 1.4;
-    font-weight: 500;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-}
-
-.ss-card-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #64748b; overflow: hidden; white-space: nowrap; }
-.ss-stars { color: #f59e0b; font-size: 12px; letter-spacing: -0.5px; flex-shrink: 0; }
-.ss-rating-num { color: #334155; font-weight: 700; font-size: 11px; flex-shrink: 0; }
-.ss-sold { color: #94a3b8; font-size: 10.5px; flex-shrink: 0; }
-.ss-no-info { color: #cbd5e1; font-size: 10.5px; font-style: italic; }
-
-/* ============================================
-   Price Boxes (Modern Pastel)
-   ============================================ */
-.ss-discount-box {
-    flex-shrink: 0;
-    background: #ecfdf5; /* أخضر ناعم */
-    border: 1px solid #a7f3d0;
-    border-radius: 10px;
-    padding: 8px 10px;
-    min-width: 80px;
-    max-width: 95px;
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 4px;
-}
-
-.ss-price-main {
-    font-size: 14px;
-    font-weight: 800;
-    color: #059669; /* أخضر غامق للقراءة */
-    line-height: 1.1;
-    letter-spacing: -0.3px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.ss-discount-label {
-    font-size: 10px;
-    font-weight: 700;
-    color: #10b981;
-    line-height: 1.1;
-}
-
-.ss-discount-box.ss-higher-price {
-    background: #fef2f2; /* أحمر ناعم */
-    border-color: #fecaca;
-}
-.ss-discount-box.ss-higher-price .ss-price-main { color: #dc2626; }
-.ss-discount-box.ss-higher-price .ss-discount-label { color: #ef4444; }
-
-/* ============================================
-   Footer & Messages
-   ============================================ */
-.ss-msg { text-align: center; padding: 40px 20px; font-size: 13px; color: #64748b; font-weight: 500; }
-.ss-msg-icon { font-size: 40px; margin-bottom: 12px; display: block; opacity: 0.4; }
-
-.ss-footer {
-    padding: 12px;
-    text-align: center;
-    border-top: 1px solid #e2e8f0;
-    background: #ffffff;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-items: center;
-}
-
-.ss-loading-more { font-size: 11px; color: #64748b; font-weight: 500; }
-
-/* Skeleton Loader */
-.skel {
-    background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
-    background-size: 200% 100%;
-    animation: ss-skel 1.5s infinite;
-    border-radius: 6px;
-    pointer-events: none;
-}
-.skel.line { height: 10px; width: 100%; margin-bottom: 6px; }
-.skel.line.short { width: 60%; }
-.skel.ss-thumb-wrapper { width: 70px; height: 70px; }
-.skel.ss-discount-box { width: 80px; height: 44px; }
-
-@keyframes ss-skel {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-}
+        if (hasMoreResults && nextPageToFetch <= MAX_PAGES_TO_FETCH) {
+            setTimeout(prefetchBackgroundPages, 1000);
+        } else {
+            hasMoreResults = false;
+            triggerAISort(); 
+        }
+      });
+    }
+  
+    function scan() {
+      if (closed) return;
+      if (!isProductPage()) {
+        const existing = document.getElementById(PANEL_ID);
+        if (existing) existing.remove();
+        if (window.SS_Fullscreen && window.SS_Fullscreen.isOpen()) window.SS_Fullscreen.close();
+        currentKey = ''; currentProductPrice = 0; searchState.running = false; searchState.complete = false;
+        return;
+      }
+      const p = detectProduct(); if (!p || !p.title) return;
+      const key = location.host + location.pathname + '|' + p.title + '|' + p.price;
+      if (key === currentKey) return;
+      currentKey = key;
+      const match = window.location.pathname.match(/item\/(\d+)\.html/);
+      currentProductId = match ? match[1] : null;
+      buildPanel();
+      document.getElementById(PANEL_ID).style.display = '';
+      currentSearchTitle = p.title; currentProductPrice = p.price || 0; skeleton();
+  
+      if (currentProductId) {
+        chrome.runtime.sendMessage({ type: 'CHECK_CACHE', productId: currentProductId }, (resp) => {
+          if (resp && resp.ok && resp.data && resp.data.length > 0) {
+            allFetchedItems = resp.data.map(c => ({ id: c.competitor_id, title: c.title, img: '', price: c.price, rating: c.seller_rating, link: c.product_url, sold: '', isExact: true, finalScore: 100 }));
+            searchState.complete = true; searchState.totalItems = allFetchedItems.length;
+            hasMoreResults = false;
+            renderList(true); updateProgress(); updateFooter(); syncFullscreen();
+          } else { runSearch(p.title, p.price || 0, currentProductId); }
+        });
+      } else { runSearch(p.title, p.price || 0, null); }
+    }
+  
+    let lastUrl = location.href;
+    new MutationObserver(() => { if (location.href !== lastUrl) { lastUrl = location.href; scan(); } }).observe(document.body, { childList: true, subtree: true });
+    setTimeout(scan, 800); setInterval(scan, 2500);
+  })();
