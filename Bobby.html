@@ -35,7 +35,7 @@ async function scraperInPage({ productId, page, streamId, md5Code }) {
     DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
     image: getImage(), isNewImageSearch: true, lang: locale, locale: locale,
     osf: "detail_bigimg", page: page, 
-    pageSize: 20, // تم إرجاعها إلى 20 لتعمل مع زر "تحميل المزيد"
+    pageSize: 20, // 20 منتجاً في كل طلب ليتوافق مع زر "تحميل المزيد"
     platform: "pc", productId: productId,
     recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
     searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
@@ -79,7 +79,7 @@ async function scraperInPage({ productId, page, streamId, md5Code }) {
 }
 
 // ============================================================
-// 2. تهيئة الموقع الروسي (إذا لزم الأمر)
+// 2. تهيئة الموقع الروسي
 // ============================================================
 async function bootstrapRuToken(tabId) {
   const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
@@ -148,10 +148,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ============================================================
-// 5. ميزة الفتح التلقائي للنافذة (تحديث عادي + تنقل SPA)
+// 5. ميزة الفتح التلقائي للنافذة
 // ============================================================
 
-// دالة موحدة لفحص الرابط وفتح النافذة
 function checkAndOpenWindow(tabId, url) {
   if (!url) return;
   
@@ -170,27 +169,27 @@ function checkAndOpenWindow(tabId, url) {
         
         chrome.storage.session.set({ lastOpenedProduct: productId });
 
-        // إنشاء النافذة المنبثقة
+        // فتح النافذة كنافذة عادية مصغرة لكي لا يغلقها كروم فجأة
         chrome.windows.create({
           url: chrome.runtime.getURL('popup/popup.html'),
-          type: 'popup',
+          type: 'normal', // نافذة عادية
           width: 480,
           height: 600,
-          focused: false 
+          focused: true  // ستفتح أمامك مباشرة
         });
       }
     });
   }
 }
 
-// اكتشاف التحديث العادي (عند عمل Refresh أو فتح رابط مباشر)
+// اكتشاف التحديث العادي
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
     checkAndOpenWindow(tabId, tab.url);
   }
 });
 
-// اكتشاف التنقل بين المنتجات داخل نفس الصفحة (SPA) - هذا هو الحل لمشكلة عدم ظهور النافذة
+// اكتشاف التنقل بين المنتجات داخل نفس الصفحة (SPA)
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0) {
     checkAndOpenWindow(details.tabId, details.url);
