@@ -15,14 +15,14 @@ function injectWidget() {
     let currentSide = 'right'; 
     let activeSort = 'popular';
 
-    // 1. الشريط الجانبي المنحني (سيكون في الأعلى z-index ليكون فوق النافذة)
+    // 1. الشريط الجانبي المنحني
     sidebar = document.createElement('div');
     sidebar.style.cssText = `
         position: fixed;
         top: 50%;
         right: 0;
         transform: translateY(-50%);
-        z-index: 2147483647; /* أعلى طبقة */
+        z-index: 2147483647;
         pointer-events: none;
     `;
 
@@ -43,37 +43,37 @@ function injectWidget() {
         border-right: none;
     `;
 
-    // 2. إطار المنتجات (مخفي في الخلف)
+    // 2. إطار المنتجات (بأبعاد ثابتة ومثالية)
     iframeContainer = document.createElement('div');
     iframeContainer.style.cssText = `
         position: fixed;
         top: 50%;
-        right: 75px; /* يبدأ من حدود الشريط المنحني */
-        width: 480px;
-        height: 80vh;
-        background: white;
+        right: 75px; /* يلتصق بحدود الشريط */
+        width: 500px; /* عرض ثابت ومثالي */
+        max-width: 90vw; /* لا يتجاوز الشاشة في الأجهزة الصغيرة */
+        height: 75vh; /* ارتفاع 75% من الشاشة */
+        background: #ffffff !important;
         border-radius: 16px;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
         
-        /* 🔥 الحالة الابتدائية: مخفي خلف الشريط وشفاف */
-        transform: translateY(-50%) translateX(100%);
+        /* الحالة الابتدائية (مخفية خلف الشريط) */
+        transform: translateY(-50%) translateX(110%);
         opacity: 0;
         pointer-events: none;
         visibility: hidden;
         
-        /* حركة انسيابية عند الظهور */
         transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.4s ease, visibility 0.4s;
-        z-index: 2147483646; /* أقل من الشريط الجانبي */
+        z-index: 2147483646; 
         display: flex;
         overflow: hidden;
     `;
 
     iframe = document.createElement('iframe');
     iframe.src = chrome.runtime.getURL('popup/popup.html');
-    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #f8fafc;`;
+    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
     iframeContainer.appendChild(iframe);
 
-    // 3. مقبض السحب (⋮⋮)
+    // 3. مقبض السحب
     const dragHandle = document.createElement('div');
     dragHandle.style.cssText = `
         cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
@@ -84,36 +84,30 @@ function injectWidget() {
     dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
     dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
 
-    // 4. دالة فتح/إغلاق النافذة بسلاسة
+    // 4. دالة فتح/إغلاق النافذة
     function togglePanel(forceOpen = null) {
         if (forceOpen === true) isOpen = true;
         else if (forceOpen === false) isOpen = false;
         else isOpen = !isOpen;
 
         if (isOpen) {
-            // إظهار النافذة
             iframeContainer.style.visibility = 'visible';
             iframeContainer.style.opacity = '1';
             iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
             iframeContainer.style.pointerEvents = 'auto';
         } else {
-            // إخفاء النافذة خلف الشريط
             iframeContainer.style.opacity = '0';
             iframeContainer.style.pointerEvents = 'none';
             if (currentSide === 'right') {
-                iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(110%)';
             } else {
-                iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(-110%)';
             }
-            
-            // إخفاء العنصر تماماً بعد انتهاء الحركة لتوفير الموارد
             setTimeout(() => {
                 if (!isOpen) iframeContainer.style.visibility = 'hidden';
             }, 400);
         }
     }
-
-    dragHandle.addEventListener('click', () => togglePanel());
 
     // 5. الأزرار الثلاثة
     const createSortBtn = (text, sortValue) => {
@@ -166,9 +160,7 @@ function injectWidget() {
     document.body.appendChild(sidebar);
     document.body.appendChild(iframeContainer);
 
-    // ==========================================
-    // 6. تبديل الجهة (يمين / يسار)
-    // ==========================================
+    // 6. تبديل الجهة
     function setSide(side) {
         currentSide = side;
         if (side === 'right') {
@@ -178,7 +170,7 @@ function injectWidget() {
             pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
             
             iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
-            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(110%)';
             
         } else {
             sidebar.style.left = '0'; sidebar.style.right = 'auto';
@@ -187,11 +179,11 @@ function injectWidget() {
             pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
             
             iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
-            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-110%)';
         }
     }
 
-    // 7. السحب للتبديل
+    // 7. السحب
     let isDragging = false;
     dragHandle.addEventListener('mousedown', () => {
         isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
