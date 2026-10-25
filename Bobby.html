@@ -1,58 +1,188 @@
-// lib/md5.js
-export function md5(e) {
-    function t(e, t) { return e << t | e >>> 32 - t; }
-    function r(e, t) {
-        var r, o, a, n, i;
-        return a = 2147483648 & e, n = 2147483648 & t, i = (1073741823 & e) + (1073741823 & t),
-        (r = 1073741824 & e) & (o = 1073741824 & t) ? 2147483648 ^ i ^ a ^ n : r | o ? 1073741824 & i ? 3221225472 ^ i ^ a ^ n : 1073741824 ^ i ^ a ^ n : i ^ a ^ n;
-    }
-    function o(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e & t | ~e & r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function a(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e & r | t & ~r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function n(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e ^ t ^ r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function i(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return t ^ (e | ~r); }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function c(e) {
-        var t, r = "", o = "";
-        for (t = 0; 3 >= t; t++) r += (o = "0" + (e >>> 8 * t & 255).toString(16)).substr(o.length - 2, 2);
-        return r;
-    }
-    var s, p, u, d, m, l, f, g, h, y;
-    for (y = function(e) {
-        for (var t, r = e.length, o = r + 8, a = 16 * ((o - o % 64) / 64 + 1), n = new Array(a - 1), i = 0, c = 0; r > c;)
-            i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | e.charCodeAt(c) << i, c++;
-        return i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | 128 << i, n[a - 2] = r << 3, n[a - 1] = r >>> 29, n;
-    }(e = function(e) {
-        e = e.replace(/\r\n/g, "\n");
-        for (var t = "", r = 0; r < e.length; r++) {
-            var o = e.charCodeAt(r);
-            128 > o ? t += String.fromCharCode(o) : o > 127 && 2048 > o ? (t += String.fromCharCode(o >> 6 | 192), t += String.fromCharCode(63 & o | 128)) : (t += String.fromCharCode(o >> 12 | 224), t += String.fromCharCode(o >> 6 & 63 | 128), t += String.fromCharCode(63 & o | 128));
-        }
-        return t;
-    }(e)), l = 1732584193, f = 4023233417, g = 2562383102, h = 271733878, s = 0; s < y.length; s += 16)
-        p = l, u = f, d = g, m = h,
-        l = o(l, f, g, h, y[s + 0], 7, 3614090360), h = o(h, l, f, g, y[s + 1], 12, 3905402710), g = o(g, h, l, f, y[s + 2], 17, 606105819), f = o(f, g, h, l, y[s + 3], 22, 3250441966),
-        l = o(l, f, g, h, y[s + 4], 7, 4118548399), h = o(h, l, f, g, y[s + 5], 12, 1200080426), g = o(g, h, l, f, y[s + 6], 17, 2821735955), f = o(f, g, h, l, y[s + 7], 22, 4249261313),
-        l = o(l, f, g, h, y[s + 8], 7, 1770035416), h = o(h, l, f, g, y[s + 9], 12, 2336552879), g = o(g, h, l, f, y[s + 10], 17, 4294925233), f = o(f, g, h, l, y[s + 11], 22, 2304563134),
-        l = o(l, f, g, h, y[s + 12], 7, 1804603682), h = o(h, l, f, g, y[s + 13], 12, 4254626195), g = o(g, h, l, f, y[s + 14], 17, 2792965006), l = a(l, f = o(f, g, h, l, y[s + 15], 22, 1236535329), g, h, y[s + 1], 5, 4129170786),
-        h = a(h, l, f, g, y[s + 6], 9, 3225465664), g = a(g, h, l, f, y[s + 11], 14, 643717713), f = a(f, g, h, l, y[s + 0], 20, 3921069994),
-        l = a(l, f, g, h, y[s + 5], 5, 3593408605), h = a(h, l, f, g, y[s + 10], 9, 38016083), g = a(g, h, l, f, y[s + 15], 14, 3634488961), f = a(f, g, h, l, y[s + 4], 20, 3889429448),
-        l = a(l, f, g, h, y[s + 9], 5, 568446438), h = a(h, l, f, g, y[s + 14], 9, 3275163606), g = a(g, h, l, f, y[s + 3], 14, 4107603335), f = a(f, g, h, l, y[s + 8], 20, 1163531501),
-        l = a(l, f, g, h, y[s + 13], 5, 2850285829), h = a(h, l, f, g, y[s + 2], 9, 4243563512), g = a(g, h, l, f, y[s + 7], 14, 1735328473), l = n(l, f = a(f, g, h, l, y[s + 12], 20, 2368359562), g, h, y[s + 5], 4, 4294588738),
-        h = n(h, l, f, g, y[s + 8], 11, 2272392833), g = n(g, h, l, f, y[s + 11], 16, 1839030562), f = n(f, g, h, l, y[s + 14], 23, 4259657740),
-        l = n(l, f, g, h, y[s + 1], 4, 2763975236), h = n(h, l, f, g, y[s + 4], 11, 1272893353), g = n(g, h, l, f, y[s + 7], 16, 4139469664), f = n(f, g, h, l, y[s + 10], 23, 3200236656),
-        l = n(l, f, g, h, y[s + 13], 4, 681279174), h = n(h, l, f, g, y[s + 0], 11, 3936430074), g = n(g, h, l, f, y[s + 3], 16, 3572445317), f = n(f, g, h, l, y[s + 6], 23, 76029189),
-        l = n(l, f, g, h, y[s + 9], 4, 3654602809), h = n(h, l, f, g, y[s + 12], 11, 3873151461), g = n(g, h, l, f, y[s + 15], 16, 530742520), l = i(l, f = n(f, g, h, l, y[s + 2], 23, 3299628645), g, h, y[s + 0], 6, 4096336452),
-        h = i(h, l, f, g, y[s + 7], 10, 1126891415), g = i(g, h, l, f, y[s + 14], 15, 2878612391), f = i(f, g, h, l, y[s + 5], 21, 4237533241),
-        l = i(l, f, g, h, y[s + 12], 6, 1700485571), h = i(h, l, f, g, y[s + 3], 10, 2399980690), g = i(g, h, l, f, y[s + 10], 15, 4293915773), f = i(f, g, h, l, y[s + 1], 21, 2240044497),
-        l = i(l, f, g, h, y[s + 8], 6, 1873313359), h = i(h, l, f, g, y[s + 15], 10, 4264355552), g = i(g, h, l, f, y[s + 6], 15, 2734768916), f = i(f, g, h, l, y[s + 13], 21, 1309151649),
-        l = i(l, f, g, h, y[s + 4], 6, 4149444226), h = i(h, l, f, g, y[s + 11], 10, 3174756917), g = i(g, h, l, f, y[s + 2], 15, 718787259), f = i(f, g, h, l, y[s + 9], 21, 3951481745),
-        l = r(l, p), f = r(f, u), g = r(g, d), h = r(h, m);
-    return (c(l) + c(f) + c(g) + c(h)).toLowerCase();
+// background.js
+import { md5 } from './lib/md5.js';
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const randomDelay = () => sleep(400 + Math.random() * 600);
+
+// دالة الكاش (لتحسين السرعة وتقليل الطلبات)
+async function cacheKey(productId, page) {
+  const raw = `p:${productId}:pg:${page}`;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+  return 'cache_' + Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
 }
+async function getCache(productId, page) {
+  const key = await cacheKey(productId, page);
+  const data = await chrome.storage.session.get(key);
+  if (!data[key] || Date.now() - data[key].ts > 180000) return null;
+  return data[key].value;
+}
+async function setCache(productId, page, value) {
+  const key = await cacheKey(productId, page);
+  await chrome.storage.session.set({ [key]: { value, ts: Date.now() } });
+}
+
+// ============================================================
+// هذه الدالة هي "لب" الإضافة الأصلية (مطابقة 100%)
+// ============================================================
+async function scraperInPage({ productId, page, streamId, md5Code }) {
+  const md5Fn = new Function('return ' + md5Code)();
+
+  // استخدام نفس طريقة الأصل في قراءة الكوكيز
+  const token = document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
+  if (!token) return { error: 'NO_TOKEN' };
+
+  const cna = document.cookie?.split("cna=")[1]?.split(";")[0];
+  const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
+  const acsRt = xman?.split("acs_rt=")[1];
+  const locale = xman?.split("x_locale=")[1]?.split("&")[0] ?? "ru_RU";
+
+  const aep = document.cookie?.split("aep_usuc_f=")[1]?.split(";")[0] || '';
+  const currency = aep?.split("c_tp=")[1]?.split("&")[0] ?? "RUB";
+  const region = aep?.split("region=")[1]?.split("&")[0] ?? "RU";
+
+  const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+
+  const getImage = () => {
+    const domain = location.host.split('aliexpress.')[1];
+    if (domain === 'ru') {
+      return document.querySelector('meta[property="og:image"]')?.content + "_";
+    }
+    const img = document.querySelector('div[class^="image-view--previewWrap"] img[src^="https://ae-pic-"]');
+    if (img) return img.src;
+    const video = document.querySelector('div[class^="image-view--previewWrap"] video[poster^="https://ae-pic-"]');
+    return video?.poster;
+  };
+
+  // نفس المعاملات الأصلية بدون أي إضافات (بدون sortType)
+  const y = {
+    DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
+    image: getImage()?.split("_")[0], isNewImageSearch: true, lang: locale, locale: locale,
+    osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+    recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
+    searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
+    sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
+    "x-appKey": 24815441,
+    "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+    _city: "", _currency: currency, _state: ""
+  };
+
+  if (streamId) { y.streamId = streamId; y.realReffer = ""; }
+
+  const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
+  const timestamp = Date.now();
+  const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+
+  const domain = location.host?.split("aliexpress.")[1];
+  const apiDomain = domain === "ru" ? "com" : domain;
+  const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
+  const url = `https://recom-acs.aliexpress.${apiDomain}/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+
+  try {
+    const fd = new FormData();
+    fd.append("data", dataString);
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fd),
+      credentials: "include"
+    });
+    const json = await response.json();
+    return {
+      products: json?.data?.mods?.itemList?.content ?? [],
+      streamId: json?.data?.pageInfo?.streamId,
+      ret: json?.ret?.[0],
+      host: location.host
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ============================================================
+// تهيئة موقع .ru (نفس الكود الأصلي)
+// ============================================================
+async function bootstrapRuToken(tabId) {
+  const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: async (u) => {
+      try {
+        const fd = new FormData(); fd.append("data", "");
+        await fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" });
+      } catch (e) {}
+    },
+    args: [url],
+  });
+}
+
+// ============================================================
+// الدالة الرئيسية
+// ============================================================
+async function fetchSimilarProducts({ page = 1, streamId = null }) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
+  
+  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+
+  if (page === 1) {
+    const cached = await getCache(productId, page);
+    if (cached) return cached;
+  }
+
+  if (tab.url.includes('aliexpress.ru')) {
+    await bootstrapRuToken(tab.id);
+  }
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const md5Code = md5.toString();
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: scraperInPage,
+        args: [{ productId, page, streamId, md5Code }],
+      });
+
+      const data = result?.result;
+      if (!data) throw new Error('EMPTY_RESULT');
+      if (data.error) throw new Error(data.error);
+      if (data.ret && !data.ret.startsWith('SUCCESS')) throw new Error('API_' + data.ret);
+
+      if (page === 1) await setCache(productId, page, data);
+      return data;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[AliFinder] Attempt ${attempt} failed:`, err.message);
+      if (attempt < 3) await randomDelay();
+    }
+  }
+  return { error: lastError?.message || 'UNKNOWN_ERROR' };
+}
+
+// ============================================================
+// المستمع للرسائل
+// ============================================================
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'FETCH_SIMILAR') {
+    fetchSimilarProducts({ page: msg.page || 1, streamId: msg.streamId || null })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+});
+
+async function updateBadge(tab) {
+  if (!tab?.id) return;
+  const ok = /aliexpress\.(com|us|ru)\/item\/\d+\.htm/.test(tab.url || '');
+  await chrome.action.setBadgeText({ text: ok ? '1' : '', tabId: tab.id });
+  await chrome.action.setBadgeBackgroundColor({ color: '#FC7971' }).catch(() => {});
+}
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try { updateBadge(await chrome.tabs.get(tabId)); } catch (e) {}
+});
+chrome.tabs.onUpdated.addListener((id, info, tab) => {
+  if (info.status === 'complete') updateBadge(tab);
+});
