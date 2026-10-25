@@ -85,15 +85,16 @@ function createCard(p) {
       }
     } catch (err) {}
 
-    const checkIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#047857" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+    // 🔥 أيقونات SVG مع تلوين إجباري
+    const checkIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
     const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>`;
 
-    // 🔥 التنسيق المضمن الإجباري مع خاصية -webkit-text-fill-color لكسر لون الروابط
     let shippingHtml = '';
     if (isFreeShipping) {
-      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 3px 6px; border-radius: 4px; background-color: #d1fae5 !important; border: 1px solid #10b981 !important; width: fit-content; color: #047857 !important; -webkit-text-fill-color: #047857 !important; font-size: 9px; font-weight: bold;">${checkIcon} <span style="color: #047857 !important; -webkit-text-fill-color: #047857 !important;">شحن مجاني</span></div>`;
+      // التخلي عن الإطار، وإجبار النص على اللون الأخضر
+      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; color: #059669 !important; -webkit-text-fill-color: #059669 !important; font-size: 10px; font-weight: bold;">${checkIcon} <span style="color: #059669 !important; -webkit-text-fill-color: #059669 !important;">شحن مجاني</span></div>`;
     } else if (shippingText) {
-      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; color: #64748b !important; -webkit-text-fill-color: #64748b !important; font-size: 9px; font-weight: bold;">${truckIcon} <span>${shippingText}</span></div>`;
+      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; color: #64748b !important; -webkit-text-fill-color: #64748b !important; font-size: 10px; font-weight: bold;">${truckIcon} <span>${shippingText}</span></div>`;
     }
 
     const a = document.createElement('a');
