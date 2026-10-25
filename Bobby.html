@@ -1,32 +1,34 @@
-{
-  "manifest_version": 3,
-  "name": "AliFinder Sniper",
-  "version": "1.0.0",
-  "description": "Similar products using AliExpress native engine.",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.aliexpress.com/*",
-    "*://*.aliexpress.us/*",
-    "*://*.aliexpress.ru/*"
-  ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.aliexpress.com/item/*", "*://*.aliexpress.us/item/*", "*://*.aliexpress.ru/item/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["popup/popup.html", "popup/popup.js"],
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html"
-  }
-}
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { width: 100%; height: 100vh; font-family: system-ui, sans-serif; background: #f8fafc; display: flex; flex-direction: column; overflow: hidden; }
+    .sort-bar { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 10px; background: white; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
+    .sort-btn { padding: 8px 2px; background: #f1f5f9; border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-weight: bold; color: #475569; font-size: 12px; transition: 0.2s; }
+    .sort-btn.active { background: #ff6b35; color: white; border-color: #ff6b35; }
+    #results { flex: 1; overflow-y: auto; padding: 8px; width: 100%; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: 100%; }
+    .product-card { display: flex; flex-direction: column; background: white; border-radius: 6px; overflow: hidden; text-decoration: none; border: 1px solid #e2e8f0; transition: transform 0.2s; }
+    .product-card:hover { transform: translateY(-2px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .img-box { width: 100%; height: 100px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .img-box img { width: 100%; height: 100%; object-fit: cover; }
+    .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
+    .title { font-size: 10px; color: #334155; line-height: 1.3; height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-bottom: 4px; }
+    .price { font-size: 12px; font-weight: bold; color: #ef4444; margin-top: auto; }
+    .loader { text-align: center; padding: 20px; color: #64748b; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="sort-bar">
+    <button class="sort-btn" data-sort="cheapest">الأرخص</button>
+    <button class="sort-btn active" data-sort="popular">الأكثر طلباً</button>
+    <button class="sort-btn" data-sort="rating">الأكثر تقيماً</button>
+  </div>
+  <div id="results"><div class="loader">جاري البحث عبر محرك الموقع...</div></div>
+  
+  <!-- هذا السطر هو الوحيد المسموح به لربط الجافاسكريبت -->
+  <script src="popup.js"></script>
+</body>
+</html>
