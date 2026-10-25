@@ -10,7 +10,7 @@ let currentStreamId = null;
 let isLoading = false;
 let hasMore = true;
 
-// إرجاع التمرير للأعلى
+// دالة إرجاع التمرير للأعلى
 function scrollToTop() {
   resultsEl.scrollTop = 0;
   document.documentElement.scrollTop = 0;
@@ -23,6 +23,7 @@ async function fetchProducts(page, streamId) {
   });
 }
 
+// دالة الترتيب المحلي (بدون إنترنت)
 function sortProducts(mode) {
   if (mode === 'cheapest') {
     globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
@@ -33,12 +34,14 @@ function sortProducts(mode) {
   }
 }
 
+// دالة العرض
 function render() {
   if (!globalProducts || globalProducts.length === 0) {
     resultsEl.innerHTML = '<p style="text-align: center; color: red;">لم يتم العثور على منتجات.</p>';
     return;
   }
 
+  // ترتيب المنتجات في الذاكرة
   sortProducts(currentSort);
 
   let html = '<div class="grid">';
@@ -70,6 +73,7 @@ function render() {
   resultsEl.innerHTML = html;
 }
 
+// دالة تحميل البيانات (تشتغل مرة واحدة فقط عند فتح النافذة)
 async function loadInitial() {
   isLoading = true;
   loadMoreBtn.disabled = true;
@@ -100,6 +104,7 @@ async function loadInitial() {
   scrollToTop();
 }
 
+// دالة تحميل المزيد
 async function loadMore() {
   if (isLoading || !hasMore) return;
 
@@ -134,19 +139,21 @@ async function loadMore() {
   loadMoreBtn.disabled = !hasMore;
 }
 
-// أزرار الترتيب: العودة للبداية فوراً في كل مرة
+// 🔥 التعديل هنا: الضغط على الأزرار يرتب المنتجات الموجودة فقط ويعود للأعلى
 document.querySelectorAll('.sort-btn').forEach(btn => {
   btn.addEventListener('click', (e) => {
+    // 1. العودة إلى أعلى نقطة فوراً
     scrollToTop();
 
+    // 2. تغيير شكل الأزرار
     const newSort = e.currentTarget.getAttribute('data-sort');
-    
     document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
     e.currentTarget.classList.add('active');
     
+    // 3. إذا كان الترتيب مختلفاً، نرتب المنتجات المحملة مسبقاً (بدون إنترنت)
     if (currentSort !== newSort) {
       currentSort = newSort;
-      loadInitial(); 
+      render(); // رسم وترتيب سريع بدون إرسال طلب جديد
     }
   });
 });
