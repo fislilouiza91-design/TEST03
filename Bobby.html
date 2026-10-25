@@ -1,71 +1,112 @@
-function createCard(p) {
-  let rawImg = p?.image?.imgUrl || '';
-  if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-  const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
-  
-  const price = p?.prices?.salePrice?.formattedPrice || '—';
-  const priceClass = getPriceClass(price);
-  
-  const title = p?.title?.displayTitle || 'منتج';
-  const rating = getRating(p);
-  const directUrl = `https://${globalHost}/item/${p.productId}.html`;
-
-  // 🔥 استخراج بيانات الشحن
-  let isFreeShipping = false;
-  let shippingText = '';
-
-  // 1. البحث في الحقول المباشرة
-  if (p?.shipping) {
-    if (p.shipping.shippingFee === 'Free' || p.shipping.shippingFee === 0 || p.shipping.freeShipping) {
-      isFreeShipping = true;
-    } else if (p.shipping.shippingFee) {
-      shippingText = p.shipping.shippingFee;
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --primary: #ff4747;
+      --bg: #ffffff;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
     }
-  }
 
-  // 2. البحث في الوسوم (Selling Points)
-  if (p?.sellingPoints && Array.isArray(p.sellingPoints)) {
-    const freeTag = p.sellingPoints.find(sp => 
-      sp.toLowerCase().includes('free shipping') || sp.includes('شحن مجاني') || sp.includes('مجاني')
-    );
-    if (freeTag) isFreeShipping = true;
-  }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body { 
+      width: 100%; height: 100vh; 
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; 
+      background: var(--bg); 
+      display: flex; flex-direction: column; overflow: hidden; 
+    }
+    
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
 
-  // 3. البحث في وصف التجارة (TradeDesc)
-  if (p?.trade?.tradeDesc && (p.trade.tradeDesc.includes('Free Shipping') || p.trade.tradeDesc.includes('مجاني'))) {
-    isFreeShipping = true;
-  }
+    #results { flex: 1; overflow-y: auto; padding: 10px; width: 100%; position: relative; }
+    
+    /* إجبار العرض على 3 أعمدة */
+    .grid { 
+      display: grid; 
+      grid-template-columns: repeat(3, 1fr); 
+      gap: 8px; 
+      width: 100%; 
+      align-content: start; 
+    }
+    
+    .product-card { 
+      display: flex; flex-direction: column; background: white; 
+      border-radius: 8px; overflow: hidden; text-decoration: none; 
+      border: 1px solid var(--border); transition: all 0.2s ease; 
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04); position: relative; width: 100%;
+    }
+    .product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    
+    .img-box { 
+      width: 100%; height: 100px; background: #f8fafc; 
+      display: flex; align-items: center; justify-content: center; overflow: hidden; 
+    }
+    .img-box img { width: 100%; height: 100%; object-fit: cover; }
+    
+    .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
+    
+    .title { 
+      font-size: 10px; color: var(--text-main); font-weight: 600; line-height: 1.3; 
+      height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; 
+      -webkit-box-orient: vertical; margin-bottom: 4px; 
+      unicode-bidi: plaintext; text-align: start; 
+    }
+    
+    .bottom-row { 
+      display: flex; justify-content: space-between; align-items: center; 
+      margin-top: auto; width: 100%; gap: 2px; flex-wrap: nowrap;
+    }
+    
+    .stars-box { display: flex; align-items: center; gap: 1px; direction: ltr; flex-shrink: 0; }
+    .stars { font-size: 9px; letter-spacing: -0.5px; }
+    .star-filled { color: #ffa41c; }
+    .star-empty { color: #e2e8f0; }
+    .rating-num { font-size: 9px; color: var(--text-muted); font-weight: 700; }
+    
+    .price { font-weight: 800; color: var(--primary); white-space: nowrap; text-align: end; direction: ltr; }
+    .price-normal { font-size: 12px; }
+    .price-sm { font-size: 10px; }
+    .price-xs { font-size: 9px; }
 
-  // بناء شكل الشحن
-  let shippingHtml = '';
-  if (isFreeShipping) {
-    shippingHtml = `<div style="font-size: 9px; color: #10b981; margin-top: 4px; font-weight: bold;">🚚 شحن مجاني</div>`;
-  } else if (shippingText) {
-    shippingHtml = `<div style="font-size: 9px; color: #64748b; margin-top: 4px;">🚚 ${shippingText}</div>`;
-  }
+    /* تنسيق الشحن */
+    .shipping-info {
+      font-size: 9px; margin-top: 4px; font-weight: bold; display: flex; align-items: center; gap: 2px;
+    }
+    .shipping-free { color: #10b981; }
+    .shipping-paid { color: #64748b; }
 
-  const a = document.createElement('a');
-  a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
-  a.setAttribute('dir', 'auto'); 
+    /* هياكل التحميل */
+    .skeleton { background: #e2e8f0; border-radius: 4px; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    .skeleton-card { height: 200px; background: white; border-radius: 8px; border: 1px solid var(--border); padding: 6px; display: flex; flex-direction: column; gap: 6px; }
+    .skeleton-img { width: 100%; height: 100px; border-radius: 4px; }
+    .skeleton-text { width: 100%; height: 10px; }
+    .skeleton-text.short { width: 60%; }
 
-  a.innerHTML = `
-    <div class="img-box">
-      <img src="${img}" onerror="this.style.display='none'">
+    #loader-more { display: none; text-align: center; padding: 15px; color: var(--primary); font-weight: bold; font-size: 12px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,71,71,0.3); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="results">
+    <div class="grid" id="main-grid">
+      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
+      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
+      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
     </div>
-    <div class="info">
-      <div class="title" title="${title}">${title}</div>
-      
-      <div class="bottom-row">
-        <div class="stars-box">
-          <div class="stars">${getStarsHTML(rating)}</div>
-          <span class="rating-num">${rating ? rating.toFixed(1) : '—'}</span>
-        </div>
-        <div class="price ${priceClass}">${price}</div>
-      </div>
-      
-      <!-- إضافة سطر الشحن هنا -->
-      ${shippingHtml}
+    
+    <div id="loader-more">
+      <span class="spinner"></span> جاري جلب المزيد...
     </div>
-  `;
-  return a;
-}
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
