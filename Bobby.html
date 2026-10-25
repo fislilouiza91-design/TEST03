@@ -1,34 +1,74 @@
-{
-  "manifest_version": 3,
-  "name": "AliFinder Sniper",
-  "version": "1.0.0",
-  "description": "Similar products using AliExpress native engine.",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.aliexpress.com/*",
-    "*://*.aliexpress.us/*",
-    "*://*.aliexpress.ru/*"
-  ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.aliexpress.com/item/*", "*://*.aliexpress.us/item/*", "*://*.aliexpress.ru/item/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
+// background.js (The Sniper - No MD5)
+
+async function sniperScraper({ productId, page, streamId }) {
+    // 1. البحث عن محرك MTOP الأصلي الخاص بـ AliExpress
+    // يختلف اسمه حسب نسخة الموقع (lib.mtop أو QN.mtop)
+    const mtop = window.lib?.mtop || window.QN?.mtop || window.mtop;
+
+    if (!mtop || typeof mtop.request !== 'function') {
+        return { error: 'ENGINE_NOT_FOUND' };
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["popup/popup.html", "popup/popup.js"],
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
+
+    try {
+        // 2. تجهيز البيانات المطلوبة
+        const dataParams = {
+            productId: productId,
+            page: page,
+            pageSize: 24, // نفس العدد الذي يفضله السيرفر
+        };
+        
+        if (streamId) {
+            dataParams.streamId = streamId;
+            dataParams.realReffer = "";
+        }
+
+        // 3. استخدام محرك الموقع لتوقيع وإرسال الطلب
+        const response = await new Promise((resolve) => {
+            mtop.request({
+                api: 'mtop.relationrecommend.AliexpressRecommend.recommend',
+                v: '1.0',
+                type: 'POST',
+                dataType: 'json',
+                data: {
+                    appId: "19587",
+                    params: JSON.stringify(dataParams)
+                },
+                success: (res) => resolve(res),
+                error: (err) => resolve({ error: 'MTOP_FAILED' })
+            });
+        });
+
+        if (response.error) return { error: response.error };
+
+        // 4. إرجاع النتيجة
+        return {
+            products: response?.data?.mods?.itemList?.content ?? [],
+            streamId: response?.data?.pageInfo?.streamId,
+            host: location.host
+        };
+
+    } catch (e) {
+        return { error: e.message };
     }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "icon.png" }
-  },
-  "icons": { "128": "icon.png" }
 }
+
+// الاستماع للرسائل من النافذة
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.action === 'FETCH_SIMILAR') {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+            if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return sendResponse({ error: 'NOT_PRODUCT_PAGE' });
+            
+            const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+
+            chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                world: 'MAIN', // ضروري جداً للوصول إلى محرك mtop
+                func: sniperScraper,
+                args: [{ productId, page: msg.page || 1, streamId: msg.streamId || null }],
+            }).then(result => {
+                sendResponse(result[0]?.result || { error: 'EMPTY_RESULT' });
+            }).catch(err => sendResponse({ error: err.message }));
+        });
+        return true;
+    }
+});
