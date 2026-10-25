@@ -1,29 +1,23 @@
-let widgetWrapper = null;
+llet widgetWrapper = null;
 let iframeContainer = null;
 let iframe = null;
 let sidebar = null;
 
-// 🔥 قاموس ترجمة مخصص يتبع لغة موقع علي إكسبريس
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
     'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
     'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
     'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
     'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
-    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
-    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
-    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
-    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
-    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
-    'zh': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高' }
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' }
 };
 
-// دالة معرفة لغة الموقع الحالية
 function getSiteLang() {
-    // 1. محاولة القراءة من وسم html
+    if (location.href.includes('aliexpress.ru')) return 'ru';
+    if (location.href.includes('fr.aliexpress.com')) return 'fr';
+    if (location.href.includes('aliexpress.us')) return 'en'; // الموقع الأمريكي إنجليزي
+
     let lang = document.documentElement.lang || '';
-    // 2. إذا لم نجدها، نقرأها من الكوكيز الخاصة بعلي إكسبريس
     if (!lang) {
         const match = document.cookie.match(/(?:^|;\s*)(?:xman_us_f|aep_usuc_f)=([^;]*)/);
         if (match) {
@@ -32,15 +26,13 @@ function getSiteLang() {
             if (localeMatch) lang = localeMatch[1];
         }
     }
-    // تنظيف النص (مثلاً ar_SA تصبح ar)
     lang = lang.split('-')[0].split('_')[0].toLowerCase();
-    return SITE_TRANSLATIONS[lang] ? lang : 'en'; // إذا لم نجدها نرجع للإنجليزية
+    return SITE_TRANSLATIONS[lang] ? lang : 'en';
 }
 
-// دالة الترجمة
 const t = (key) => {
     const lang = getSiteLang();
-    return SITE_TRANSLATIONS[lang][key];
+    return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
 };
 
 function removeWidget() {
@@ -116,8 +108,10 @@ function injectWidget() {
         overflow: hidden;
     `;
 
+    // 🔥 تمرير لغة الموقع إلى الإطار الداخلي
+    const siteLang = getSiteLang();
     iframe = document.createElement('iframe');
-    iframe.src = chrome.runtime.getURL('popup/popup.html');
+    iframe.src = chrome.runtime.getURL('popup/popup.html') + '?siteLang=' + siteLang;
     iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
     iframeContainer.appendChild(iframe);
 
@@ -155,7 +149,6 @@ function injectWidget() {
         }
     }
 
-    // 🔥 استخدام دالة الترجمة المخصصة t() بدلاً من chrome.i18n
     const createSortBtn = (text, sortValue) => {
         const btn = document.createElement('div');
         btn.style.cssText = `
