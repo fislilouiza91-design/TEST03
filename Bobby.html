@@ -3,15 +3,14 @@ import { md5 } from './lib/md5.js';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const randomDelay = () => sleep(400 + Math.random() * 600);
 
-// دالة لجلب التوكن (Token) بشكل صحيح لجميع المواقع (روسي، عالمي، أمريكي)
+// دالة لجلب التوكن (Token) بشكل صحيح (يدعم جميع المواقع)
 async function ensureToken(tabId, domain) {
-    const cookieUrl = `https://www.aliexpress.${domain}/`;
-    let cookie = await chrome.cookies.get({ url: cookieUrl, name: "_m_h5_tk" });
+    let token = null;
     
-    // إذا لم يوجد توكن، نقوم بعمل طلب وهمي لإجبار الموقع على إصدار توكن جديد
-    if (!cookie) {
-        const apiDomain = domain === "ru" ? "com" : domain;
-        const url = `https://recom-acs.aliexpress.${apiDomain}/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+    // للموقع الروسي: نجلب دائماً من الدومين العالمي .com (كما في الكود الأصلي)
+    if (domain === 'ru') {
+        // 1. إرسال طلب وهمي إلى aliexpress.com لإجبار السيرفر على إصدار توكن
+        const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
         
         await chrome.scripting.executeScript({
             target: { tabId },
@@ -25,17 +24,26 @@ async function ensureToken(tabId, domain) {
             args: [url],
         });
         
-        // نعيد المحاولة بعد الطلب الوهمي
-        cookie = await chrome.cookies.get({ url: cookieUrl, name: "_m_h5_tk" });
+        // 2. جلب الكوكي من aliexpress.com
+        let cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        if (cookie) token = cookie.value.split('_')[0];
+        
+    } else {
+        // للمواقع الأخرى (.com أو .us): نجرب النطاق الحالي أولاً ثم النطاق الرئيسي
+        let cookie = await chrome.cookies.get({ url: `https://www.aliexpress.${domain}/`, name: "_m_h5_tk" });
+        if (!cookie) {
+            cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        }
+        if (cookie) token = cookie.value.split('_')[0];
     }
     
-    return cookie ? cookie.value.split('_')[0] : null;
+    return token;
 }
 
-// الدالة التي تعمل داخل الصفحة
 async function scraperInPage({ productId, page, streamId, md5Code, initialToken, domain }) {
   const md5Fn = new Function('return ' + md5Code)();
 
+  // استخدام التوكن المجلوب، وإذا لم يوجد نقرأه من الصفحة
   const token = initialToken || document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
   if (!token) return { error: 'NO_TOKEN' };
 
@@ -51,7 +59,7 @@ async function scraperInPage({ productId, page, streamId, md5Code, initialToken,
 
   const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
 
-  // استخراج الصورة بنفس طريقة الإضافة الأصلية (تدعم جميع المواقع)
+  // استخراج الصورة (نفس الطريقة الأصلية للموقعين)
   const getImage = (dom) => {
     if (dom === "ru") {
       return document.querySelector('meta[property="og:image"]')?.content + "_";
@@ -81,6 +89,7 @@ async function scraperInPage({ productId, page, streamId, md5Code, initialToken,
   const timestamp = Date.now();
   const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
 
+  // إرسال الطلب دائماً إلى .com إذا كنا في الموقع الروسي
   const apiDomain = domain === "ru" ? "com" : domain;
   const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
   const url = `https://recom-acs.aliexpress.${apiDomain}/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
@@ -107,16 +116,14 @@ async function scraperInPage({ productId, page, streamId, md5Code, initialToken,
   }
 }
 
-// الدالة الرئيسية لجلب المنتجات
 async function fetchSimilarProducts({ page = 1, streamId = null }) {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
   
   const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
-  // تحديد الدومين الحالي
   const domain = tab.url.includes('aliexpress.ru') ? 'ru' : (tab.url.includes('aliexpress.us') ? 'us' : 'com');
 
-  // جلب التوكن الصحيح قبل بدء الطلب
+  // جلب التوكن المناسب بناءً على الموقع
   const initialToken = await ensureToken(tab.id, domain);
 
   let lastError;
