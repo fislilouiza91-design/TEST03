@@ -1,170 +1,223 @@
-const resultsEl = document.getElementById('results');
-const loaderMore = document.getElementById('loader-more');
-let globalProducts = [], globalHost = '', currentSort = 'popular';
-let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
-let lastRequestTime = 0, scrollDebounceTimer = null;
-const MIN_COOLDOWN_MS = 3000;
+let wrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
 
-function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
-
-async function fetchProducts(page, streamId) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
-  });
+function removeWidget() {
+    if (wrapper) { wrapper.remove(); wrapper = null; iframeContainer = null; iframe = null; sidebar = null; }
 }
 
-function getRating(p) {
-  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || 0;
-}
+function injectWidget() {
+    if (wrapper) return;
+    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-function getTradeCount(p) {
-  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || 0;
-}
+    let isOpen = false;
+    let currentSide = 'right'; 
+    let activeSort = 'popular';
 
-function getStarsHTML(rating) {
-  let starsHtml = '';
-  const rounded = Math.round(rating);
-  for (let i = 1; i <= 5; i++) {
-    if (i <= rounded) starsHtml += '<span class="star-filled">★</span>';
-    else starsHtml += '<span class="star-empty">★</span>';
-  }
-  return starsHtml;
-}
+    // 1. الشريط الجانبي المنحني (سيكون في الأعلى z-index ليكون فوق النافذة)
+    sidebar = document.createElement('div');
+    sidebar.style.cssText = `
+        position: fixed;
+        top: 50%;
+        right: 0;
+        transform: translateY(-50%);
+        z-index: 2147483647; /* أعلى طبقة */
+        pointer-events: none;
+    `;
 
-function getPriceClass(priceStr) {
-  if (!priceStr) return 'price-normal';
-  const length = priceStr.length;
-  if (length > 11) return 'price-xs';
-  if (length > 8) return 'price-sm';
-  return 'price-normal';
-}
+    const pillContainer = document.createElement('div');
+    pillContainer.style.cssText = `
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        padding: 20px 10px;
+        border-radius: 40px 0 0 40px;
+        box-shadow: -5px 0 20px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 15px;
+        pointer-events: auto;
+        transition: all 0.3s ease;
+        border: 1px solid #f1f5f9;
+        border-right: none;
+    `;
 
-function sortProducts(mode) {
-  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
-  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
-  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
-}
+    // 2. إطار المنتجات (مخفي في الخلف)
+    iframeContainer = document.createElement('div');
+    iframeContainer.style.cssText = `
+        position: fixed;
+        top: 50%;
+        right: 75px; /* يبدأ من حدود الشريط المنحني */
+        width: 480px;
+        height: 80vh;
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        
+        /* 🔥 الحالة الابتدائية: مخفي خلف الشريط وشفاف */
+        transform: translateY(-50%) translateX(100%);
+        opacity: 0;
+        pointer-events: none;
+        visibility: hidden;
+        
+        /* حركة انسيابية عند الظهور */
+        transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.4s ease, visibility 0.4s;
+        z-index: 2147483646; /* أقل من الشريط الجانبي */
+        display: flex;
+        overflow: hidden;
+    `;
 
-function createCard(p) {
-  let rawImg = p?.image?.imgUrl || '';
-  if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-  const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
-  
-  const price = p?.prices?.salePrice?.formattedPrice || '—';
-  const priceClass = getPriceClass(price);
-  
-  const title = p?.title?.displayTitle || 'منتج';
-  const rating = getRating(p);
-  const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+    iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('popup/popup.html');
+    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #f8fafc;`;
+    iframeContainer.appendChild(iframe);
 
-  const a = document.createElement('a');
-  a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
-  a.setAttribute('dir', 'auto'); 
+    // 3. مقبض السحب (⋮⋮)
+    const dragHandle = document.createElement('div');
+    dragHandle.style.cssText = `
+        cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+        padding: 10px 0; user-select: none; transition: color 0.2s;
+        margin-bottom: 10px;
+    `;
+    dragHandle.innerHTML = '⋮⋮';
+    dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
+    dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
 
-  a.innerHTML = `
-    <div class="img-box">
-      <img src="${img}" onerror="this.style.display='none'">
-    </div>
-    <div class="info">
-      <div class="title" title="${title}">${title}</div>
-      <div class="bottom-row">
-        <div class="stars-box">
-          <div class="stars">${getStarsHTML(rating)}</div>
-          <span class="rating-num">${rating ? rating.toFixed(1) : '—'}</span>
-        </div>
-        <div class="price ${priceClass}">${price}</div>
-      </div>
-    </div>
-  `;
-  return a;
-}
+    // 4. دالة فتح/إغلاق النافذة بسلاسة
+    function togglePanel(forceOpen = null) {
+        if (forceOpen === true) isOpen = true;
+        else if (forceOpen === false) isOpen = false;
+        else isOpen = !isOpen;
 
-function render(appendOnly = false, newProducts = []) {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = '<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 20px; color: #ff4747; font-weight: bold; font-size: 13px;"><span class="spinner"></span> جاري جلب المزيد...</div>';
-    grid = document.getElementById('main-grid');
-  }
-  
-  if (!globalProducts || globalProducts.length === 0) { 
-    grid.innerHTML = '<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">لم يتم العثور على منتجات.</p>'; 
-    return; 
-  }
-  
-  if (!appendOnly) {
-    sortProducts(currentSort);
-    grid.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
-    grid.appendChild(fragment);
-  } else {
-    const fragment = document.createDocumentFragment();
-    newProducts.forEach(p => fragment.appendChild(createCard(p)));
-    grid.appendChild(fragment);
-  }
-}
-
-async function loadInitial() {
-  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
-  scrollToTop(); 
-  loaderMore.style.display = 'none';
-  
-  lastRequestTime = Date.now();
-  const res = await fetchProducts(1, null);
-  isLoading = false;
-  
-  if (res.error) { 
-    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">خطأ: ${res.error}</p>`; 
-    return; 
-  }
-  
-  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
-  hasMore = globalProducts.length >= 20;
-  render(false); scrollToTop();
-}
-
-async function loadMore() {
-  if (isLoading || !hasMore || !currentStreamId) return;
-  const now = Date.now();
-  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
-
-  isLoading = true; lastRequestTime = Date.now();
-  loaderMore.style.display = 'block';
-
-  const res = await fetchProducts(currentPage + 1, currentStreamId);
-  await new Promise(r => setTimeout(r, 1000)); 
-  
-  isLoading = false; 
-  loaderMore.style.display = 'none';
-  
-  if (res.error) return;
-
-  const newProducts = res.products || [];
-  if (newProducts.length > 0) {
-    globalProducts = [...globalProducts, ...newProducts];
-    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
-    hasMore = newProducts.length >= 20;
-    render(true, newProducts);
-  } else { hasMore = false; }
-}
-
-resultsEl.addEventListener('scroll', () => {
-  clearTimeout(scrollDebounceTimer);
-  scrollDebounceTimer = setTimeout(() => {
-    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
-  }, 300);
-});
-
-// 🔥 استقبال أمر الترتيب من الشريط الجانبي (content.js)
-window.addEventListener('message', (event) => {
-  if (event.data && event.data.action === 'SORT') {
-    const newSort = event.data.sort;
-    if (currentSort !== newSort) {
-      currentSort = newSort;
-      scrollToTop(); // العودة لأعلى الصفحة
-      render(false); // إعادة الترتيب فوراً
+        if (isOpen) {
+            // إظهار النافذة
+            iframeContainer.style.visibility = 'visible';
+            iframeContainer.style.opacity = '1';
+            iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+            iframeContainer.style.pointerEvents = 'auto';
+        } else {
+            // إخفاء النافذة خلف الشريط
+            iframeContainer.style.opacity = '0';
+            iframeContainer.style.pointerEvents = 'none';
+            if (currentSide === 'right') {
+                iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
+            } else {
+                iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
+            }
+            
+            // إخفاء العنصر تماماً بعد انتهاء الحركة لتوفير الموارد
+            setTimeout(() => {
+                if (!isOpen) iframeContainer.style.visibility = 'hidden';
+            }, 400);
+        }
     }
-  }
-});
 
-loadInitial();
+    dragHandle.addEventListener('click', () => togglePanel());
+
+    // 5. الأزرار الثلاثة
+    const createSortBtn = (text, sortValue) => {
+        const btn = document.createElement('div');
+        btn.style.cssText = `
+            writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+            background: transparent; border-radius: 20px; cursor: pointer;
+            font-weight: 700; font-size: 13px; color: #64748b;
+            transition: all 0.3s ease; user-select: none; letter-spacing: 1px;
+        `;
+        btn.innerText = text;
+        btn.setAttribute('data-sort', sortValue);
+        
+        btn.onclick = () => {
+            const isCurrentlyActive = (activeSort === sortValue);
+
+            pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
+            });
+
+            if (isCurrentlyActive && isOpen) {
+                togglePanel(false); // إغلاق
+            } else {
+                btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                btn.style.color = 'white';
+                btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                
+                activeSort = sortValue;
+                togglePanel(true); // فتح
+                iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*');
+            }
+        };
+        return btn;
+    };
+
+    const btnRating = createSortBtn('الأكثر تقيماً', 'rating');
+    const btnPopular = createSortBtn('الأكثر طلباً', 'popular');
+    const btnCheapest = createSortBtn('الأرخص', 'cheapest');
+
+    btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+    btnPopular.style.color = 'white';
+    btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+
+    pillContainer.appendChild(dragHandle);
+    pillContainer.appendChild(btnRating);
+    pillContainer.appendChild(btnPopular);
+    pillContainer.appendChild(btnCheapest);
+
+    sidebar.appendChild(pillContainer);
+    document.body.appendChild(sidebar);
+    document.body.appendChild(iframeContainer);
+
+    // ==========================================
+    // 6. تبديل الجهة (يمين / يسار)
+    // ==========================================
+    function setSide(side) {
+        currentSide = side;
+        if (side === 'right') {
+            sidebar.style.right = '0'; sidebar.style.left = 'auto';
+            pillContainer.style.borderRadius = '40px 0 0 40px';
+            pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+            pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
+            
+            iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
+            
+        } else {
+            sidebar.style.left = '0'; sidebar.style.right = 'auto';
+            pillContainer.style.borderRadius = '0 40px 40px 0';
+            pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+            pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
+            
+            iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
+        }
+    }
+
+    // 7. السحب للتبديل
+    let isDragging = false;
+    dragHandle.addEventListener('mousedown', () => {
+        isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        if (e.clientX < window.innerWidth / 2) {
+            if (currentSide !== 'left') setSide('left');
+        } else {
+            if (currentSide !== 'right') setSide('right');
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+    });
+}
+
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
