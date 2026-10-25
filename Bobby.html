@@ -10,51 +10,54 @@ function injectWidget() {
     if (wrapper) return;
     if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-    // 1. إنشاء اللوحة الأساسية
+    // 1. إنشاء اللوحة
     wrapper = document.createElement('div');
     wrapper.id = 'alifinder-drawer';
     wrapper.style.cssText = `
         position: fixed;
-        top: 10%;
-        left: 0;
-        width: 480px;
-        height: 80vh;
+        top: 20%;
+        right: 0;
+        width: 450px;
+        height: 70vh;
         z-index: 2147483647;
         background: #fff;
-        box-shadow: 4px 0 15px rgba(0,0,0,0.2);
-        transform: translateX(-100%); /* مخفية افتراضياً */
-        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), left 0.3s ease, right 0.3s ease, border-radius 0.3s, top 0.3s ease;
+        box-shadow: -5px 0 25px rgba(0,0,0,0.15);
+        transform: translateX(100%);
+        transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), top 0.1s linear, border-radius 0.3s;
         display: flex;
-        border-radius: 0 12px 12px 0;
+        border-radius: 16px 0 0 16px;
     `;
 
-    // 2. زر التحكم
+    // 2. المقبض المنحني (باستخدام SVG ليطابق رسمتك تماماً)
     toggleBtn = document.createElement('div');
     toggleBtn.id = 'alifinder-toggle';
     toggleBtn.style.cssText = `
         position: absolute;
-        right: -45px;
+        left: -40px;
         top: 50%;
         transform: translateY(-50%);
-        width: 45px;
-        height: 100px;
-        background: linear-gradient(135deg, #ff6b35, #ff4747);
-        border-radius: 0 10px 10px 0;
+        width: 40px;
+        height: 120px;
         cursor: grab;
         display: flex;
-        flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 10px;
-        color: white;
-        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
         user-select: none;
-        font-family: sans-serif;
-        transition: left 0.3s ease, right 0.3s ease, border-radius 0.3s, box-shadow 0.3s;
     `;
+
+    // رسم الشكل المنحني بدقة
     toggleBtn.innerHTML = `
-        <span style="font-size: 14px; opacity: 0.8; line-height: 1;">≡</span>
-        <span class="arrow-icon" style="font-size: 16px; font-weight: bold; line-height: 1;">▶</span>
+        <svg width="40" height="120" viewBox="0 0 40 120" style="position: absolute; top: 0; left: 0; filter: drop-shadow(-2px 0 5px rgba(0,0,0,0.2));">
+            <defs>
+                <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" style="stop-color:#ff4747;stop-opacity:1" />
+                    <stop offset="100%" style="stop-color:#ff6b35;stop-opacity:1" />
+                </linearGradient>
+            </defs>
+            <!-- هذا المسار يرسم الشكل المنحني الذي رسمته في الورقة -->
+            <path d="M 40 0 C -10 30, -10 90, 40 120 L 40 0 Z" fill="url(#grad)" />
+        </svg>
+        <span class="arrow-icon" style="position: relative; z-index: 2; font-size: 18px; font-weight: bold; color: white; left: -5px;">◀</span>
     `;
 
     // 3. إطار الإضافة
@@ -66,6 +69,7 @@ function injectWidget() {
         border: none;
         background: #f8fafc;
         border-radius: inherit;
+        pointer-events: auto;
     `;
 
     wrapper.appendChild(toggleBtn);
@@ -73,27 +77,24 @@ function injectWidget() {
     document.body.appendChild(wrapper);
 
     // ==========================================
-    // 4. نظام السحب الحر والالتصاق الذكي (Smart Snap)
+    // 4. نظام التحكم: فتح، إغلاق، سحب، والتقاط الجدار الأقرب
     // ==========================================
     let isOpen = false;
     let isDragging = false;
-    let wasDragged = false;
-    let startX, startY, startLeft, startTop;
-    let currentSide = 'left';
+    let hasDragged = false;
+    let startX, startY, startTop;
+    let currentSide = 'right'; // يبدأ من اليمين
 
     toggleBtn.addEventListener('mousedown', (e) => {
         isDragging = true;
-        wasDragged = false;
+        hasDragged = false;
         startX = e.clientX;
         startY = e.clientY;
-        
-        const rect = wrapper.getBoundingClientRect();
-        startLeft = rect.left;
-        startTop = rect.top;
+        startTop = wrapper.getBoundingClientRect().top;
         
         toggleBtn.style.cursor = 'grabbing';
-        iframe.style.pointerEvents = 'none'; 
-        wrapper.style.transition = 'none'; // إيقاف التأثير الحركي أثناء السحب الحر
+        iframe.style.pointerEvents = 'none'; // منع اعتراض الماوس أثناء السحب
+        wrapper.style.transition = 'transform 0.4s, top 0s'; 
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -103,20 +104,23 @@ function injectWidget() {
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
         
-        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) wasDragged = true;
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasDragged = true;
         
-        if (wasDragged) {
-            // تحريك حر تماماً مع الماوس في كل الاتجاهات
-            let newLeft = startLeft + dx;
+        if (hasDragged) {
+            // 1. تحريك لأعلى وأسفل
             let newTop = startTop + dy;
-            
-            // منع الخروج من الشاشة عمودياً
             if (newTop < 0) newTop = 0;
             if (newTop > window.innerHeight - wrapper.offsetHeight) newTop = window.innerHeight - wrapper.offsetHeight;
-            
-            wrapper.style.left = newLeft + 'px';
-            wrapper.style.right = 'auto';
             wrapper.style.top = newTop + 'px';
+            
+            // 2. معاينة الجدار: إذا تجاوز المنتصف، اذهب لليسار
+            if (e.clientX < window.innerWidth / 2) {
+                wrapper.style.right = 'auto';
+                wrapper.style.left = '0';
+            } else {
+                wrapper.style.left = 'auto';
+                wrapper.style.right = '0';
+            }
         }
     });
 
@@ -125,59 +129,67 @@ function injectWidget() {
         isDragging = false;
         toggleBtn.style.cursor = 'grab';
         iframe.style.pointerEvents = 'auto';
-        wrapper.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), left 0.4s ease, right 0.4s ease, border-radius 0.4s, top 0.4s ease';
+        wrapper.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), top 0.1s linear, left 0.4s ease, right 0.4s ease';
 
-        if (!wasDragged) {
-            // مجرد ضغطة سريعة (فتح/إغلاق)
+        // إذا كانت مجرد ضغطة (فتح/إغلاق)
+        if (!hasDragged) {
             isOpen = !isOpen;
             const arrow = toggleBtn.querySelector('.arrow-icon');
             if (isOpen) {
                 wrapper.style.transform = 'translateX(0)';
-                arrow.innerText = currentSide === 'left' ? '◀' : '▶';
+                arrow.innerText = currentSide === 'right' ? '▶' : '◀';
             } else {
-                wrapper.style.transform = currentSide === 'left' ? 'translateX(-100%)' : 'translateX(100%)';
-                arrow.innerText = currentSide === 'left' ? '▶' : '◀';
+                wrapper.style.transform = currentSide === 'right' ? 'translateX(100%)' : 'translateX(-100%)';
+                arrow.innerText = currentSide === 'right' ? '◀' : '▶';
             }
         } else {
-            // 🔥 السحر هنا: عند إفلات الماوس، اللوحة تختار الجدار الأقرب إليها وتلتصق به
-            const rect = wrapper.getBoundingClientRect();
-            const panelCenter = rect.left + (rect.width / 2);
+            // 🔥 الالتصاق بالجدار الأقرب
             const screenCenter = window.innerWidth / 2;
-
-            if (panelCenter < screenCenter) {
-                // تلتصق بالجدار الأيسر (لأنها أقرب له)
+            
+            if (e.clientX < screenCenter) {
+                // التصاق بالجدار الأيسر
                 currentSide = 'left';
-                wrapper.style.left = '0';
                 wrapper.style.right = 'auto';
-                wrapper.style.borderRadius = '0 12px 12px 0';
+                wrapper.style.left = '0';
+                wrapper.style.borderRadius = '0 16px 16px 0';
                 
-                toggleBtn.style.right = '-45px';
+                // تدوير المقبض للجدار الأيسر
                 toggleBtn.style.left = 'auto';
-                toggleBtn.style.borderRadius = '0 10px 10px 0';
-                toggleBtn.style.boxShadow = '2px 0 8px rgba(0,0,0,0.2)';
+                toggleBtn.style.right = '-40px';
+                toggleBtn.querySelector('svg').style.transform = 'scaleX(-1)';
+                toggleBtn.querySelector('.arrow-icon').style.left = '5px';
                 
                 wrapper.style.transform = isOpen ? 'translateX(0)' : 'translateX(-100%)';
                 toggleBtn.querySelector('.arrow-icon').innerText = isOpen ? '◀' : '▶';
-                
             } else {
-                // تلتصق بالجدار الأيمن (لأنها أقرب له)
+                // التصاق بالجدار الأيمن
                 currentSide = 'right';
                 wrapper.style.left = 'auto';
                 wrapper.style.right = '0';
-                wrapper.style.borderRadius = '12px 0 0 12px';
+                wrapper.style.borderRadius = '16px 0 0 16px';
                 
-                toggleBtn.style.left = '-45px';
+                // إعادة المقبض لليمين
                 toggleBtn.style.right = 'auto';
-                toggleBtn.style.borderRadius = '10px 0 0 10px';
-                toggleBtn.style.boxShadow = '-2px 0 8px rgba(0,0,0,0.2)';
+                toggleBtn.style.left = '-40px';
+                toggleBtn.querySelector('svg').style.transform = 'scaleX(1)';
+                toggleBtn.querySelector('.arrow-icon').style.left = '-5px';
                 
                 wrapper.style.transform = isOpen ? 'translateX(0)' : 'translateX(100%)';
                 toggleBtn.querySelector('.arrow-icon').innerText = isOpen ? '▶' : '◀';
             }
         }
     });
+
+    // تفعيل السهم عند الضغط المباشر
+    toggleBtn.querySelector('.arrow-icon').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!hasDragged) {
+            // سيتم التعامل معه في mouseup
+        }
+    });
 }
 
+// التشغيل
 injectWidget();
 let lastUrl = location.href;
 new MutationObserver(() => {
