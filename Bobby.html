@@ -1,107 +1,214 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    :root {
-      --primary: #ff4747;
-      --bg: #ffffff;
-      --text-main: #1e293b;
-      --text-muted: #64748b;
-      --border: #e2e8f0;
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || 0;
+}
+
+function getStarsHTML(rating) {
+  let starsHtml = '';
+  const rounded = Math.round(rating);
+  for (let i = 1; i <= 5; i++) {
+    if (i <= rounded) starsHtml += '<span class="star-filled">★</span>';
+    else starsHtml += '<span class="star-empty">★</span>';
+  }
+  return starsHtml;
+}
+
+function getPriceClass(priceStr) {
+  if (!priceStr) return 'price-normal';
+  const length = priceStr.length;
+  if (length > 11) return 'price-xs';
+  if (length > 8) return 'price-sm';
+  return 'price-normal';
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+    
+    const price = p?.prices?.salePrice?.formattedPrice || '—';
+    const priceClass = getPriceClass(price);
+    
+    const title = p?.title?.displayTitle || 'منتج';
+    const rating = getRating(p);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = false;
+    let shippingText = '';
+
+    try {
+      if (p?.shipping && p.shipping.shippingFee) {
+        const fee = p.shipping.shippingFee;
+        if (fee === 'Free' || fee === 0) {
+          isFreeShipping = true;
+        } else if (typeof fee === 'string') {
+          shippingText = fee;
+        }
+      }
+
+      if (p?.sellingPoints && Array.isArray(p.sellingPoints)) {
+        const freeTag = p.sellingPoints.find(sp => {
+          let text = '';
+          if (typeof sp === 'string') text = sp;
+          else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
+          if (typeof text !== 'string') return false;
+          
+          const s = text.toLowerCase();
+          return s.includes('free shipping') || s.includes('شحن مجاني') || s.includes('مجاني');
+        });
+        if (freeTag) isFreeShipping = true;
+      }
+    } catch (err) {}
+
+    const checkIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#047857" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>`;
+
+    // 🔥 التنسيق المضمن الإجباري مع خاصية -webkit-text-fill-color لكسر لون الروابط
+    let shippingHtml = '';
+    if (isFreeShipping) {
+      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 3px 6px; border-radius: 4px; background-color: #d1fae5 !important; border: 1px solid #10b981 !important; width: fit-content; color: #047857 !important; -webkit-text-fill-color: #047857 !important; font-size: 9px; font-weight: bold;">${checkIcon} <span style="color: #047857 !important; -webkit-text-fill-color: #047857 !important;">شحن مجاني</span></div>`;
+    } else if (shippingText) {
+      shippingHtml = `<div style="display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; color: #64748b !important; -webkit-text-fill-color: #64748b !important; font-size: 9px; font-weight: bold;">${truckIcon} <span>${shippingText}</span></div>`;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    
-    /* 🔥 سحر CSS: إجبار المتصفح على نزع لون الروابط الأزرق */
-    a { 
-      text-decoration: none !important; 
-      color: inherit !important; 
-      -webkit-text-fill-color: inherit !important; 
-    }
-    
-    body { 
-      width: 100%; height: 100vh; 
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; 
-      background: var(--bg); 
-      display: flex; flex-direction: column; overflow: hidden; 
-    }
-    
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+    a.setAttribute('dir', 'auto'); 
 
-    #results { flex: 1; overflow-y: auto; padding: 10px; width: 100%; position: relative; }
-    
-    .grid { 
-      display: grid; 
-      grid-template-columns: repeat(3, 1fr); 
-      gap: 8px; 
-      width: 100%; 
-      align-content: start; 
-    }
-    
-    .product-card { 
-      display: flex; flex-direction: column; background: white; 
-      border-radius: 8px; overflow: hidden; text-decoration: none; 
-      border: 1px solid var(--border); transition: all 0.2s ease; 
-      box-shadow: 0 1px 4px rgba(0,0,0,0.04); position: relative; width: 100%;
-    }
-    .product-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-    
-    .img-box { 
-      width: 100%; height: 100px; background: #f8fafc; 
-      display: flex; align-items: center; justify-content: center; overflow: hidden; 
-    }
-    .img-box img { width: 100%; height: 100%; object-fit: cover; }
-    
-    .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
-    
-    .title { 
-      font-size: 10px; color: var(--text-main); font-weight: 600; line-height: 1.3; 
-      height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; margin-bottom: 4px; 
-      unicode-bidi: plaintext; text-align: start; 
-    }
-    
-    .bottom-row { 
-      display: flex; justify-content: space-between; align-items: center; 
-      margin-top: auto; width: 100%; gap: 2px; flex-wrap: nowrap;
-    }
-    
-    .stars-box { display: flex; align-items: center; gap: 1px; direction: ltr; flex-shrink: 0; }
-    .stars { font-size: 9px; letter-spacing: -0.5px; }
-    .star-filled { color: #ffa41c; }
-    .star-empty { color: #e2e8f0; }
-    .rating-num { font-size: 9px; color: var(--text-muted); font-weight: 700; }
-    
-    .price { font-weight: 800; color: var(--primary); white-space: nowrap; text-align: end; direction: ltr; }
-    .price-normal { font-size: 12px; }
-    .price-sm { font-size: 10px; }
-    .price-xs { font-size: 9px; }
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        <div class="bottom-row">
+          <div class="stars-box">
+            <div class="stars">${getStarsHTML(rating)}</div>
+            <span class="rating-num">${rating ? rating.toFixed(1) : '—'}</span>
+          </div>
+          <div class="price ${priceClass}">${price}</div>
+        </div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
+  }
+}
 
-    /* هياكل التحميل */
-    .skeleton { background: #e2e8f0; border-radius: 4px; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    .skeleton-card { height: 200px; background: white; border-radius: 8px; border: 1px solid var(--border); padding: 6px; display: flex; flex-direction: column; gap: 6px; }
-    .skeleton-img { width: 100%; height: 100px; border-radius: 4px; }
-    .skeleton-text { width: 100%; height: 10px; }
-    .skeleton-text.short { width: 60%; }
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = '<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> جاري جلب المزيد...</div>';
+    grid = document.getElementById('main-grid');
+  }
+  
+  if (!globalProducts || globalProducts.length === 0) { 
+    grid.innerHTML = '<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">لم يتم العثور على منتجات.</p>'; 
+    return; 
+  }
+  
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
 
-    #loader-more { display: none; text-align: center; padding: 15px; color: var(--primary); font-weight: bold; font-size: 12px; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,71,71,0.3); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span> جاري جلب المزيد...</div>
-  </div>
-  <script src="popup.js"></script>
-</body>
-</html>
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop(); 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+  
+  if (res.error) { 
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">خطأ: ${res.error}</p>`; 
+    return; 
+  }
+  
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000)); 
+  
+  isLoading = false; 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop(); 
+      if (!isLoading && globalProducts.length > 0) {
+        render(false); 
+      }
+    }
+  }
+});
+
+loadInitial();
