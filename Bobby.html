@@ -1,257 +1,249 @@
-llet widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
-    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
-    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' }
+// 🔥 قراءة اللغة من الرابط (الذي مرره content.js)
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
+
+// قاموس الترجمة الخاص بالنافذة
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free Shipping', no_products: 'No products found.', loading_more: 'Loading more...' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...' }
 };
 
-function getSiteLang() {
-    if (location.href.includes('aliexpress.ru')) return 'ru';
-    if (location.href.includes('fr.aliexpress.com')) return 'fr';
-    if (location.href.includes('aliexpress.us')) return 'en'; // الموقع الأمريكي إنجليزي
-
-    let lang = document.documentElement.lang || '';
-    if (!lang) {
-        const match = document.cookie.match(/(?:^|;\s*)(?:xman_us_f|aep_usuc_f)=([^;]*)/);
-        if (match) {
-            const cookieStr = decodeURIComponent(match[1]);
-            const localeMatch = cookieStr.match(/x_locale=([^&]+)/) || cookieStr.match(/b_locale=([^&]+)/);
-            if (localeMatch) lang = localeMatch[1];
-        }
-    }
-    lang = lang.split('-')[0].split('_')[0].toLowerCase();
-    return SITE_TRANSLATIONS[lang] ? lang : 'en';
-}
-
-const t = (key) => {
-    const lang = getSiteLang();
-    return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key]) 
+        ? POPUP_TRANSLATIONS[siteLang][key] 
+        : POPUP_TRANSLATIONS['en'][key];
 };
 
-function removeWidget() {
-    if (widgetWrapper) {
-        widgetWrapper.remove();
-        widgetWrapper = null;
-        iframeContainer = null;
-        iframe = null;
-        sidebar = null;
-    }
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
 }
 
-function injectWidget() {
-    if (widgetWrapper) return;
-    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
-
-    let isOpen = false;
-    let currentSide = 'left'; 
-    let activeSort = 'popular';
-
-    widgetWrapper = document.createElement('div');
-    widgetWrapper.id = 'alifinder-widget-wrapper';
-    widgetWrapper.style.cssText = `
-        position: fixed;
-        top: 0; left: 0; width: 100vw; height: 100vh;
-        pointer-events: none;
-        z-index: 2147483647;
-    `;
-
-    sidebar = document.createElement('div');
-    sidebar.style.cssText = `
-        position: absolute;
-        top: 50%;
-        left: 0; 
-        transform: translateY(-50%);
-        pointer-events: none;
-    `;
-
-    const pillContainer = document.createElement('div');
-    pillContainer.style.cssText = `
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(10px);
-        padding: 20px 10px;
-        border-radius: 0 40px 40px 0;
-        box-shadow: 5px 0 20px rgba(0,0,0,0.1);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 15px;
-        pointer-events: auto;
-        transition: all 0.3s ease;
-        border: 1px solid #f1f5f9;
-        border-left: none;
-    `;
-
-    iframeContainer = document.createElement('div');
-    iframeContainer.style.cssText = `
-        position: absolute;
-        top: 50%;
-        left: 75px;
-        width: 500px;
-        max-width: 90vw;
-        height: 75vh;
-        background: #ffffff !important;
-        border-radius: 16px;
-        box-shadow: 15px 0 50px rgba(0,0,0,0.25);
-        transform: translateY(-50%) translateX(-105%);
-        opacity: 0;
-        pointer-events: none;
-        visibility: hidden;
-        transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
-        display: flex;
-        overflow: hidden;
-    `;
-
-    // 🔥 تمرير لغة الموقع إلى الإطار الداخلي
-    const siteLang = getSiteLang();
-    iframe = document.createElement('iframe');
-    iframe.src = chrome.runtime.getURL('popup/popup.html') + '?siteLang=' + siteLang;
-    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
-    iframeContainer.appendChild(iframe);
-
-    const dragHandle = document.createElement('div');
-    dragHandle.style.cssText = `
-        cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
-        padding: 10px 0; user-select: none; transition: color 0.2s;
-        margin-bottom: 10px;
-    `;
-    dragHandle.innerHTML = '⋮⋮';
-    dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
-    dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
-
-    function togglePanel(forceOpen = null) {
-        if (forceOpen === true) isOpen = true;
-        else if (forceOpen === false) isOpen = false;
-        else isOpen = !isOpen;
-
-        if (isOpen) {
-            iframeContainer.style.visibility = 'visible';
-            iframeContainer.style.opacity = '1';
-            iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-            iframeContainer.style.pointerEvents = 'auto';
-        } else {
-            iframeContainer.style.opacity = '0';
-            iframeContainer.style.pointerEvents = 'none';
-            if (currentSide === 'right') {
-                iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-            } else {
-                iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-            }
-            setTimeout(() => {
-                if (!isOpen) iframeContainer.style.visibility = 'hidden';
-            }, 750);
-        }
-    }
-
-    const createSortBtn = (text, sortValue) => {
-        const btn = document.createElement('div');
-        btn.style.cssText = `
-            writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
-            background: transparent; border-radius: 20px; cursor: pointer;
-            font-weight: 700; font-size: 13px; color: #64748b;
-            transition: all 0.3s ease; user-select: none; letter-spacing: 1px;
-        `;
-        
-        btn.innerText = text;
-        btn.setAttribute('data-sort', sortValue);
-        
-        btn.onclick = () => {
-            const isCurrentlyActive = (activeSort === sortValue);
-
-            if (isCurrentlyActive && isOpen) {
-                togglePanel(false); 
-            } else {
-                activeSort = sortValue;
-                
-                pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                    b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
-                });
-                btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                btn.style.color = 'white';
-                btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-
-                togglePanel(true); 
-                
-                try {
-                    iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*');
-                } catch(e) {}
-            }
-        };
-        return btn;
-    };
-
-    const btnRating = createSortBtn(t('rating'), 'rating');
-    const btnPopular = createSortBtn(t('popular'), 'popular');
-    const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
-
-    btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-    btnPopular.style.color = 'white';
-    btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-
-    pillContainer.appendChild(dragHandle);
-    pillContainer.appendChild(btnRating);
-    pillContainer.appendChild(btnPopular);
-    pillContainer.appendChild(btnCheapest);
-
-    sidebar.appendChild(pillContainer);
-    widgetWrapper.appendChild(sidebar);
-    widgetWrapper.appendChild(iframeContainer);
-    document.body.appendChild(widgetWrapper);
-
-    function setSide(side) {
-        currentSide = side;
-        if (side === 'right') {
-            sidebar.style.right = '0'; sidebar.style.left = 'auto';
-            pillContainer.style.borderRadius = '40px 0 0 40px';
-            pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
-            pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
-            
-            iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
-            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-            
-        } else {
-            sidebar.style.left = '0'; sidebar.style.right = 'auto';
-            pillContainer.style.borderRadius = '0 40px 40px 0';
-            pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
-            pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
-            
-            iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
-            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-        }
-    }
-
-    let isDragging = false;
-    dragHandle.addEventListener('mousedown', () => {
-        isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
-    });
-
-    window.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        if (e.clientX < window.innerWidth / 2) {
-            if (currentSide !== 'left') setSide('left');
-        } else {
-            if (currentSide !== 'right') setSide('right');
-        }
-    });
-
-    window.addEventListener('mouseup', () => {
-        if (!isDragging) return;
-        isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
-    });
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || 0;
 }
 
-injectWidget();
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || 0;
+}
+
+function getStarsHTML(rating) {
+  let starsHtml = '';
+  const rounded = Math.round(rating);
+  for (let i = 1; i <= 5; i++) {
+    if (i <= rounded) starsHtml += '<span class="star-filled">★</span>';
+    else starsHtml += '<span class="star-empty">★</span>';
+  }
+  return starsHtml;
+}
+
+function getPriceClass(priceStr) {
+  if (!priceStr) return 'price-normal';
+  const length = priceStr.length;
+  if (length > 11) return 'price-xs';
+  if (length > 8) return 'price-sm';
+  return 'price-normal';
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+    
+    const price = p?.prices?.salePrice?.formattedPrice || '—';
+    const priceClass = getPriceClass(price);
+    
+    const title = p?.title?.displayTitle || 'منتج';
+    const rating = getRating(p);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = false;
+    let shippingText = '';
+
+    try {
+      if (p?.shipping) {
+        if (p.shipping.freeShipping === true || p.shipping.shippingFee === 0 || p.shipping.shippingFee === '0') {
+          isFreeShipping = true;
+        } else if (typeof p.shipping.shippingFee === 'string' && p.shipping.shippingFee !== '') {
+          shippingText = p.shipping.shippingFee;
+        } else if (p.shipping.freightAmount) {
+          const amount = p.shipping.freightAmount.value || p.shipping.freightAmount;
+          if (amount === 0 || amount === '0') isFreeShipping = true;
+          else if (typeof amount === 'string') shippingText = amount;
+        }
+      }
+
+      if (p?.sellingPoints && Array.isArray(p.sellingPoints)) {
+        const freeTag = p.sellingPoints.find(sp => {
+          let text = '';
+          if (typeof sp === 'string') text = sp;
+          else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
+          if (typeof text !== 'string') return false;
+          
+          const s = text.toLowerCase();
+          return s.includes('free shipping') || s.includes('бесплатная доставка') || s.includes('бесплатно') || s.includes('livraison gratuite') || s.includes('envío gratis') || s.includes('شحن مجاني') || s.includes('مجاني');
+        });
+        if (freeTag) isFreeShipping = true;
+      }
+      
+      if (!isFreeShipping && p?.trade?.tradeDesc) {
+         const desc = String(p.trade.tradeDesc).toLowerCase();
+         if (desc.includes('free shipping') || desc.includes('бесплатно') || desc.includes('бесплатная доставка')) isFreeShipping = true;
+      }
+
+    } catch (err) {}
+
+    const checkIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>`;
+
+    let shippingHtml = '';
+    if (isFreeShipping) {
+      // 🔥 استخدام الترجمة التي تطابق لغة الموقع
+      shippingHtml = `<div style="display: flex; align-items: center; gap: 4px; margin-top: 4px; color: #059669 !important; -webkit-text-fill-color: #059669 !important; font-size: 10px; font-weight: bold; height: 14px;">${checkIcon} <span>${msgFreeShipping}</span></div>`;
+    } else if (shippingText) {
+      shippingHtml = `<div style="display: flex; align-items: center; gap: 4px; margin-top: 4px; color: #64748b !important; -webkit-text-fill-color: #64748b !important; font-size: 10px; font-weight: bold; height: 14px;">${truckIcon} <span>${shippingText}</span></div>`;
+    } else {
+      shippingHtml = `<div style="height: 14px; margin-top: 4px; visibility: hidden;"></div>`;
     }
-}).observe(document, {subtree: true, childList: true});
+
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+    a.setAttribute('dir', 'auto'); 
+
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        <div class="bottom-row">
+          <div class="stars-box">
+            <div class="stars">${getStarsHTML(rating)}</div>
+            <span class="rating-num">${rating ? rating.toFixed(1) : '—'}</span>
+          </div>
+          <div class="price ${priceClass}">${price}</div>
+        </div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
+  }
+}
+
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+  
+  if (!globalProducts || globalProducts.length === 0) { 
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`; 
+    return; 
+  }
+  
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop(); 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+  
+  if (res.error) { 
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`; 
+    return; 
+  }
+  
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000)); 
+  
+  isLoading = false; 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop(); 
+      if (!isLoading && globalProducts.length > 0) {
+        render(false); 
+      }
+    }
+  }
+});
+
+loadInitial();
