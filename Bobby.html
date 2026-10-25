@@ -1,34 +1,94 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { width: 100%; height: 100vh; font-family: system-ui, sans-serif; background: #f8fafc; display: flex; flex-direction: column; overflow: hidden; }
-    .sort-bar { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 10px; background: white; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
-    .sort-btn { padding: 8px 2px; background: #f1f5f9; border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-weight: bold; color: #475569; font-size: 12px; transition: 0.2s; }
-    .sort-btn.active { background: #ff6b35; color: white; border-color: #ff6b35; }
-    #results { flex: 1; overflow-y: auto; padding: 8px; width: 100%; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: 100%; }
-    .product-card { display: flex; flex-direction: column; background: white; border-radius: 6px; overflow: hidden; text-decoration: none; border: 1px solid #e2e8f0; transition: transform 0.2s; }
-    .product-card:hover { transform: translateY(-2px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .img-box { width: 100%; height: 100px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-    .img-box img { width: 100%; height: 100%; object-fit: cover; }
-    .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
-    .title { font-size: 10px; color: #334155; line-height: 1.3; height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-bottom: 4px; }
-    .price { font-size: 12px; font-weight: bold; color: #ef4444; margin-top: auto; }
-    .loader { text-align: center; padding: 20px; color: #64748b; font-size: 14px; }
-  </style>
-</head>
-<body>
-  <div class="sort-bar">
-    <button class="sort-btn" data-sort="cheapest">الأرخص</button>
-    <button class="sort-btn active" data-sort="popular">الأكثر طلباً</button>
-    <button class="sort-btn" data-sort="rating">الأكثر تقيماً</button>
-  </div>
-  <div id="results"><div class="loader">جاري البحث عبر محرك الموقع...</div></div>
-  
-  <!-- هذا السطر هو الوحيد المسموح به لربط الجافاسكريبت -->
-  <script src="popup.js"></script>
-</body>
-</html>
+// background.js (The Sniper - Full Payload)
+
+async function sniperScraper({ productId, page, streamId }) {
+    // 1. البحث عن محرك MTOP الأصلي
+    const mtop = window.lib?.mtop || window.QN?.mtop || window.mtop;
+
+    if (!mtop || typeof mtop.request !== 'function') {
+        return { error: 'ENGINE_NOT_FOUND' };
+    }
+
+    try {
+        // 2. استخراج كل البيانات من الكوكيز والصفحة (مثل الكود القديم)
+        const cna = document.cookie?.split("cna=")[1]?.split(";")[0] || "";
+        const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
+        const acsRt = xman?.split("acs_rt=")[1] || "";
+        const aep = document.cookie?.split("aep_usuc_f=")[1]?.split(";")[0] || '';
+        const currency = aep?.split("c_tp=")[1]?.split("&")[0] ?? "USD";
+        const region = aep?.split("region=")[1]?.split("&")[0] ?? "US";
+        const locale = xman?.split("x_locale=")[1]?.split("&")[0] ?? "en_US";
+        const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+
+        const getImage = () => {
+            const ogImg = document.querySelector('meta[property="og:image"]')?.content;
+            return ogImg ? ogImg.split('_')[0] : undefined;
+        };
+
+        // 3. بناء كائن البيانات الكامل (Payload)
+        const y = {
+            DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
+            image: getImage(), isNewImageSearch: true, lang: locale, locale: locale,
+            osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+            recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
+            searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
+            sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
+            "x-appKey": 24815441,
+            "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+            _city: "", _currency: currency, _state: ""
+        };
+        
+        if (streamId) {
+            y.streamId = streamId;
+            y.realReffer = "";
+        }
+
+        // 4. إعطاء الأمر لمحرك الموقع (القناص) ليقوم بالتوقيع والإرسال
+        const response = await new Promise((resolve) => {
+            mtop.request({
+                api: 'mtop.relationrecommend.AliexpressRecommend.recommend',
+                v: '1.0',
+                type: 'POST',
+                dataType: 'json',
+                data: {
+                    appId: "19587",
+                    params: JSON.stringify(y)
+                },
+                success: (res) => resolve(res),
+                error: (err) => resolve({ error: 'MTOP_FAILED', details: err })
+            });
+        });
+
+        if (response.error) return { error: response.error };
+
+        // 5. إرجاع النتيجة
+        return {
+            products: response?.data?.mods?.itemList?.content ?? [],
+            streamId: response?.data?.pageInfo?.streamId,
+            host: location.host
+        };
+
+    } catch (e) {
+        return { error: e.message };
+    }
+}
+
+// الاستماع للرسائل
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.action === 'FETCH_SIMILAR') {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
+            if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return sendResponse({ error: 'NOT_PRODUCT_PAGE' });
+            
+            const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+
+            chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                world: 'MAIN', // ضروري جداً
+                func: sniperScraper,
+                args: [{ productId, page: msg.page || 1, streamId: msg.streamId || null }],
+            }).then(result => {
+                sendResponse(result[0]?.result || { error: 'EMPTY_RESULT' });
+            }).catch(err => sendResponse({ error: err.message }));
+        });
+        return true;
+    }
+});
