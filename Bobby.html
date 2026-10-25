@@ -27,17 +27,18 @@
       margin-bottom: 6px; unicode-bidi: plaintext; text-align: start; 
     }
     
-    /* 🔥 التعديل هنا: إجبار الاتجاه ليكون النجوم يسار والسعر يمين */
+    /* السطر السفلي الذي يحتوي على التقييم والسعر */
     .bottom-row { 
       display: flex; justify-content: space-between; align-items: center; 
-      margin-top: auto; width: 100%;
-      direction: ltr; /* إجبار الاتجاه لضمان ثبات السعر والتقييم */
+      margin-top: auto; unicode-bidi: plaintext; width: 100%;
     }
     
+    /* تنسيق النجوم */
     .stars-box { display: flex; align-items: center; gap: 2px; direction: ltr; }
     .stars { color: #f59e0b; font-size: 10px; letter-spacing: -1px; }
     .rating-num { font-size: 10px; color: #f59e0b; font-weight: bold; margin-left: 2px; }
     
+    /* تنسيق السعر */
     .price { font-size: 13px; font-weight: bold; color: #ef4444; }
 
     .loader { text-align: center; padding: 20px; color: #64748b; font-size: 14px; }
