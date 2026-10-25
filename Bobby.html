@@ -1,63 +1,33 @@
 {
-  "appName": { "message": "AliFinder - Лучшая цена" },
-  "appDesc": { "message": "Находите идентичные товары на AliExpress по лучшей цене." },
-  "btn_cheapest": { "message": "Самые дешевые" },
-  "btn_popular": { "message": "Бестселлеры" },
-  "btn_rating": { "message": "Лучший рейтинг" },
-  "free_shipping": { "message": "Бесплатная доставка" },
-  "no_products": { "message": "Товары не найдены." },
-  "loading_more": { "message": "Загрузка..." }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Mejor Precio" },
-  "appDesc": { "message": "Encuentra productos idénticos en AliExpress a un mejor precio." },
-  "btn_cheapest": { "message": "Más barato" },
-  "btn_popular": { "message": "Más vendido" },
-  "btn_rating": { "message": "Mejor valorado" },
-  "free_shipping": { "message": "Envío gratis" },
-  "no_products": { "message": "No se encontraron productos." },
-  "loading_more": { "message": "Cargando más..." }
-}
-
-
-
-
-{
-  "appName": { "message": "AliFinder - Meilleur Prix" },
-  "appDesc": { "message": "Trouvez des produits identiques sur AliExpress à un meilleur prix." },
-  "btn_cheapest": { "message": "Moins cher" },
-  "btn_popular": { "message": "Plus vendu" },
-  "btn_rating": { "message": "Mieux noté" },
-  "free_shipping": { "message": "Livraison gratuite" },
-  "no_products": { "message": "Aucun produit trouvé." },
-  "loading_more": { "message": "Chargement..." }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - أفضل سعر" },
-  "appDesc": { "message": "اعثر على منتجات مماثلة على AliExpress بسعر أفضل." },
-  "btn_cheapest": { "message": "الأرخص" },
-  "btn_popular": { "message": "الأكثر طلباً" },
-  "btn_rating": { "message": "الأكثر تقيماً" },
-  "free_shipping": { "message": "شحن مجاني" },
-  "no_products": { "message": "لم يتم العثور على منتجات." },
-  "loading_more": { "message": "جاري جلب المزيد..." }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Best Price" },
-  "appDesc": { "message": "Find identical products on AliExpress for a better price." },
-  "btn_cheapest": { "message": "Cheapest" },
-  "btn_popular": { "message": "Best Selling" },
-  "btn_rating": { "message": "Best Rated" },
-  "free_shipping": { "message": "Free Shipping" },
-  "no_products": { "message": "No products found." },
-  "loading_more": { "message": "Loading more..." }
+  "manifest_version": 3,
+  "name": "AliFinder Overlay",
+  "version": "1.0.0",
+  "permissions": ["storage", "scripting", "tabs", "cookies"],
+  "host_permissions": [
+    "*://*.aliexpress.com/*",
+    "*://*.aliexpress.us/*",
+    "*://*.aliexpress.ru/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.aliexpress.com/item/*", "*://*.aliexpress.us/item/*", "*://*.aliexpress.ru/item/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["popup/popup.html", "popup/popup.js"],
+      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": { "128": "icons/icon128.png" }
+  },
+  "icons": { "128": "icons/icon128.png" }
 }
