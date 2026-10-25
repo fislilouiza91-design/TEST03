@@ -1,33 +1,56 @@
-{
-  "manifest_version": 3,
-  "name": "AliFinder Overlay",
-  "version": "1.0.0",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.aliexpress.com/*",
-    "*://*.aliexpress.us/*",
-    "*://*.aliexpress.ru/*"
-  ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.aliexpress.com/item/*", "*://*.aliexpress.us/item/*", "*://*.aliexpress.ru/item/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
+let widgetFrame = null;
+
+function removeWidget() {
+    if (widgetFrame) {
+        widgetFrame.remove();
+        widgetFrame = null;
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["popup/popup.html", "popup/popup.js"],
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "icons/icon128.png" }
-  },
-  "icons": { "128": "icons/icon128.png" }
 }
+
+function injectWidget() {
+    if (widgetFrame) return;
+    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) {
+        removeWidget();
+        return;
+    }
+
+    widgetFrame = document.createElement('iframe');
+    widgetFrame.src = chrome.runtime.getURL('popup/popup.html');
+    
+    // تصميم النافذة العائمة (تظهر أسفل يمين الشاشة)
+    widgetFrame.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        width: 480px;
+        height: 600px;
+        border: none;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        z-index: 2147483647;
+        background: #fff;
+        transition: opacity 0.3s ease;
+    `;
+    document.body.appendChild(widgetFrame);
+}
+
+// استقبال أمر الإغلاق من داخل الإضافة
+window.addEventListener('message', (e) => {
+    if (e.data === 'CLOSE_ALIFINDER') {
+        removeWidget();
+    }
+});
+
+// فحص الصفحة عند التحميل
+injectWidget();
+
+// مراقبة التنقل بين المنتجات (SPA)
+let lastUrl = location.href;
+new MutationObserver(() => {
+    const url = location.href;
+    if (url !== lastUrl) {
+        lastUrl = url;
+        removeWidget();
+        setTimeout(injectWidget, 1000); // ننتظر ثانية حتى يتم تحميل الصفحة
+    }
+}).observe(document, {subtree: true, childList: true});
