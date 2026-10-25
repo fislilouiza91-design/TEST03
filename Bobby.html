@@ -1,74 +1,84 @@
-// background.js (The Sniper - No MD5)
+let wrapper = null;
+let iframe = null;
 
-async function sniperScraper({ productId, page, streamId }) {
-    // 1. البحث عن محرك MTOP الأصلي الخاص بـ AliExpress
-    // يختلف اسمه حسب نسخة الموقع (lib.mtop أو QN.mtop)
-    const mtop = window.lib?.mtop || window.QN?.mtop || window.mtop;
-
-    if (!mtop || typeof mtop.request !== 'function') {
-        return { error: 'ENGINE_NOT_FOUND' };
-    }
-
-    try {
-        // 2. تجهيز البيانات المطلوبة
-        const dataParams = {
-            productId: productId,
-            page: page,
-            pageSize: 24, // نفس العدد الذي يفضله السيرفر
-        };
-        
-        if (streamId) {
-            dataParams.streamId = streamId;
-            dataParams.realReffer = "";
-        }
-
-        // 3. استخدام محرك الموقع لتوقيع وإرسال الطلب
-        const response = await new Promise((resolve) => {
-            mtop.request({
-                api: 'mtop.relationrecommend.AliexpressRecommend.recommend',
-                v: '1.0',
-                type: 'POST',
-                dataType: 'json',
-                data: {
-                    appId: "19587",
-                    params: JSON.stringify(dataParams)
-                },
-                success: (res) => resolve(res),
-                error: (err) => resolve({ error: 'MTOP_FAILED' })
-            });
-        });
-
-        if (response.error) return { error: response.error };
-
-        // 4. إرجاع النتيجة
-        return {
-            products: response?.data?.mods?.itemList?.content ?? [],
-            streamId: response?.data?.pageInfo?.streamId,
-            host: location.host
-        };
-
-    } catch (e) {
-        return { error: e.message };
-    }
+function removeWidget() {
+    if (wrapper) { wrapper.remove(); wrapper = null; iframe = null; }
 }
 
-// الاستماع للرسائل من النافذة
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.action === 'FETCH_SIMILAR') {
-        chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
-            if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return sendResponse({ error: 'NOT_PRODUCT_PAGE' });
-            
-            const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+function injectWidget() {
+    if (wrapper) return;
+    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                world: 'MAIN', // ضروري جداً للوصول إلى محرك mtop
-                func: sniperScraper,
-                args: [{ productId, page: msg.page || 1, streamId: msg.streamId || null }],
-            }).then(result => {
-                sendResponse(result[0]?.result || { error: 'EMPTY_RESULT' });
-            }).catch(err => sendResponse({ error: err.message }));
-        });
-        return true;
-    }
-});
+    wrapper = document.createElement('div');
+    wrapper.style.cssText = `position: fixed; bottom: 20px; right: 20px; width: 480px; height: 600px; z-index: 2147483647; border-radius: 10px; background: #fff; box-shadow: 0 10px 30px rgba(0,0,0,0.4); display: flex; flex-direction: column; overflow: hidden;`;
+
+    const header = document.createElement('div');
+    header.style.cssText = `height: 45px; background: #1e293b; color: white; display: flex; align-items: center; justify-content: space-between; padding: 0 15px; cursor: grab; user-select: none;`;
+    
+    header.innerHTML = `
+        <div style="display:flex; align-items:center; gap:8px; font-weight:bold; font-size:14px; font-family:sans-serif;">
+            <div style="background:#ff4d4f; width:24px; height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center;">S</div>
+            AliFinder
+            <span style="font-size:16px; margin-right:8px;">✋</span>
+        </div>
+        <div style="display:flex; gap:10px;">
+            <button id="btn-min" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">−</button>
+            <button id="btn-max" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">⛶</button>
+            <button id="btn-close" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">✕</button>
+        </div>
+    `;
+
+    iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('popup/popup.html');
+    iframe.style.cssText = `flex: 1; width: 100%; border: none; background: #f8fafc;`;
+
+    wrapper.appendChild(header);
+    wrapper.appendChild(iframe);
+    document.body.appendChild(wrapper);
+
+    setupDrag(header, wrapper);
+    setupButtons(header, wrapper);
+}
+
+function setupDrag(header, wrapper) {
+    let isDragging = false, startX, startY, startLeft, startTop;
+    header.addEventListener('mousedown', (e) => {
+        if (e.target.tagName === 'BUTTON') return;
+        isDragging = true; header.style.cursor = 'grabbing';
+        startX = e.clientX; startY = e.clientY;
+        const rect = wrapper.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        wrapper.style.bottom = 'auto'; wrapper.style.right = 'auto';
+        wrapper.style.left = startLeft + 'px'; wrapper.style.top = startTop + 'px';
+    });
+    window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        wrapper.style.left = (startLeft + e.clientX - startX) + 'px';
+        wrapper.style.top = (startTop + e.clientY - startY) + 'px';
+    });
+    window.addEventListener('mouseup', () => {
+        if (isDragging) { isDragging = false; header.style.cursor = 'grab'; }
+    });
+}
+
+function setupButtons(header, wrapper) {
+    header.querySelector('#btn-close').addEventListener('click', removeWidget);
+    header.querySelector('#btn-min').addEventListener('click', () => {
+        if (wrapper.dataset.minimized === 'true') { wrapper.style.height = '600px'; wrapper.dataset.minimized = 'false'; }
+        else { wrapper.style.height = '45px'; wrapper.dataset.minimized = 'true'; }
+    });
+    header.querySelector('#btn-max').addEventListener('click', () => {
+        if (wrapper.dataset.maximized === 'true') {
+            wrapper.style.width = '480px'; wrapper.style.height = '600px'; wrapper.style.bottom = '20px'; wrapper.style.right = '20px'; wrapper.style.top = 'auto'; wrapper.style.left = 'auto'; wrapper.dataset.maximized = 'false';
+        } else {
+            wrapper.style.width = '90vw'; wrapper.style.height = '90vh'; wrapper.style.top = '5vh'; wrapper.style.left = '5vw'; wrapper.style.bottom = 'auto'; wrapper.style.right = 'auto'; wrapper.dataset.maximized = 'true';
+        }
+    });
+}
+
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) { lastUrl = location.href; removeWidget(); setTimeout(injectWidget, 1000); }
+}).observe(document, {subtree: true, childList: true});
