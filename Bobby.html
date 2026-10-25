@@ -16,9 +16,8 @@ function injectWidget() {
         return;
     }
 
-    // إنشاء الحاوية الأساسية (الإطار)
+    // 1. الحاوية الأساسية
     wrapper = document.createElement('div');
-    wrapper.id = 'alifinder-wrapper';
     wrapper.style.cssText = `
         position: fixed;
         bottom: 20px;
@@ -26,74 +25,94 @@ function injectWidget() {
         width: 480px;
         height: 600px;
         z-index: 2147483647;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-        border-radius: 12px;
+        border-radius: 10px;
         background: #fff;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.4);
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        transition: width 0.3s, height 0.3s, top 0.3s, left 0.3s;
     `;
 
-    // إنشاء الـ iframe
+    // 2. الشريط العلوي (الأسود) للسحب والتحكم
+    const header = document.createElement('div');
+    header.style.cssText = `
+        height: 45px;
+        background: #1e293b;
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 15px;
+        cursor: grab;
+        user-select: none;
+    `;
+    
+    // محتوى الشريط العلوي (اليد + العنوان + الأزرار)
+    header.innerHTML = `
+        <div style="display:flex; align-items:center; gap:8px; font-weight:bold; font-size:14px; font-family:sans-serif;">
+            <div style="background:#ff4d4f; width:24px; height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center;">S</div>
+            AliFinder
+            <span style="font-size:16px; margin-right:8px;">✋</span>
+        </div>
+        <div style="display:flex; gap:10px;">
+            <button id="btn-min" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">−</button>
+            <button id="btn-max" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">⛶</button>
+            <button id="btn-close" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">✕</button>
+        </div>
+    `;
+
+    // 3. إطار الإضافة الداخلي
     iframe = document.createElement('iframe');
     iframe.src = chrome.runtime.getURL('popup/popup.html');
     iframe.style.cssText = `
+        flex: 1;
         width: 100%;
-        height: 100%;
         border: none;
-        display: block;
+        background: #f8fafc;
     `;
-    
+
+    wrapper.appendChild(header);
     wrapper.appendChild(iframe);
     document.body.appendChild(wrapper);
 
-    setupDragAndDrop();
-    setupMessageListener();
+    setupDrag(header, wrapper);
+    setupButtons(header, wrapper);
 }
 
 // ==========================================
-// نظام سحب النافذة (الحل النهائي بدون تعليق)
+// نظام السحب (بدون أي تعليق)
 // ==========================================
-function setupDragAndDrop() {
+function setupDrag(header, wrapper) {
     let isDragging = false;
-    let dragOverlay = null;
     let startX, startY, startLeft, startTop;
 
-    window.addEventListener('message', (e) => {
-        if (e.data && e.data.action === 'START_DRAG') {
-            // منع السحب إذا كانت النافذة مكبرة
-            if (wrapper.dataset.maximized === 'true') return;
-
-            isDragging = true;
-            startX = e.data.x;
-            startY = e.data.y;
-            
-            const rect = wrapper.getBoundingClientRect();
-            startLeft = rect.left;
-            startTop = rect.top;
-
-            // إنشاء طبقة شفافة تلتقط حركة الماوس فوق كل شيء
-            dragOverlay = document.createElement('div');
-            dragOverlay.style.cssText = `
-                position: fixed;
-                top: 0; left: 0; right: 0; bottom: 0;
-                z-index: 2147483646;
-                cursor: move;
-            `;
-            document.body.appendChild(dragOverlay);
-            document.body.style.userSelect = 'none'; 
-        }
+    header.addEventListener('mousedown', (e) => {
+        if (e.target.tagName === 'BUTTON') return; // تجاهل السحب إذا ضغطت على الأزرار
+        
+        isDragging = true;
+        header.style.cursor = 'grabbing';
+        
+        startX = e.clientX;
+        startY = e.clientY;
+        
+        const rect = wrapper.getBoundingClientRect();
+        startLeft = rect.left;
+        startTop = rect.top;
+        
+        // تحويل النافذة من (bottom/right) إلى (top/left) لسهولة الحساب
+        wrapper.style.bottom = 'auto';
+        wrapper.style.right = 'auto';
+        wrapper.style.left = startLeft + 'px';
+        wrapper.style.top = startTop + 'px';
     });
 
     window.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
+        e.preventDefault();
         
-        const dx = e.screenX - startX;
-        const dy = e.screenY - startY;
-
-        wrapper.style.bottom = 'auto';
-        wrapper.style.right = 'auto';
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        
         wrapper.style.left = (startLeft + dx) + 'px';
         wrapper.style.top = (startTop + dy) + 'px';
     });
@@ -101,69 +120,57 @@ function setupDragAndDrop() {
     window.addEventListener('mouseup', () => {
         if (isDragging) {
             isDragging = false;
-            if (dragOverlay) {
-                dragOverlay.remove(); // إزالة الطبقة الشفافة
-                dragOverlay = null;
-            }
-            document.body.style.userSelect = 'auto';
+            header.style.cursor = 'grab';
         }
     });
 }
 
 // ==========================================
-// استقبال الأوامر من الأزرار (تكبير، تصغير، إغلاق)
+// أزرار التحكم
 // ==========================================
-function setupMessageListener() {
-    window.addEventListener('message', (e) => {
-        if (!e.data || !e.data.action) return;
-
-        switch (e.data.action) {
-            case 'CLOSE_ALIFINDER':
-                removeWidget();
-                break;
-
-            case 'TOGGLE_MINIMIZE':
-                if (wrapper.dataset.minimized === 'true') {
-                    wrapper.style.height = '600px';
-                    wrapper.dataset.minimized = 'false';
-                } else {
-                    wrapper.style.height = '42px'; // ارتفاع الشريط العلوي فقط
-                    wrapper.dataset.minimized = 'true';
-                }
-                break;
-
-            case 'TOGGLE_MAXIMIZE':
-                if (wrapper.dataset.maximized === 'true') {
-                    // استعادة الحجم الطبيعي
-                    wrapper.style.width = '480px';
-                    wrapper.style.height = '600px';
-                    wrapper.style.top = 'auto';
-                    wrapper.style.bottom = '20px';
-                    wrapper.style.right = '20px';
-                    wrapper.style.left = 'auto';
-                    wrapper.dataset.maximized = 'false';
-                } else {
-                    // تكبير لملء الشاشة
-                    wrapper.style.width = '90vw';
-                    wrapper.style.height = '90vh';
-                    wrapper.style.top = '5vh';
-                    wrapper.style.left = '5vw';
-                    wrapper.style.bottom = 'auto';
-                    wrapper.style.right = 'auto';
-                    wrapper.dataset.maximized = 'true';
-                }
-                break;
+function setupButtons(header, wrapper) {
+    // إغلاق
+    header.querySelector('#btn-close').addEventListener('click', removeWidget);
+    
+    // تصغير
+    header.querySelector('#btn-min').addEventListener('click', () => {
+        if (wrapper.dataset.minimized === 'true') {
+            wrapper.style.height = '600px';
+            wrapper.dataset.minimized = 'false';
+        } else {
+            wrapper.style.height = '45px'; // ارتفاع الشريط العلوي فقط
+            wrapper.dataset.minimized = 'true';
+        }
+    });
+    
+    // تكبير
+    header.querySelector('#btn-max').addEventListener('click', () => {
+        if (wrapper.dataset.maximized === 'true') {
+            wrapper.style.width = '480px';
+            wrapper.style.height = '600px';
+            wrapper.style.bottom = '20px';
+            wrapper.style.right = '20px';
+            wrapper.style.top = 'auto';
+            wrapper.style.left = 'auto';
+            wrapper.dataset.maximized = 'false';
+        } else {
+            wrapper.style.width = '90vw';
+            wrapper.style.height = '90vh';
+            wrapper.style.top = '5vh';
+            wrapper.style.left = '5vw';
+            wrapper.style.bottom = 'auto';
+            wrapper.style.right = 'auto';
+            wrapper.dataset.maximized = 'true';
         }
     });
 }
 
-// فحص الصفحة عند التحميل والتنقل
+// التشغيل
 injectWidget();
 let lastUrl = location.href;
 new MutationObserver(() => {
-    const url = location.href;
-    if (url !== lastUrl) {
-        lastUrl = url;
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
         removeWidget();
         setTimeout(injectWidget, 1000);
     }
