@@ -1,148 +1,85 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <title>AliFinder</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      width: 450px;
-      height: 550px;
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #f8fafc;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    
-    /* الشريط العلوي */
-    .header {
-      background: #ff6b35;
-      color: white;
-      padding: 14px;
-      text-align: center;
-      font-weight: bold;
-      font-size: 16px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-      flex-shrink: 0;
-    }
+const resultsEl = document.getElementById('results');
+let globalProducts = [];
+let globalHost = '';
+let currentSort = 'popular';
 
-    /* شريط الأزرار */
-    .sort-bar {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 8px;
-      padding: 12px;
-      background: white;
-      border-bottom: 1px solid #e2e8f0;
-      flex-shrink: 0;
-    }
-    .sort-btn {
-      padding: 8px 4px;
-      background: #f1f5f9;
-      border: 2px solid transparent;
-      border-radius: 8px;
-      cursor: pointer;
-      font-weight: bold;
-      color: #475569;
-      font-size: 13px;
-      transition: 0.2s;
-    }
-    .sort-btn.active {
-      background: #ff6b35;
-      color: white;
-      border-color: #ff6b35;
-    }
+// جلب البيانات من الخلفية
+async function fetchProducts() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page: 1, streamId: null }, resolve);
+  });
+}
 
-    /* حاوية المنتجات */
-    #results {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      width: 100%;
-    }
+// دالة الترتيب
+function sortProducts(mode) {
+  if (mode === 'cheapest') {
+    globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  } else if (mode === 'rating') {
+    globalProducts.sort((a, b) => (Number(b?.evaluation?.starRating) || 0) - (Number(a?.evaluation?.starRating) || 0));
+  } else {
+    globalProducts.sort((a, b) => (Number(b?.trade?.realTradeCount) || 0) - (Number(a?.trade?.realTradeCount) || 0));
+  }
+}
 
-    /* شبكة المنتجات */
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      width: 100%;
-    }
+// دالة العرض
+function render() {
+  if (!globalProducts || globalProducts.length === 0) {
+    resultsEl.innerHTML = '<p style="text-align: center; color: red;">لم يتم العثور على منتجات.</p>';
+    return;
+  }
 
-    /* كارت المنتج */
-    .product-card {
-      display: flex;
-      flex-direction: column;
-      background: white;
-      border-radius: 10px;
-      overflow: hidden;
-      text-decoration: none;
-      border: 1px solid #e2e8f0;
-      transition: transform 0.2s;
-    }
-    .product-card:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
+  sortProducts(currentSort);
 
-    /* صندوق الصورة */
-    .img-box {
-      width: 100%;
-      height: 150px;
-      background: #f1f5f9;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-    }
-    .img-box img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-
-    /* تفاصيل المنتج */
-    .info {
-      padding: 10px;
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-    }
-    .title {
-      font-size: 12px;
-      color: #334155;
-      line-height: 1.4;
-      height: 34px;
-      overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      margin-bottom: 8px;
-    }
-    .price {
-      font-size: 15px;
-      font-weight: bold;
-      color: #ef4444;
-      margin-top: auto;
-    }
-
-    .loader { text-align: center; padding: 50px; color: #64748b; }
-  </style>
-</head>
-<body>
-  <div class="header">AliFinder</div>
+  let html = '<div class="grid">';
   
-  <div class="sort-bar">
-    <button class="sort-btn" data-sort="cheapest">الأرخص</button>
-    <button class="sort-btn active" data-sort="popular">الأكثر طلباً</button>
-    <button class="sort-btn" data-sort="rating">الأكثر تقيماً</button>
-  </div>
+  globalProducts.forEach(p => {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+    
+    const price = p?.prices?.salePrice?.formattedPrice || '—';
+    const title = p?.title?.displayTitle || 'منتج';
+    
+    // ✅ الرابط المباشر 100% بدون أي عمولة
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
 
-  <div id="results">
-    <div class="loader">جاري البحث...</div>
-  </div>
+    html += `
+      <a href="${directUrl}" target="_blank" class="product-card">
+        <div class="img-box">
+          <img src="${img}" onerror="this.style.display='none'">
+        </div>
+        <div class="info">
+          <div class="title">${title}</div>
+          <div class="price">${price}</div>
+        </div>
+      </a>
+    `;
+  });
+  
+  html += '</div>';
+  resultsEl.innerHTML = html;
+}
 
-  <script src="popup.js"></script>
-</body>
-</html>
+// تفعيل الأزرار
+document.querySelectorAll('.sort-btn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    // إزالة التفعيل عن الباقي
+    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+    // تفعيل الزر الحالي
+    e.target.classList.add('active');
+    
+    currentSort = e.target.getAttribute('data-sort');
+    render(); // إعادة الترتيب والعرض فوراً
+  });
+});
+
+// التشغيل الأولي
+fetchProducts().then(res => {
+  if (res.error) {
+    resultsEl.innerHTML = `<p style="text-align: center; color: red; padding: 20px;">خطأ: ${res.error}</p>`;
+  } else {
+    globalProducts = res.products;
+    globalHost = res.host;
+    render();
+  }
+});
