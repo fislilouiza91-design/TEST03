@@ -1,233 +1,50 @@
-// background.js
-// العقل المدبر: يستخدم MAIN world + MD5 + Cookies حقيقية
-// = نفس تقنية الإضافة الأصلية لكن أنظف وأقوى
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>AliFinder Clean</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+      </svg>
+      <span>AliFinder</span>
+    </div>
+    <button id="themeToggle" class="icon-btn" title="الوضع الليلي">🌙</button>
+  </header>
 
-import { md5 } from './lib/md5.js';
+  <div class="sort-bar">
+    <button class="sort-btn" data-sort="cheapest">
+      <span class="emoji">💰</span>
+      <span>الأرخص</span>
+    </button>
+    <button class="sort-btn active" data-sort="popular">
+      <span class="emoji">🔥</span>
+      <span>الأكثر طلباً</span>
+    </button>
+    <button class="sort-btn" data-sort="rating">
+      <span class="emoji">⭐</span>
+      <span>الأكثر تقييماً</span>
+    </button>
+  </div>
 
-const CONFIG = {
-  APP_KEY: '24815441',
-  APP_ID: '19587',
-  API: 'mtop.relationrecommend.AliexpressRecommend.recommend',
-  PAGE_SIZE: 20,
-  MAX_RETRIES: 3,
-  CACHE_TTL_MS: 3 * 60 * 1000,
-};
+  <main id="results" class="results">
+    <div class="state-msg">
+      <div class="spinner"></div>
+      <p>جاري البحث عن منتجات مشابهة...</p>
+    </div>
+  </main>
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const randomDelay = () => sleep(400 + Math.random() * 600);
+  <footer class="footer">
+    <button id="loadMore" class="load-more" disabled>
+      تحميل المزيد
+    </button>
+    <p id="status" class="status"></p>
+  </footer>
 
-// ============================================================
-// الكاش (بمفتاح SHA-256 آمن)
-// ============================================================
-async function cacheKey(productId, page) {
-  const raw = `p:${productId}:pg:${page}`;
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
-  return 'cache_' + Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
-}
-
-async function getCache(productId, page) {
-  const key = await cacheKey(productId, page);
-  const data = await chrome.storage.session.get(key);
-  const entry = data[key];
-  if (!entry || Date.now() - entry.ts > CONFIG.CACHE_TTL_MS) {
-    if (entry) await chrome.storage.session.remove(key);
-    return null;
-  }
-  return entry.value;
-}
-
-async function setCache(productId, page, value) {
-  const key = await cacheKey(productId, page);
-  await chrome.storage.session.set({ [key]: { value, ts: Date.now() } });
-}
-
-// ============================================================
-// الدالة التي تُنفذ داخل صفحة AliExpress (world: MAIN)
-// = نفس المنطق الأصلي لكن منظم
-// ============================================================
-async function scraperInPage({ productId, page, streamId, md5Code, sortType, sortOrder }) {
-  const md5Fn = new Function('return ' + md5Code)();
-
-  const parseCookie = (str, name) => {
-    const m = str.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : null;
-  };
-
-  const cookies = document.cookie;
-  const tokenFull = parseCookie(cookies, '_m_h5_tk');
-  const token = tokenFull?.split('_')[0];
-  if (!token) return { error: 'NO_TOKEN' };
-
-  const cna = parseCookie(cookies, 'cna') || '';
-  const xman = parseCookie(cookies, 'xman_us_f') || '';
-  const acsRt = xman.split('acs_rt=')[1]?.split('&')[0];
-  const locale = xman.split('x_locale=')[1]?.split('&')[0] || 'en_US';
-
-  const aep = parseCookie(cookies, 'aep_usuc_f') || '';
-  const currency = aep.split('c_tp=')[1]?.split('&')[0] || 'USD';
-  const region = aep.split('region=')[1]?.split('&')[0] || 'US';
-
-  const pageId = document.querySelector('a[st_page_id]')?.getAttribute('st_page_id')
-    || 'fzbibbqcaqusrdsw19535be6a08245a2f104889c2f';
-
-  const getImage = () => {
-    const domain = location.host.split('aliexpress.')[1];
-    if (domain === 'ru') {
-      return document.querySelector('meta[property="og:image"]')?.content?.split('_')[0];
-    }
-    const img = document.querySelector('div[class^="image-view--previewWrap"] img[src^="https://ae-pic-"]');
-    if (img) return img.src.split('_')[0];
-    const video = document.querySelector('div[class^="image-view--previewWrap"] video[poster^="https://ae-pic-"]');
-    return video?.poster?.split('_')[0];
-  };
-
-  const apiParams = {
-    DEBUG_: false, buyerAliId: '', clientType: 'pc',
-    cookieId: cna, currency, image: getImage(),
-    isNewImageSearch: true, lang: locale, locale,
-    osf: 'detail_bigimg', page, pageSize: 20, platform: 'pc',
-    productId,
-    recommendInfo: JSON.stringify({ cna, foreverRandomToken: acsRt, pageId }),
-    searchBizScene: 'imageSearch', selectedStyleTab: 0,
-    shipToCountry: region, shpt_co: region,
-    sortOrder: sortOrder || 'default',
-    sortType: sortType || 'default',
-    sversion: 10000,
-    visitorId: cna,
-    'x-appKey': 24815441,
-    'x-reqbiz-ext': 'affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D',
-    _city: '', _currency: currency, _state: '',
-  };
-  if (streamId) { apiParams.streamId = streamId; apiParams.realReffer = ''; }
-
-  const dataString = JSON.stringify({ appId: '19587', params: JSON.stringify(apiParams) });
-  const timestamp = Date.now();
-  const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
-
-  const domain = location.host.split('aliexpress.')[1];
-  const apiDomain = domain === 'ru' ? 'com' : domain;
-  const url = `https://recom-acs.aliexpress.${apiDomain}/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/`
-    + `?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}`
-    + `&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ data: dataString }),
-      credentials: 'include',
-    });
-    const json = await response.json();
-    return {
-      products: json?.data?.mods?.itemList?.content ?? [],
-      streamId: json?.data?.pageInfo?.streamId,
-      ret: json?.ret?.[0],
-      host: location.host,
-    };
-  } catch (e) {
-    return { error: e.message };
-  }
-}
-
-// ============================================================
-// تهيئة التوكن لموقع .ru (نفس حيلة الأصلية)
-// ============================================================
-async function bootstrapRuToken(tabId) {
-  const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&type=originaljson`;
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func: async (u) => {
-      try {
-        const fd = new FormData(); fd.append('data', '');
-        await fetch(u, { method: 'POST', body: new URLSearchParams(fd), credentials: 'include' });
-      } catch (e) {}
-    },
-    args: [url],
-  });
-}
-
-// ============================================================
-// الدالة الرئيسية
-// ============================================================
-async function fetchSimilarProducts({ page = 1, streamId = null, sortType = 'default', sortOrder = 'default' } = {}) {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) {
-    return { error: 'NOT_PRODUCT_PAGE' };
-  }
-  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
-
-  // الكاش: فقط للصفحة الأولى والفرز الافتراضي (لتجنب تعارض الفرز)
-  if (page === 1 && sortType === 'default') {
-    const cached = await getCache(productId, page);
-    if (cached) return cached;
-  }
-
-  if (tab.url.includes('aliexpress.ru')) {
-    await bootstrapRuToken(tab.id);
-  }
-
-  let lastError;
-  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
-    try {
-      const md5Code = md5.toString();
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        world: 'MAIN',
-        func: scraperInPage,
-        args: [{ productId, page, streamId, md5Code, sortType, sortOrder }],
-      });
-
-      const data = result?.result;
-      if (!data) throw new Error('EMPTY_RESULT');
-      if (data.error) throw new Error(data.error);
-      if (data.ret && !data.ret.startsWith('SUCCESS')) throw new Error('API_' + data.ret);
-
-      if (page === 1 && sortType === 'default') {
-        await setCache(productId, page, data);
-      }
-      return data;
-    } catch (err) {
-      lastError = err;
-      console.warn(`[AliFinder] Attempt ${attempt} failed:`, err.message);
-      if (attempt < CONFIG.MAX_RETRIES) await randomDelay();
-    }
-  }
-  return { error: lastError?.message || 'UNKNOWN_ERROR' };
-}
-
-// ============================================================
-// المستمع للرسائل
-// ============================================================
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.action === 'FETCH_SIMILAR') {
-    fetchSimilarProducts({
-      page: msg.page || 1,
-      streamId: msg.streamId || null,
-      sortType: msg.sortType || 'default',
-      sortOrder: msg.sortOrder || 'default',
-    }).then(sendResponse).catch(err => sendResponse({ error: err.message }));
-    return true;
-  }
-  if (msg.action === 'OPEN_TAB') {
-    chrome.tabs.create({ url: msg.url, active: false });
-    return false;
-  }
-});
-
-// ============================================================
-// شارة الإضافة
-// ============================================================
-async function updateBadge(tab) {
-  if (!tab?.id) return;
-  const ok = /aliexpress\.(com|us|ru)\/item\/\d+\.htm/.test(tab.url || '');
-  await chrome.action.setBadgeText({ text: ok ? '1' : '', tabId: tab.id });
-  await chrome.action.setBadgeBackgroundColor({ color: '#FC7971' }).catch(() => {});
-}
-
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  try { updateBadge(await chrome.tabs.get(tabId)); } catch (e) {}
-});
-chrome.tabs.onUpdated.addListener((id, info, tab) => {
-  if (info.status === 'complete') updateBadge(tab);
-});
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
