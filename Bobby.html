@@ -2,10 +2,9 @@ let wrapper = null;
 let iframeContainer = null;
 let iframe = null;
 let sidebar = null;
-let toggleBtn = null;
 
 function removeWidget() {
-    if (wrapper) { wrapper.remove(); wrapper = null; iframeContainer = null; iframe = null; sidebar = null; toggleBtn = null; }
+    if (wrapper) { wrapper.remove(); wrapper = null; iframeContainer = null; iframe = null; sidebar = null; }
 }
 
 function injectWidget() {
@@ -14,60 +13,27 @@ function injectWidget() {
 
     let isOpen = false;
     let currentSide = 'right'; 
+    let activeSort = 'popular'; // الزر النشط افتراضياً
 
-    // 1. الحاوية الأساسية (التي تضم الإطار والشريط)
-    wrapper = document.createElement('div');
-    wrapper.style.cssText = `
-        position: fixed;
-        top: 0;
-        right: 0;
-        height: 100vh;
-        z-index: 2147483647;
-        display: flex;
-        flex-direction: row;
-        pointer-events: none; /* السماح بالنقر على الصفحة خلف الحاوية الفارغة */
-    `;
-
-    // 2. حاوية الإطار (المنتجات)
-    iframeContainer = document.createElement('div');
-    iframeContainer.style.cssText = `
-        width: 450px;
-        height: 100%;
-        background: white;
-        box-shadow: -10px 0 30px rgba(0,0,0,0.15);
-        transform: translateX(100%); /* مخفي */
-        transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        display: flex;
-        pointer-events: auto;
-    `;
-
-    iframe = document.createElement('iframe');
-    iframe.src = chrome.runtime.getURL('popup/popup.html');
-    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #f8fafc;`;
-    iframeContainer.appendChild(iframe);
-
-    // 3. الشريط الجانبي المنحني (التبويبات العائمة)
+    // 1. الشريط الجانبي المنحني
     sidebar = document.createElement('div');
-    // التصميم هنا هو السر: زوايا دائرية من اليسار، ومسافة للخارج، وظل ناعم
     sidebar.style.cssText = `
-        width: 75px;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        position: relative;
+        position: fixed;
+        top: 50%;
+        right: 0;
+        transform: translateY(-50%);
+        z-index: 2147483647;
         pointer-events: none;
     `;
 
-    // حاوية الأزرار (الكبسولة المنحنية)
+    // الكبسولة المنحنية
     const pillContainer = document.createElement('div');
     pillContainer.style.cssText = `
         background: rgba(255, 255, 255, 0.95);
         backdrop-filter: blur(10px);
         padding: 20px 10px;
-        border-radius: 40px 0 0 40px; /* الشكل المنحني الجذاب */
-        box-shadow: -5px 0 20px rgba(0,0,0,0.08);
+        border-radius: 40px 0 0 40px;
+        box-shadow: -5px 0 20px rgba(0,0,0,0.1);
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -78,76 +44,97 @@ function injectWidget() {
         border-right: none;
     `;
 
-    // 4. مقبض السحب (في أعلى الكبسولة)
+    // 2. حاوية الإطار (المنتجات) - تعمل بنظام الانزلاق
+    iframeContainer = document.createElement('div');
+    iframeContainer.style.cssText = `
+        position: fixed;
+        top: 50%;
+        right: 75px;
+        width: 480px;
+        height: 80vh;
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        transform: translateY(-50%) translateX(100%); /* مخفية للداخل */
+        pointer-events: none;
+        transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        z-index: 2147483646;
+        display: flex;
+        overflow: hidden;
+    `;
+
+    iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('popup/popup.html');
+    iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #f8fafc;`;
+    iframeContainer.appendChild(iframe);
+
+    // 3. مقبض السحب
     const dragHandle = document.createElement('div');
     dragHandle.style.cssText = `
-        cursor: grab;
-        color: #cbd5e1;
-        font-size: 24px;
-        line-height: 10px;
-        padding: 10px 0;
-        user-select: none;
-        transition: color 0.2s;
+        cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+        padding: 10px 0; user-select: none; transition: color 0.2s;
+        margin-bottom: 10px;
     `;
-    dragHandle.innerHTML = '⋮⋮'; // شكل نقاط السحب
+    dragHandle.innerHTML = '⋮⋮';
     dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
     dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
 
-    // 5. زر الفتح والإغلاق (سهم منحني ومدمج)
-    toggleBtn = document.createElement('div');
-    toggleBtn.style.cssText = `
-        width: 36px;
-        height: 36px;
-        background: linear-gradient(135deg, #ff6b35, #ff4747);
-        border-radius: 50%; /* دائري ليتناسب مع الانحناء */
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-size: 14px;
-        font-weight: bold;
-        box-shadow: 0 4px 10px rgba(255,71,71,0.3);
-        transition: transform 0.2s, background 0.2s;
-        user-select: none;
-        margin-bottom: 10px;
-    `;
-    toggleBtn.innerText = '◀';
-    toggleBtn.onmouseenter = () => toggleBtn.style.transform = 'scale(1.1)';
-    toggleBtn.onmouseleave = () => toggleBtn.style.transform = 'scale(1)';
+    // 4. دالة فتح/إغلاق النافذة
+    function togglePanel(forceOpen = null) {
+        if (forceOpen === true) isOpen = true;
+        else if (forceOpen === false) isOpen = false;
+        else isOpen = !isOpen;
 
-    // 6. الأزرار الثلاثة (منحنية وواضحة)
+        if (isOpen) {
+            iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+            iframeContainer.style.pointerEvents = 'auto';
+        } else {
+            if (currentSide === 'right') {
+                iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
+            } else {
+                iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
+            }
+            iframeContainer.style.pointerEvents = 'none';
+        }
+    }
+
+    // النقر على المقبض يفتح ويغلق
+    dragHandle.addEventListener('click', () => togglePanel());
+
+    // 5. الأزرار الثلاثة
     const createSortBtn = (text, sortValue) => {
         const btn = document.createElement('div');
         btn.style.cssText = `
-            writing-mode: vertical-rl;
-            text-orientation: mixed;
-            padding: 18px 8px;
-            background: transparent;
-            border-radius: 20px;
-            cursor: pointer;
-            font-weight: 700;
-            font-size: 13px;
-            color: #64748b;
-            transition: all 0.3s ease;
-            user-select: none;
-            letter-spacing: 1px;
+            writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+            background: transparent; border-radius: 20px; cursor: pointer;
+            font-weight: 700; font-size: 13px; color: #64748b;
+            transition: all 0.3s ease; user-select: none; letter-spacing: 1px;
         `;
         btn.innerText = text;
         btn.setAttribute('data-sort', sortValue);
         
         btn.onclick = () => {
-            // إزالة التفعيل
+            const isCurrentlyActive = (activeSort === sortValue);
+
+            // إزالة التفعيل عن الكل
             pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                b.style.background = 'transparent';
-                b.style.color = '#64748b';
+                b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
             });
-            // تفعيل الزر
-            btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-            btn.style.color = 'white';
-            btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-            
-            iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*');
+
+            if (isCurrentlyActive && isOpen) {
+                // إذا ضغطت على الزر النشط وهو مفتوح، أغلق النافذة
+                togglePanel(false);
+            } else {
+                // إذا ضغطت على زر جديد، فعله وافتح النافذة
+                btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                btn.style.color = 'white';
+                btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                
+                activeSort = sortValue;
+                togglePanel(true); // فتح
+
+                iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*');
+            }
         };
         return btn;
     };
@@ -156,79 +143,49 @@ function injectWidget() {
     const btnPopular = createSortBtn('الأكثر طلباً', 'popular');
     const btnCheapest = createSortBtn('الأرخص', 'cheapest');
 
-    // تفعيل الافتراضي
+    // تفعيل الزر الافتراضي (الأكثر طلباً)
     btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
     btnPopular.style.color = 'white';
     btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
 
     pillContainer.appendChild(dragHandle);
-    pillContainer.appendChild(toggleBtn);
     pillContainer.appendChild(btnRating);
     pillContainer.appendChild(btnPopular);
     pillContainer.appendChild(btnCheapest);
 
     sidebar.appendChild(pillContainer);
-    wrapper.appendChild(iframeContainer);
-    wrapper.appendChild(sidebar);
-    document.body.appendChild(wrapper);
+    document.body.appendChild(sidebar);
+    document.body.appendChild(iframeContainer);
 
     // ==========================================
-    // 7. دالة ضبط الجهة (يمين أو يسار)
+    // 6. تبديل الجهة (يمين / يسار)
     // ==========================================
     function setSide(side) {
         currentSide = side;
-        
         if (side === 'right') {
-            wrapper.style.right = '0';
-            wrapper.style.left = 'auto';
-            wrapper.style.flexDirection = 'row'; 
-            
+            sidebar.style.right = '0'; sidebar.style.left = 'auto';
             pillContainer.style.borderRadius = '40px 0 0 40px';
-            pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.08)';
-            pillContainer.style.borderRight = 'none';
-            pillContainer.style.borderLeft = '1px solid #f1f5f9';
+            pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+            pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
             
-            toggleBtn.innerText = isOpen ? '▶' : '◀';
-            iframeContainer.style.boxShadow = '-10px 0 30px rgba(0,0,0,0.15)';
-            iframeContainer.style.transform = isOpen ? 'translateX(0)' : 'translateX(100%)';
+            iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(100%)';
             
         } else {
-            wrapper.style.left = '0';
-            wrapper.style.right = 'auto';
-            wrapper.style.flexDirection = 'row-reverse'; 
-            
+            sidebar.style.left = '0'; sidebar.style.right = 'auto';
             pillContainer.style.borderRadius = '0 40px 40px 0';
-            pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.08)';
-            pillContainer.style.borderLeft = 'none';
-            pillContainer.style.borderRight = '1px solid #f1f5f9';
+            pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+            pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
             
-            toggleBtn.innerText = isOpen ? '◀' : '▶';
-            iframeContainer.style.boxShadow = '10px 0 30px rgba(0,0,0,0.15)';
-            iframeContainer.style.transform = isOpen ? 'translateX(0)' : 'translateX(-100%)';
+            iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+            if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-100%)';
         }
     }
 
-    // 8. منطق الفتح والإغلاق
-    toggleBtn.addEventListener('click', () => {
-        isOpen = !isOpen;
-        if (isOpen) {
-            iframeContainer.style.transform = 'translateX(0)';
-            toggleBtn.innerText = currentSide === 'right' ? '▶' : '◀';
-        } else {
-            iframeContainer.style.transform = currentSide === 'right' ? 'translateX(100%)' : 'translateX(-100%)';
-            toggleBtn.innerText = currentSide === 'right' ? '◀' : '▶';
-        }
-    });
-
-    // ==========================================
-    // 9. 🔥 نظام سحب الشريط للتبديل
-    // ==========================================
+    // 7. السحب للتبديل
     let isDragging = false;
-
-    dragHandle.addEventListener('mousedown', (e) => {
-        isDragging = true;
-        dragHandle.style.cursor = 'grabbing';
-        iframe.style.pointerEvents = 'none'; 
+    dragHandle.addEventListener('mousedown', () => {
+        isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -240,17 +197,9 @@ function injectWidget() {
         }
     });
 
-    window.addEventListener('mouseup', (e) => {
+    window.addEventListener('mouseup', () => {
         if (!isDragging) return;
-        isDragging = false;
-        dragHandle.style.cursor = 'grab';
-        iframe.style.pointerEvents = 'auto';
-        
-        if (e.clientX < window.innerWidth / 2) {
-            setSide('left');
-        } else {
-            setSide('right');
-        }
+        isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
     });
 }
 
