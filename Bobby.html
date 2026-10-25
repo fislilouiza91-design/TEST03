@@ -1,162 +1,155 @@
-const resultsEl = document.getElementById('results');
-const loadMoreBtn = document.getElementById('loadMoreBtn');
+import { md5 } from './lib/md5.js';
 
-let globalProducts = [];
-let globalHost = '';
-let currentSort = 'popular';
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const randomDelay = () => sleep(400 + Math.random() * 600);
 
-let currentPage = 1;
-let currentStreamId = null;
-let isLoading = false;
-let hasMore = true;
-
-// دالة إرجاع التمرير للأعلى
-function scrollToTop() {
-  resultsEl.scrollTop = 0;
-  document.documentElement.scrollTop = 0;
-  document.body.scrollTop = 0;
-}
-
-async function fetchProducts(page, streamId) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page: page, streamId: streamId }, resolve);
-  });
-}
-
-// دالة الترتيب المحلي (بدون إنترنت)
-function sortProducts(mode) {
-  if (mode === 'cheapest') {
-    globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
-  } else if (mode === 'rating') {
-    globalProducts.sort((a, b) => (Number(b?.evaluation?.starRating) || 0) - (Number(a?.evaluation?.starRating) || 0));
-  } else {
-    globalProducts.sort((a, b) => (Number(b?.trade?.realTradeCount) || 0) - (Number(a?.trade?.realTradeCount) || 0));
-  }
-}
-
-// دالة العرض
-function render() {
-  if (!globalProducts || globalProducts.length === 0) {
-    resultsEl.innerHTML = '<p style="text-align: center; color: red;">لم يتم العثور على منتجات.</p>';
-    return;
-  }
-
-  // ترتيب المنتجات في الذاكرة
-  sortProducts(currentSort);
-
-  let html = '<div class="grid">';
-  
-  globalProducts.forEach(p => {
-    let rawImg = p?.image?.imgUrl || '';
-    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+// دالة لجلب التوكن (Token) بشكل صحيح لجميع المواقع (روسي، عالمي، أمريكي)
+async function ensureToken(tabId, domain) {
+    const cookieUrl = `https://www.aliexpress.${domain}/`;
+    let cookie = await chrome.cookies.get({ url: cookieUrl, name: "_m_h5_tk" });
     
-    const price = p?.prices?.salePrice?.formattedPrice || '—';
-    const title = p?.title?.displayTitle || 'منتج';
-    
-    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
-
-    html += `
-      <a href="${directUrl}" target="_blank" class="product-card">
-        <div class="img-box">
-          <img src="${img}" onerror="this.style.display='none'">
-        </div>
-        <div class="info">
-          <div class="title">${title}</div>
-          <div class="price">${price}</div>
-        </div>
-      </a>
-    `;
-  });
-  
-  html += '</div>';
-  resultsEl.innerHTML = html;
-}
-
-// دالة تحميل البيانات (تشتغل مرة واحدة فقط عند فتح النافذة)
-async function loadInitial() {
-  isLoading = true;
-  loadMoreBtn.disabled = true;
-  
-  currentPage = 1;
-  currentStreamId = null;
-  globalProducts = [];
-
-  scrollToTop(); 
-  resultsEl.innerHTML = '<div class="loader">جاري البحث...</div>';
-
-  const res = await fetchProducts(1, null);
-  isLoading = false;
-
-  if (res.error) {
-    resultsEl.innerHTML = `<p style="text-align: center; color: red; padding: 20px;">خطأ: ${res.error}</p>`;
-    return;
-  }
-
-  globalProducts = res.products || [];
-  globalHost = res.host || '';
-  currentStreamId = res.streamId || null;
-  
-  hasMore = globalProducts.length >= 20;
-  loadMoreBtn.disabled = !hasMore;
-
-  render();
-  scrollToTop();
-}
-
-// دالة تحميل المزيد
-async function loadMore() {
-  if (isLoading || !hasMore) return;
-
-  isLoading = true;
-  loadMoreBtn.textContent = 'جاري التحميل...';
-  loadMoreBtn.disabled = true;
-
-  const nextPage = currentPage + 1;
-  const res = await fetchProducts(nextPage, currentStreamId);
-
-  isLoading = false;
-  loadMoreBtn.textContent = 'تحميل المزيد';
-
-  if (res.error) {
-    alert('حدث خطأ أثناء تحميل المزيد: ' + res.error);
-    loadMoreBtn.disabled = false;
-    return;
-  }
-
-  const newProducts = res.products || [];
-  
-  if (newProducts.length > 0) {
-    globalProducts = [...globalProducts, ...newProducts];
-    currentPage = nextPage;
-    currentStreamId = res.streamId || currentStreamId;
-    hasMore = newProducts.length >= 20;
-    render();
-  } else {
-    hasMore = false;
-  }
-
-  loadMoreBtn.disabled = !hasMore;
-}
-
-// 🔥 التعديل هنا: الضغط على الأزرار يرتب المنتجات الموجودة فقط ويعود للأعلى
-document.querySelectorAll('.sort-btn').forEach(btn => {
-  btn.addEventListener('click', (e) => {
-    // 1. العودة إلى أعلى نقطة فوراً
-    scrollToTop();
-
-    // 2. تغيير شكل الأزرار
-    const newSort = e.currentTarget.getAttribute('data-sort');
-    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
-    e.currentTarget.classList.add('active');
-    
-    // 3. إذا كان الترتيب مختلفاً، نرتب المنتجات المحملة مسبقاً (بدون إنترنت)
-    if (currentSort !== newSort) {
-      currentSort = newSort;
-      render(); // رسم وترتيب سريع بدون إرسال طلب جديد
+    // إذا لم يوجد توكن، نقوم بعمل طلب وهمي لإجبار الموقع على إصدار توكن جديد
+    if (!cookie) {
+        const apiDomain = domain === "ru" ? "com" : domain;
+        const url = `https://recom-acs.aliexpress.${apiDomain}/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliexpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+        
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: async (u) => {
+                try {
+                    const fd = new FormData(); fd.append("data", "");
+                    await fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" });
+                } catch (e) {}
+            },
+            args: [url],
+        });
+        
+        // نعيد المحاولة بعد الطلب الوهمي
+        cookie = await chrome.cookies.get({ url: cookieUrl, name: "_m_h5_tk" });
     }
-  });
-});
+    
+    return cookie ? cookie.value.split('_')[0] : null;
+}
 
-loadMoreBtn.addEventListener('click', loadMore);
-loadInitial();
+// الدالة التي تعمل داخل الصفحة
+async function scraperInPage({ productId, page, streamId, md5Code, initialToken, domain }) {
+  const md5Fn = new Function('return ' + md5Code)();
+
+  const token = initialToken || document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
+  if (!token) return { error: 'NO_TOKEN' };
+
+  const cna = document.cookie?.split("cna=")[1]?.split(";")[0];
+  const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
+  const acsRt = xman?.split("acs_rt=")[1];
+  
+  // تحديد اللغة والعملة بناءً على الموقع
+  const locale = xman?.split("x_locale=")[1]?.split("&")[0] ?? (domain === 'ru' ? "ru_RU" : "en_US");
+  const aep = document.cookie?.split("aep_usuc_f=")[1]?.split(";")[0] || '';
+  const currency = aep?.split("c_tp=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RUB" : "USD");
+  const region = aep?.split("region=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RU" : "US");
+
+  const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+
+  // استخراج الصورة بنفس طريقة الإضافة الأصلية (تدعم جميع المواقع)
+  const getImage = (dom) => {
+    if (dom === "ru") {
+      return document.querySelector('meta[property="og:image"]')?.content + "_";
+    }
+    const img = document.querySelector('div[class^="image-view--previewWrap"] img[src^="https://ae-pic-"]');
+    if (img) return img.src;
+    const video = document.querySelector('div[class^="image-view--previewWrap"] video[poster^="https://ae-pic-"]');
+    if (video) return video.poster;
+    return document.querySelector('meta[property="og:image"]')?.content;
+  };
+
+  const y = {
+    DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
+    image: getImage(domain)?.split("_")[0], isNewImageSearch: true, lang: locale, locale: locale,
+    osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+    recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
+    searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
+    sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
+    "x-appKey": 24815441,
+    "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+    _city: "", _currency: currency, _state: ""
+  };
+
+  if (streamId) { y.streamId = streamId; y.realReffer = ""; }
+
+  const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
+  const timestamp = Date.now();
+  const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+
+  const apiDomain = domain === "ru" ? "com" : domain;
+  const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
+  const url = `https://recom-acs.aliexpress.${apiDomain}/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+
+  try {
+    const fd = new FormData();
+    fd.append("data", dataString);
+    
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fd),
+      credentials: "include"
+    });
+    const json = await response.json();
+    return {
+      products: json?.data?.mods?.itemList?.content ?? [],
+      streamId: json?.data?.pageInfo?.streamId,
+      ret: json?.ret?.[0],
+      host: location.host
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// الدالة الرئيسية لجلب المنتجات
+async function fetchSimilarProducts({ page = 1, streamId = null }) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
+  
+  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+  // تحديد الدومين الحالي
+  const domain = tab.url.includes('aliexpress.ru') ? 'ru' : (tab.url.includes('aliexpress.us') ? 'us' : 'com');
+
+  // جلب التوكن الصحيح قبل بدء الطلب
+  const initialToken = await ensureToken(tab.id, domain);
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const md5Code = md5.toString();
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: scraperInPage,
+        args: [{ productId, page, streamId, md5Code, initialToken, domain }],
+      });
+
+      const data = result?.result;
+      if (!data) throw new Error('EMPTY_RESULT');
+      if (data.error) throw new Error(data.error);
+      if (data.ret && !data.ret.startsWith('SUCCESS')) throw new Error('API_' + data.ret);
+
+      return data;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[AliFinder] Attempt ${attempt} failed:`, err.message);
+      if (attempt < 3) await randomDelay();
+    }
+  }
+  return { error: lastError?.message || 'UNKNOWN_ERROR' };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'FETCH_SIMILAR') {
+    fetchSimilarProducts({ page: msg.page || 1, streamId: msg.streamId || null })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+});
