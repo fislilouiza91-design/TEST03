@@ -35,7 +35,7 @@ function injectWidget() {
         height: 100%;
         background: white;
         box-shadow: -4px 0 15px rgba(0,0,0,0.1);
-        transform: translateX(100%);
+        transform: translateX(100%); /* مخفي افتراضياً */
         transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         display: flex;
     `;
@@ -45,29 +45,36 @@ function injectWidget() {
     iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #f8fafc;`;
     iframeContainer.appendChild(iframe);
 
-    // 3. الشريط الجانبي (الأزرار)
+    // ==========================================
+    // 3. الشريط الجانبي (الجزء المنحني)
+    // ==========================================
     sidebar = document.createElement('div');
     sidebar.style.cssText = `
-        width: 65px;
+        width: 70px;
         height: 100%;
-        background: white;
-        border-left: 1px solid #e2e8f0;
-        box-shadow: -2px 0 10px rgba(0,0,0,0.05);
+        position: relative;
         display: flex;
         flex-direction: column;
         justify-content: center;
         align-items: center;
-        gap: 15px;
-        position: relative;
         z-index: 10;
         transition: all 0.3s ease;
     `;
 
-    // 🔥 مقبض السحب (في أعلى الشريط)
+    // 🔥 رسم الشكل المنحني (SVG) كما في ورقتك
+    // هذا المسار يرسم منحنى يتسع من الأعلى والأسفل ويضيق في المنتصف
+    sidebar.innerHTML = `
+        <svg width="100%" height="100%" viewBox="0 0 70 1000" preserveAspectRatio="none" style="position: absolute; top: 0; left: 0; z-index: -1; filter: drop-shadow(-3px 0 8px rgba(0,0,0,0.1));">
+            <!-- المسار المنحني: يبدأ من أعلى اليمين، ينحني لليسار، يضيق في المنتصف، ثم يعود لليمين في الأسفل -->
+            <path d="M 70 0 L 30 0 C 0 150, 20 400, 20 500 C 20 600, 0 850, 30 1000 L 70 1000 Z" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+        </svg>
+    `;
+
+    // 4. مقبض السحب (في أعلى الشريط)
     const dragHandle = document.createElement('div');
     dragHandle.style.cssText = `
         position: absolute;
-        top: 10px;
+        top: 15px;
         width: 100%;
         height: 40px;
         display: flex;
@@ -75,24 +82,25 @@ function injectWidget() {
         justify-content: center;
         cursor: grab;
         color: #94a3b8;
-        font-size: 20px;
+        font-size: 22px;
         font-weight: bold;
         user-select: none;
+        z-index: 5;
     `;
-    dragHandle.innerHTML = '≡'; // أيقونة السحب
+    dragHandle.innerHTML = '≡'; 
     dragHandle.title = "اسحب لتبديل الجهة";
 
-    // زر الفتح والإغلاق (السهم)
+    // 5. زر الفتح والإغلاق (السهم في المنتصف)
     toggleBtn = document.createElement('div');
     toggleBtn.style.cssText = `
         position: absolute;
-        left: -24px;
+        left: 5px; /* يقع في الجزء الضيق من المنحنى */
         top: 50%;
         transform: translateY(-50%);
         width: 24px;
         height: 60px;
         background: #ff4747;
-        border-radius: 12px 0 0 12px;
+        border-radius: 12px;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -100,29 +108,32 @@ function injectWidget() {
         color: white;
         font-size: 14px;
         font-weight: bold;
-        box-shadow: -2px 0 5px rgba(255,71,71,0.3);
+        box-shadow: 0 2px 5px rgba(255,71,71,0.3);
         transition: all 0.3s ease;
         user-select: none;
+        z-index: 5;
     `;
     toggleBtn.innerText = '◀';
 
-    // أزرار الترتيب
+    // 6. أزرار الترتيب (بشكل عمودي داخل المنحنى)
     const createSortBtn = (text, sortValue) => {
         const btn = document.createElement('div');
         btn.style.cssText = `
             writing-mode: vertical-rl;
             text-orientation: mixed;
-            padding: 20px 8px;
+            padding: 15px 5px;
+            margin: 5px 0;
             background: #f8fafc;
             border: 1px solid #e2e8f0;
             border-radius: 8px;
             cursor: pointer;
             font-weight: 700;
-            font-size: 13px;
+            font-size: 12px;
             color: #475569;
             transition: all 0.2s;
             user-select: none;
             letter-spacing: 1px;
+            z-index: 5;
         `;
         btn.innerText = text;
         btn.setAttribute('data-sort', sortValue);
@@ -145,10 +156,12 @@ function injectWidget() {
     const btnPopular = createSortBtn('الأكثر طلباً', 'popular');
     const btnCheapest = createSortBtn('الأرخص', 'cheapest');
 
+    // جعل زر "الأكثر طلباً" هو النشط افتراضياً
     btnPopular.style.background = '#ff4747';
     btnPopular.style.color = 'white';
     btnPopular.style.borderColor = '#ff4747';
 
+    // تجميع العناصر
     sidebar.appendChild(dragHandle);
     sidebar.appendChild(toggleBtn);
     sidebar.appendChild(btnRating);
@@ -160,28 +173,26 @@ function injectWidget() {
     document.body.appendChild(wrapper);
 
     // ==========================================
-    // 4. دالة ضبط الجهة (يمين أو يسار)
+    // 7. دالة ضبط الجهة (يمين أو يسار)
     // ==========================================
     function setSide(side) {
         currentSide = side;
+        const svgPath = sidebar.querySelector('path');
         
         if (side === 'right') {
             wrapper.style.right = '0';
             wrapper.style.left = 'auto';
             wrapper.style.flexDirection = 'row'; 
             
-            sidebar.style.borderLeft = '1px solid #e2e8f0';
-            sidebar.style.borderRight = 'none';
-            sidebar.style.boxShadow = '-2px 0 10px rgba(0,0,0,0.05)';
+            // عكس شكل المنحنى ليتناسب مع اليمين
+            svgPath.setAttribute('d', 'M 70 0 L 30 0 C 0 150, 20 400, 20 500 C 20 600, 0 850, 30 1000 L 70 1000 Z');
+            svgPath.setAttribute('style', 'filter: drop-shadow(-3px 0 8px rgba(0,0,0,0.1));');
             
-            toggleBtn.style.left = '-24px';
+            toggleBtn.style.left = '5px';
             toggleBtn.style.right = 'auto';
-            toggleBtn.style.borderRadius = '12px 0 0 12px';
-            toggleBtn.style.boxShadow = '-2px 0 5px rgba(255,71,71,0.3)';
+            toggleBtn.innerText = isOpen ? '▶' : '◀';
             
             iframeContainer.style.boxShadow = '-4px 0 15px rgba(0,0,0,0.1)';
-            
-            toggleBtn.innerText = isOpen ? '▶' : '◀';
             iframeContainer.style.transform = isOpen ? 'translateX(0)' : 'translateX(100%)';
             
         } else {
@@ -189,23 +200,20 @@ function injectWidget() {
             wrapper.style.right = 'auto';
             wrapper.style.flexDirection = 'row-reverse'; 
             
-            sidebar.style.borderRight = '1px solid #e2e8f0';
-            sidebar.style.borderLeft = 'none';
-            sidebar.style.boxShadow = '2px 0 10px rgba(0,0,0,0.05)';
+            // عكس شكل المنحنى ليتناسب مع اليسار
+            svgPath.setAttribute('d', 'M 0 0 L 40 0 C 70 150, 50 400, 50 500 C 50 600, 70 850, 40 1000 L 0 1000 Z');
+            svgPath.setAttribute('style', 'filter: drop-shadow(3px 0 8px rgba(0,0,0,0.1));');
             
-            toggleBtn.style.right = '-24px';
+            toggleBtn.style.right = '5px';
             toggleBtn.style.left = 'auto';
-            toggleBtn.style.borderRadius = '0 12px 12px 0';
-            toggleBtn.style.boxShadow = '2px 0 5px rgba(255,71,71,0.3)';
+            toggleBtn.innerText = isOpen ? '◀' : '▶';
             
             iframeContainer.style.boxShadow = '4px 0 15px rgba(0,0,0,0.1)';
-            
-            toggleBtn.innerText = isOpen ? '◀' : '▶';
             iframeContainer.style.transform = isOpen ? 'translateX(0)' : 'translateX(-100%)';
         }
     }
 
-    // 5. منطق الفتح والإغلاق
+    // 8. منطق الفتح والإغلاق
     toggleBtn.addEventListener('click', () => {
         isOpen = !isOpen;
         if (isOpen) {
@@ -218,21 +226,21 @@ function injectWidget() {
     });
 
     // ==========================================
-    // 6. 🔥 نظام سحب الشريط (Drag to swap)
+    // 9. 🔥 نظام سحب الشريط (Drag to swap)
     // ==========================================
     let isDragging = false;
 
     dragHandle.addEventListener('mousedown', (e) => {
         isDragging = true;
         dragHandle.style.cursor = 'grabbing';
-        wrapper.style.transition = 'none'; // إيقاف التأثير أثناء السحب
-        iframe.style.pointerEvents = 'none'; // منع اعتراض الماوس
+        wrapper.style.transition = 'none'; 
+        iframe.style.pointerEvents = 'none'; 
     });
 
     window.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
         
-        // معاينة حية: إذا كان الماوس في النصف الأيسر، اجعل التصميم يذهب لليسار (والعكس صحيح)
+        // معاينة حية: إذا كان الماوس في النصف الأيسر، اذهب لليسار
         if (e.clientX < window.innerWidth / 2) {
             if (currentSide !== 'left') setSide('left');
         } else {
@@ -247,7 +255,6 @@ function injectWidget() {
         iframe.style.pointerEvents = 'auto';
         wrapper.style.transition = 'all 0.3s ease';
         
-        // تأكيد الالتصاق بالجهة التي توقف عندها الماوس
         if (e.clientX < window.innerWidth / 2) {
             setSide('left');
         } else {
