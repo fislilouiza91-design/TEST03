@@ -1,84 +1,32 @@
-let wrapper = null;
-let iframe = null;
-
-function removeWidget() {
-    if (wrapper) { wrapper.remove(); wrapper = null; iframe = null; }
-}
-
-function injectWidget() {
-    if (wrapper) return;
-    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
-
-    wrapper = document.createElement('div');
-    wrapper.style.cssText = `position: fixed; bottom: 20px; right: 20px; width: 480px; height: 600px; z-index: 2147483647; border-radius: 10px; background: #fff; box-shadow: 0 10px 30px rgba(0,0,0,0.4); display: flex; flex-direction: column; overflow: hidden;`;
-
-    const header = document.createElement('div');
-    header.style.cssText = `height: 45px; background: #1e293b; color: white; display: flex; align-items: center; justify-content: space-between; padding: 0 15px; cursor: grab; user-select: none;`;
-    
-    header.innerHTML = `
-        <div style="display:flex; align-items:center; gap:8px; font-weight:bold; font-size:14px; font-family:sans-serif;">
-            <div style="background:#ff4d4f; width:24px; height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center;">S</div>
-            AliFinder
-            <span style="font-size:16px; margin-right:8px;">✋</span>
-        </div>
-        <div style="display:flex; gap:10px;">
-            <button id="btn-min" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">−</button>
-            <button id="btn-max" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">⛶</button>
-            <button id="btn-close" style="background:none; border:none; color:white; cursor:pointer; font-size:16px;">✕</button>
-        </div>
-    `;
-
-    iframe = document.createElement('iframe');
-    iframe.src = chrome.runtime.getURL('popup/popup.html');
-    iframe.style.cssText = `flex: 1; width: 100%; border: none; background: #f8fafc;`;
-
-    wrapper.appendChild(header);
-    wrapper.appendChild(iframe);
-    document.body.appendChild(wrapper);
-
-    setupDrag(header, wrapper);
-    setupButtons(header, wrapper);
-}
-
-function setupDrag(header, wrapper) {
-    let isDragging = false, startX, startY, startLeft, startTop;
-    header.addEventListener('mousedown', (e) => {
-        if (e.target.tagName === 'BUTTON') return;
-        isDragging = true; header.style.cursor = 'grabbing';
-        startX = e.clientX; startY = e.clientY;
-        const rect = wrapper.getBoundingClientRect();
-        startLeft = rect.left; startTop = rect.top;
-        wrapper.style.bottom = 'auto'; wrapper.style.right = 'auto';
-        wrapper.style.left = startLeft + 'px'; wrapper.style.top = startTop + 'px';
-    });
-    window.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        e.preventDefault();
-        wrapper.style.left = (startLeft + e.clientX - startX) + 'px';
-        wrapper.style.top = (startTop + e.clientY - startY) + 'px';
-    });
-    window.addEventListener('mouseup', () => {
-        if (isDragging) { isDragging = false; header.style.cursor = 'grab'; }
-    });
-}
-
-function setupButtons(header, wrapper) {
-    header.querySelector('#btn-close').addEventListener('click', removeWidget);
-    header.querySelector('#btn-min').addEventListener('click', () => {
-        if (wrapper.dataset.minimized === 'true') { wrapper.style.height = '600px'; wrapper.dataset.minimized = 'false'; }
-        else { wrapper.style.height = '45px'; wrapper.dataset.minimized = 'true'; }
-    });
-    header.querySelector('#btn-max').addEventListener('click', () => {
-        if (wrapper.dataset.maximized === 'true') {
-            wrapper.style.width = '480px'; wrapper.style.height = '600px'; wrapper.style.bottom = '20px'; wrapper.style.right = '20px'; wrapper.style.top = 'auto'; wrapper.style.left = 'auto'; wrapper.dataset.maximized = 'false';
-        } else {
-            wrapper.style.width = '90vw'; wrapper.style.height = '90vh'; wrapper.style.top = '5vh'; wrapper.style.left = '5vw'; wrapper.style.bottom = 'auto'; wrapper.style.right = 'auto'; wrapper.dataset.maximized = 'true';
-        }
-    });
-}
-
-injectWidget();
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) { lastUrl = location.href; removeWidget(); setTimeout(injectWidget, 1000); }
-}).observe(document, {subtree: true, childList: true});
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { width: 100%; height: 100vh; font-family: system-ui, sans-serif; background: #f8fafc; display: flex; flex-direction: column; overflow: hidden; }
+    .sort-bar { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 10px; background: white; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
+    .sort-btn { padding: 8px 2px; background: #f1f5f9; border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-weight: bold; color: #475569; font-size: 12px; transition: 0.2s; }
+    .sort-btn.active { background: #ff6b35; color: white; border-color: #ff6b35; }
+    #results { flex: 1; overflow-y: auto; padding: 8px; width: 100%; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; width: 100%; }
+    .product-card { display: flex; flex-direction: column; background: white; border-radius: 6px; overflow: hidden; text-decoration: none; border: 1px solid #e2e8f0; transition: transform 0.2s; }
+    .product-card:hover { transform: translateY(-2px); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .img-box { width: 100%; height: 100px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .img-box img { width: 100%; height: 100%; object-fit: cover; }
+    .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
+    .title { font-size: 10px; color: #334155; line-height: 1.3; height: 26px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-bottom: 4px; }
+    .price { font-size: 12px; font-weight: bold; color: #ef4444; margin-top: auto; }
+    .loader { text-align: center; padding: 20px; color: #64748b; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="sort-bar">
+    <button class="sort-btn" data-sort="cheapest">الأرخص</button>
+    <button class="sort-btn active" data-sort="popular">الأكثر طلباً</button>
+    <button class="sort-btn" data-sort="rating">الأكثر تقيماً</button>
+  </div>
+  <div id="results"><div class="loader">جاري البحث عبر محرك الموقع...</div></div>
+  <script src="popup.js"></script>
+</body>
+</html>
