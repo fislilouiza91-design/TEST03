@@ -19,44 +19,26 @@
     .img-box { width: 100%; height: 110px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
     .img-box img { width: 100%; height: 100%; object-fit: cover; }
     
-    /* تنسيق الكتابة الذكي (يدعم كل اللغات) */
     .info { padding: 6px; display: flex; flex-direction: column; flex: 1; }
     
+    /* تنسيق ذكي يدعم كل اللغات تلقائياً */
     .title { 
-      font-size: 10px; 
-      color: #334155; 
-      line-height: 1.3; 
-      height: 26px; 
-      overflow: hidden; 
-      display: -webkit-box; 
-      -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; 
-      margin-bottom: 6px;
-      
-      /* السحر هنا: المتصفح يحدد الاتجاه تلقائياً حسب اللغة */
-      unicode-bidi: plaintext;
-      text-align: start; 
+      font-size: 10px; color: #334155; line-height: 1.3; height: 26px; 
+      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; 
+      margin-bottom: 6px; unicode-bidi: plaintext; text-align: start; 
     }
     
+    /* صف التقييم والمبيعات */
     .meta { 
-      display: flex; 
-      justify-content: space-between; 
-      align-items: center; 
-      font-size: 9px; 
-      margin-bottom: 4px;
-      unicode-bidi: plaintext;
-      text-align: start;
+      display: flex; justify-content: space-between; align-items: center; 
+      font-size: 10px; margin-bottom: 4px; unicode-bidi: plaintext; text-align: start;
     }
     .rating { color: #f59e0b; font-weight: bold; }
     .sales { color: #64748b; }
     
     .price { 
-      font-size: 13px; 
-      font-weight: bold; 
-      color: #ef4444; 
-      margin-top: auto; 
-      unicode-bidi: plaintext;
-      text-align: start;
+      font-size: 13px; font-weight: bold; color: #ef4444; margin-top: auto; 
+      unicode-bidi: plaintext; text-align: start; 
     }
 
     .loader { text-align: center; padding: 20px; color: #64748b; font-size: 14px; }
