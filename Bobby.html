@@ -1,154 +1,189 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    /* إعدادات عامة */
-    :root {
-      --primary: #ff4747;
-      --primary-hover: #e63939;
-      --bg: #f4f6f8;
-      --text-main: #1e293b;
-      --text-muted: #64748b;
-      --border: #e2e8f0;
-    }
+let wrapper = null;
+let iframe = null;
+let toggleBtn = null;
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    
-    body { 
-      width: 100%; height: 100vh; 
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; 
-      background: var(--bg); display: flex; flex-direction: column; overflow: hidden; 
-    }
-    
-    /* شريط التمرير المخصص */
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+function removeWidget() {
+    if (wrapper) { wrapper.remove(); wrapper = null; iframe = null; toggleBtn = null; }
+}
 
-    /* شريط الأزرار (Sort) */
-    .sort-bar { 
-      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; 
-      padding: 12px 16px; background: white; border-bottom: 1px solid var(--border); 
-      flex-shrink: 0; box-shadow: 0 2px 10px rgba(0,0,0,0.02); z-index: 10;
-    }
-    
-    .sort-btn { 
-      padding: 10px 4px; background: #f8fafc; border: 1px solid var(--border); 
-      border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--text-muted); 
-      font-size: 12px; transition: all 0.3s ease; 
-    }
-    .sort-btn:hover { background: #f1f5f9; }
-    .sort-btn.active { 
-      background: linear-gradient(135deg, #ff6b35, var(--primary)); 
-      color: white; border-color: transparent; 
-      box-shadow: 0 4px 12px rgba(255, 71, 71, 0.3); 
-    }
-    
-    /* حاوية المنتجات */
-    #results { flex: 1; overflow-y: auto; padding: 12px; width: 100%; position: relative; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 100%; align-content: start; }
-    
-    /* كارت المنتج */
-    .product-card { 
-      display: flex; flex-direction: column; background: white; 
-      border-radius: 12px; overflow: hidden; text-decoration: none; 
-      border: 1px solid var(--border); transition: all 0.3s ease; 
-      box-shadow: 0 2px 8px rgba(0,0,0,0.04); position: relative;
-    }
-    .product-card:hover { 
-      transform: translateY(-4px); 
-      box-shadow: 0 12px 24px rgba(0,0,0,0.1); 
-      border-color: #cbd5e1;
-    }
-    
-    /* صورة المنتج */
-    .img-box { 
-      width: 100%; height: 130px; background: #f8fafc; 
-      display: flex; align-items: center; justify-content: center; 
-      overflow: hidden; border-bottom: 1px solid #f1f5f9;
-    }
-    .img-box img { 
-      width: 100%; height: 100%; object-fit: cover; 
-      transition: transform 0.4s ease; 
-    }
-    .product-card:hover .img-box img { transform: scale(1.08); }
-    
-    /* تفاصيل المنتج */
-    .info { padding: 10px; display: flex; flex-direction: column; flex: 1; }
-    
-    .title { 
-      font-size: 12px; color: var(--text-main); font-weight: 600; line-height: 1.4; 
-      height: 34px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; margin-bottom: 10px; 
-      unicode-bidi: plaintext; text-align: start; 
-    }
-    
-    /* السطر السفلي */
-    .bottom-row { 
-      display: flex; justify-content: space-between; align-items: center; 
-      margin-top: auto; width: 100%; gap: 4px; flex-wrap: nowrap;
-    }
-    
-    /* النجوم */
-    .stars-box { display: flex; align-items: center; gap: 2px; direction: ltr; flex-shrink: 0; }
-    .stars { font-size: 11px; letter-spacing: 0px; }
-    .star-filled { color: #ffa41c; }
-    .star-empty { color: #e2e8f0; }
-    .rating-num { font-size: 10px; color: var(--text-muted); font-weight: 700; }
-    
-    /* السعر (مع التجاوب) */
-    .price { font-weight: 800; color: var(--primary); white-space: nowrap; text-align: end; direction: ltr; }
-    .price-normal { font-size: 14px; }
-    .price-sm { font-size: 12px; }
-    .price-xs { font-size: 10px; }
+function injectWidget() {
+    if (wrapper) return;
+    if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-    /* هيكل التحميل الاحترافي (Skeleton) */
-    .skeleton { background: #e2e8f0; border-radius: 4px; animation: pulse 1.5s infinite ease-in-out; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    .skeleton-card { height: 240px; background: white; border-radius: 12px; border: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 10px; }
-    .skeleton-img { width: 100%; height: 130px; border-radius: 8px; }
-    .skeleton-text { width: 100%; height: 14px; }
-    .skeleton-text.short { width: 60%; }
+    // 1. إنشاء اللوحة الأساسية
+    wrapper = document.createElement('div');
+    wrapper.id = 'alifinder-drawer';
+    wrapper.style.cssText = `
+        position: fixed;
+        top: 10%;
+        left: 0;
+        width: 480px;
+        height: 80vh;
+        z-index: 2147483647;
+        background: #fff;
+        box-shadow: 4px 0 15px rgba(0,0,0,0.2);
+        transform: translateX(-100%); /* مخفية افتراضياً */
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), left 0.3s ease, right 0.3s ease, border-radius 0.3s, top 0.3s ease;
+        display: flex;
+        border-radius: 0 12px 12px 0;
+    `;
 
-    /* مؤشر التحميل السفلي */
-    #loader-more {
-      display: none; text-align: center; padding: 20px; 
-      color: var(--primary); font-weight: bold; font-size: 13px;
-      width: 100%; direction: rtl;
-    }
-    .spinner {
-      display: inline-block; width: 16px; height: 16px;
-      border: 2px solid rgba(255, 71, 71, 0.3); border-top-color: var(--primary);
-      border-radius: 50%; animation: spin 0.8s linear infinite;
-      vertical-align: middle; margin-left: 6px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    // 2. زر التحكم
+    toggleBtn = document.createElement('div');
+    toggleBtn.id = 'alifinder-toggle';
+    toggleBtn.style.cssText = `
+        position: absolute;
+        right: -45px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 45px;
+        height: 100px;
+        background: linear-gradient(135deg, #ff6b35, #ff4747);
+        border-radius: 0 10px 10px 0;
+        cursor: grab;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        color: white;
+        box-shadow: 2px 0 8px rgba(0,0,0,0.2);
+        user-select: none;
+        font-family: sans-serif;
+        transition: left 0.3s ease, right 0.3s ease, border-radius 0.3s, box-shadow 0.3s;
+    `;
+    toggleBtn.innerHTML = `
+        <span style="font-size: 14px; opacity: 0.8; line-height: 1;">≡</span>
+        <span class="arrow-icon" style="font-size: 16px; font-weight: bold; line-height: 1;">▶</span>
+    `;
 
-  </style>
-</head>
-<body>
-  <div class="sort-bar">
-    <button class="sort-btn" data-sort="cheapest">الأرخص</button>
-    <button class="sort-btn active" data-sort="popular">الأكثر طلباً</button>
-    <button class="sort-btn" data-sort="rating">الأكثر تقيماً</button>
-  </div>
-  
-  <div id="results">
-    <!-- هياكل التحميل الأولية -->
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-    </div>
-    
-    <!-- مؤشر التحميل السفلي (ثابت) -->
-    <div id="loader-more">
-      <span class="spinner"></span> جاري جلب المزيد...
-    </div>
-  </div>
-  
-  <script src="popup.js"></script>
-</body>
-</html>
+    // 3. إطار الإضافة
+    iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('popup/popup.html');
+    iframe.style.cssText = `
+        width: 100%;
+        height: 100%;
+        border: none;
+        background: #f8fafc;
+        border-radius: inherit;
+    `;
+
+    wrapper.appendChild(toggleBtn);
+    wrapper.appendChild(iframe);
+    document.body.appendChild(wrapper);
+
+    // ==========================================
+    // 4. نظام السحب الحر والالتصاق الذكي (Smart Snap)
+    // ==========================================
+    let isOpen = false;
+    let isDragging = false;
+    let wasDragged = false;
+    let startX, startY, startLeft, startTop;
+    let currentSide = 'left';
+
+    toggleBtn.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        wasDragged = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        
+        const rect = wrapper.getBoundingClientRect();
+        startLeft = rect.left;
+        startTop = rect.top;
+        
+        toggleBtn.style.cursor = 'grabbing';
+        iframe.style.pointerEvents = 'none'; 
+        wrapper.style.transition = 'none'; // إيقاف التأثير الحركي أثناء السحب الحر
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        e.preventDefault();
+        
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) wasDragged = true;
+        
+        if (wasDragged) {
+            // تحريك حر تماماً مع الماوس في كل الاتجاهات
+            let newLeft = startLeft + dx;
+            let newTop = startTop + dy;
+            
+            // منع الخروج من الشاشة عمودياً
+            if (newTop < 0) newTop = 0;
+            if (newTop > window.innerHeight - wrapper.offsetHeight) newTop = window.innerHeight - wrapper.offsetHeight;
+            
+            wrapper.style.left = newLeft + 'px';
+            wrapper.style.right = 'auto';
+            wrapper.style.top = newTop + 'px';
+        }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        toggleBtn.style.cursor = 'grab';
+        iframe.style.pointerEvents = 'auto';
+        wrapper.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), left 0.4s ease, right 0.4s ease, border-radius 0.4s, top 0.4s ease';
+
+        if (!wasDragged) {
+            // مجرد ضغطة سريعة (فتح/إغلاق)
+            isOpen = !isOpen;
+            const arrow = toggleBtn.querySelector('.arrow-icon');
+            if (isOpen) {
+                wrapper.style.transform = 'translateX(0)';
+                arrow.innerText = currentSide === 'left' ? '◀' : '▶';
+            } else {
+                wrapper.style.transform = currentSide === 'left' ? 'translateX(-100%)' : 'translateX(100%)';
+                arrow.innerText = currentSide === 'left' ? '▶' : '◀';
+            }
+        } else {
+            // 🔥 السحر هنا: عند إفلات الماوس، اللوحة تختار الجدار الأقرب إليها وتلتصق به
+            const rect = wrapper.getBoundingClientRect();
+            const panelCenter = rect.left + (rect.width / 2);
+            const screenCenter = window.innerWidth / 2;
+
+            if (panelCenter < screenCenter) {
+                // تلتصق بالجدار الأيسر (لأنها أقرب له)
+                currentSide = 'left';
+                wrapper.style.left = '0';
+                wrapper.style.right = 'auto';
+                wrapper.style.borderRadius = '0 12px 12px 0';
+                
+                toggleBtn.style.right = '-45px';
+                toggleBtn.style.left = 'auto';
+                toggleBtn.style.borderRadius = '0 10px 10px 0';
+                toggleBtn.style.boxShadow = '2px 0 8px rgba(0,0,0,0.2)';
+                
+                wrapper.style.transform = isOpen ? 'translateX(0)' : 'translateX(-100%)';
+                toggleBtn.querySelector('.arrow-icon').innerText = isOpen ? '◀' : '▶';
+                
+            } else {
+                // تلتصق بالجدار الأيمن (لأنها أقرب له)
+                currentSide = 'right';
+                wrapper.style.left = 'auto';
+                wrapper.style.right = '0';
+                wrapper.style.borderRadius = '12px 0 0 12px';
+                
+                toggleBtn.style.left = '-45px';
+                toggleBtn.style.right = 'auto';
+                toggleBtn.style.borderRadius = '10px 0 0 10px';
+                toggleBtn.style.boxShadow = '-2px 0 8px rgba(0,0,0,0.2)';
+                
+                wrapper.style.transform = isOpen ? 'translateX(0)' : 'translateX(100%)';
+                toggleBtn.querySelector('.arrow-icon').innerText = isOpen ? '▶' : '◀';
+            }
+        }
+    });
+}
+
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
