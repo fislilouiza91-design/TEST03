@@ -1,186 +1,57 @@
-// popup/popup.js
-const state = {
-  products: [],
-  streamId: null,
-  host: null,
-  page: 1,
-  sortMode: 'popular', // cheapest | popular | rating
-  loading: false,
-  hasMore: true,
-};
-
-const $ = (s) => document.querySelector(s);
-const resultsEl = $('#results');
-const loadMoreBtn = $('#loadMore');
-const statusEl = $('#status');
-
-async function fetchFromBackground({ page = 1, streamId = null } = {}) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
-  });
+export function md5(e) {
+    function t(e, t) { return e << t | e >>> 32 - t; }
+    function r(e, t) {
+        var r, o, a, n, i;
+        return a = 2147483648 & e, n = 2147483648 & t, i = (1073741823 & e) + (1073741823 & t),
+        (r = 1073741824 & e) & (o = 1073741824 & t) ? 2147483648 ^ i ^ a ^ n : r | o ? 1073741824 & i ? 3221225472 ^ i ^ a ^ n : 1073741824 ^ i ^ a ^ n : i ^ a ^ n;
+    }
+    function o(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & t | ~e & r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function a(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & r | t & ~r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function n(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e ^ t ^ r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function i(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return t ^ (e | ~r); }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function c(e) {
+        var t, r = "", o = "";
+        for (t = 0; 3 >= t; t++) r += (o = "0" + (e >>> 8 * t & 255).toString(16)).substr(o.length - 2, 2);
+        return r;
+    }
+    var s, p, u, d, m, l, f, g, h, y;
+    for (y = function(e) {
+        for (var t, r = e.length, o = r + 8, a = 16 * ((o - o % 64) / 64 + 1), n = new Array(a - 1), i = 0, c = 0; r > c;)
+            i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | e.charCodeAt(c) << i, c++;
+        return i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | 128 << i, n[a - 2] = r << 3, n[a - 1] = r >>> 29, n;
+    }(e = function(e) {
+        e = e.replace(/\r\n/g, "\n");
+        for (var t = "", r = 0; r < e.length; r++) {
+            var o = e.charCodeAt(r);
+            128 > o ? t += String.fromCharCode(o) : o > 127 && 2048 > o ? (t += String.fromCharCode(o >> 6 | 192), t += String.fromCharCode(63 & o | 128)) : (t += String.fromCharCode(o >> 12 | 224), t += String.fromCharCode(o >> 6 & 63 | 128), t += String.fromCharCode(63 & o | 128));
+        }
+        return t;
+    }(e)), l = 1732584193, f = 4023233417, g = 2562383102, h = 271733878, s = 0; s < y.length; s += 16)
+        p = l, u = f, d = g, m = h,
+        l = o(l, f, g, h, y[s + 0], 7, 3614090360), h = o(h, l, f, g, y[s + 1], 12, 3905402710), g = o(g, h, l, f, y[s + 2], 17, 606105819), f = o(f, g, h, l, y[s + 3], 22, 3250441966),
+        l = o(l, f, g, h, y[s + 4], 7, 4118548399), h = o(h, l, f, g, y[s + 5], 12, 1200080426), g = o(g, h, l, f, y[s + 6], 17, 2821735955), f = o(f, g, h, l, y[s + 7], 22, 4249261313),
+        l = o(l, f, g, h, y[s + 8], 7, 1770035416), h = o(h, l, f, g, y[s + 9], 12, 2336552879), g = o(g, h, l, f, y[s + 10], 17, 4294925233), f = o(f, g, h, l, y[s + 11], 22, 2304563134),
+        l = o(l, f, g, h, y[s + 12], 7, 1804603682), h = o(h, l, f, g, y[s + 13], 12, 4254626195), g = o(g, h, l, f, y[s + 14], 17, 2792965006), l = a(l, f = o(f, g, h, l, y[s + 15], 22, 1236535329), g, h, y[s + 1], 5, 4129170786),
+        h = a(h, l, f, g, y[s + 6], 9, 3225465664), g = a(g, h, l, f, y[s + 11], 14, 643717713), f = a(f, g, h, l, y[s + 0], 20, 3921069994),
+        l = a(l, f, g, h, y[s + 5], 5, 3593408605), h = a(h, l, f, g, y[s + 10], 9, 38016083), g = a(g, h, l, f, y[s + 15], 14, 3634488961), f = a(f, g, h, l, y[s + 4], 20, 3889429448),
+        l = a(l, f, g, h, y[s + 9], 5, 568446438), h = a(h, l, f, g, y[s + 14], 9, 3275163606), g = a(g, h, l, f, y[s + 3], 14, 4107603335), f = a(f, g, h, l, y[s + 8], 20, 1163531501),
+        l = a(l, f, g, h, y[s + 13], 5, 2850285829), h = a(h, l, f, g, y[s + 2], 9, 4243563512), g = a(g, h, l, f, y[s + 7], 14, 1735328473), l = n(l, f = a(f, g, h, l, y[s + 12], 20, 2368359562), g, h, y[s + 5], 4, 4294588738),
+        h = n(h, l, f, g, y[s + 8], 11, 2272392833), g = n(g, h, l, f, y[s + 11], 16, 1839030562), f = n(f, g, h, l, y[s + 14], 23, 4259657740),
+        l = n(l, f, g, h, y[s + 1], 4, 2763975236), h = n(h, l, f, g, y[s + 4], 11, 1272893353), g = n(g, h, l, f, y[s + 7], 16, 4139469664), f = n(f, g, h, l, y[s + 10], 23, 3200236656),
+        l = n(l, f, g, h, y[s + 13], 4, 681279174), h = n(h, l, f, g, y[s + 0], 11, 3936430074), g = n(g, h, l, f, y[s + 3], 16, 3572445317), f = n(f, g, h, l, y[s + 6], 23, 76029189),
+        l = n(l, f, g, h, y[s + 9], 4, 3654602809), h = n(h, l, f, g, y[s + 12], 11, 3873151461), g = n(g, h, l, f, y[s + 15], 16, 530742520), l = i(l, f = n(f, g, h, l, y[s + 2], 23, 3299628645), g, h, y[s + 0], 6, 4096336452),
+        h = i(h, l, f, g, y[s + 7], 10, 1126891415), g = i(g, h, l, f, y[s + 14], 15, 2878612391), f = i(f, g, h, l, y[s + 5], 21, 4237533241),
+        l = i(l, f, g, h, y[s + 12], 6, 1700485571), h = i(h, l, f, g, y[s + 3], 10, 2399980690), g = i(g, h, l, f, y[s + 10], 15, 4293915773), f = i(f, g, h, l, y[s + 1], 21, 2240044497),
+        l = i(l, f, g, h, y[s + 8], 6, 1873313359), h = i(h, l, f, g, y[s + 15], 10, 4264355552), g = i(g, h, l, f, y[s + 6], 15, 2734768916), f = i(f, g, h, l, y[s + 13], 21, 1309151649),
+        l = i(l, f, g, h, y[s + 4], 6, 4149444226), h = i(h, l, f, g, y[s + 11], 10, 3174756917), g = i(g, h, l, f, y[s + 2], 15, 718787259), f = i(f, g, h, l, y[s + 9], 21, 3951481745),
+        l = r(l, p), f = r(f, u), g = r(g, d), h = r(h, m);
+    return (c(l) + c(f) + c(g) + c(h)).toLowerCase();
 }
-
-function sortProductsClientSide(products, mode) {
-  const arr = [...products];
-  if (mode === 'cheapest') {
-    arr.sort((a, b) => {
-      const pA = Number(a?.prices?.salePrice?.minPrice) || 999999;
-      const pB = Number(b?.prices?.salePrice?.minPrice) || 999999;
-      return pA - pB;
-    });
-  } else if (mode === 'rating') {
-    arr.sort((a, b) => {
-      const rA = Number(a?.evaluation?.starRating) || 0;
-      const rB = Number(b?.evaluation?.starRating) || 0;
-      return rB - rA;
-    });
-  } else {
-    arr.sort((a, b) => {
-      const tA = Number(a?.trade?.realTradeCount) || 0;
-      const tB = Number(b?.trade?.realTradeCount) || 0;
-      return tB - tA;
-    });
-  }
-  return arr;
-}
-
-function getRating(p) {
-  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || 0;
-}
-function getTradeCount(p) {
-  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || 0;
-}
-
-// ✅ دالة العرض مع أنماط مدمجة (Inline Styles) لحل مشكلة التنسيق نهائياً
-function render() {
-  if (!state.products.length) {
-    resultsEl.innerHTML = `<div style="text-align: center; padding: 40px; color: #64748b;"><p>لا توجد منتجات مشابهة حالياً</p></div>`;
-    return;
-  }
-
-  const sorted = sortProductsClientSide(state.products, state.sortMode);
-  
-  const productsHtml = sorted.map((p) => {
-    let rawImg = p?.image?.imgUrl || '';
-    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
-    
-    const price = p?.prices?.salePrice?.formattedPrice || '—';
-    const title = p?.title?.displayTitle || p?.title?.seoTitle || 'منتج';
-    const rating = getRating(p);
-    const trades = getTradeCount(p);
-    const url = `https://${state.host}/item/${p.productId}.html`;
-    const aff = `https://YOUR-AFFILIATE-LINK.com/redirect?to=${encodeURIComponent(url)}`;
-
-    // استخدام الأنماط المدمجة لضمان التنسيق حتى لو لم يتم تحميل CSS
-    return `
-      <a href="${aff}" target="_blank" rel="noopener" style="display: flex; flex-direction: column; width: 100%; background: white; border-radius: 12px; overflow: hidden; text-decoration: none; border: 1px solid #e2e8f0; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-        <img src="${img}" alt="" loading="lazy" style="width: 100%; height: 160px; object-fit: cover; background: #f1f5f9; display: block;">
-        <div style="padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-          <div style="font-size: 12px; color: #475569; line-height: 1.4; height: 34px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word;">${escapeHtml(title)}</div>
-          <div style="font-size: 15px; font-weight: bold; color: #ef4444;">${price}</div>
-          <div style="display: flex; justify-content: space-between; font-size: 11px; color: #64748b; margin-top: 4px;">
-            <span style="color: #f59e0b; font-weight: bold;">⭐ ${rating ? rating.toFixed(1) : '—'}</span>
-            <span>🔥 ${formatNumber(trades)}</span>
-          </div>
-        </div>
-      </a>`;
-  }).join('');
-
-  // تغليف المنتجات في شبكة (Grid) مدمجة
-  resultsEl.innerHTML = `<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 100%;">${productsHtml}</div>`;
-}
-
-function escapeHtml(s) {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
-}
-function formatNumber(n) {
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-  return String(n);
-}
-
-async function loadInitial() {
-  state.loading = true; state.page = 1; state.products = []; state.streamId = null; state.hasMore = true;
-
-  resultsEl.innerHTML = `<div style="text-align: center; padding: 40px; color: #64748b;"><p>جاري البحث...</p></div>`;
-  loadMoreBtn.disabled = true; statusEl.textContent = '';
-
-  const res = await fetchFromBackground({ page: 1, streamId: null });
-  state.loading = false;
-
-  if (res?.error) return showError(res.error);
-
-  state.products = res.products || [];
-  state.streamId = res.streamId || null;
-  state.host = res.host || null;
-  state.hasMore = state.products.length >= 20;
-
-  if (!state.products.length) {
-    resultsEl.innerHTML = `<div style="text-align: center; padding: 40px; color: #64748b;"><p>لم نجد منتجات مشابهة</p></div>`;
-    return;
-  }
-
-  render();
-  loadMoreBtn.disabled = !state.hasMore;
-  statusEl.textContent = `${state.products.length} منتج`;
-}
-
-async function loadMore() {
-  if (state.loading || !state.hasMore) return;
-  state.loading = true; loadMoreBtn.disabled = true; loadMoreBtn.textContent = 'جاري التحميل...';
-
-  const nextPage = state.page + 1;
-  const res = await fetchFromBackground({ page: nextPage, streamId: state.streamId });
-
-  state.loading = false; loadMoreBtn.textContent = 'تحميل المزيد';
-
-  if (res?.error) return showError(res.error);
-
-  const more = res.products || [];
-  if (more.length) {
-    state.products = [...state.products, ...more];
-    state.streamId = res.streamId || state.streamId;
-    state.page = nextPage;
-    state.hasMore = more.length >= 20;
-    render();
-    statusEl.textContent = `${state.products.length} منتج`;
-  } else {
-    state.hasMore = false;
-  }
-  loadMoreBtn.disabled = !state.hasMore;
-}
-
-function showError(msg) {
-  const map = {
-    'NOT_PRODUCT_PAGE': 'افتح صفحة منتج في AliExpress أولاً',
-    'NO_TOKEN': 'لم يتم العثور على توكن. أعد تحميل الصفحة.',
-  };
-  const friendly = map[msg] || (msg?.startsWith('API_') ? 'تم رفض الطلب من AliExpress.' : msg);
-  resultsEl.innerHTML = `<div style="text-align: center; padding: 40px; color: #ef4444;"><p>⚠️ ${escapeHtml(friendly || 'حدث خطأ')}</p></div>`;
-  loadMoreBtn.disabled = true;
-}
-
-document.querySelectorAll('.sort-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.sortMode = btn.dataset.sort;
-    render(); 
-  });
-});
-
-loadMoreBtn.addEventListener('click', loadMore);
-
-const themeToggle = $('#themeToggle');
-chrome.storage.local.get(['darkMode'], (r) => {
-  if (r.darkMode) { document.body.classList.add('dark'); themeToggle.textContent = '☀️'; }
-});
-themeToggle.addEventListener('click', () => {
-  document.body.classList.toggle('dark');
-  const isDark = document.body.classList.contains('dark');
-  themeToggle.textContent = isDark ? '☀️' : '🌙';
-  chrome.storage.local.set({ darkMode: isDark });
-});
-
-loadInitial();
