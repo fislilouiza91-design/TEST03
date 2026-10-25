@@ -1,5 +1,5 @@
 const resultsEl = document.getElementById('results');
-const loaderMore = document.getElementById('loader-more'); // تعريف المؤشر
+const loaderMore = document.getElementById('loader-more');
 let globalProducts = [], globalHost = '', currentSort = 'popular';
 let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
 let lastRequestTime = 0, scrollDebounceTimer = null;
@@ -31,6 +31,37 @@ function getStarsHTML(rating) {
   return starsHtml;
 }
 
+// 🔥 دالة إصلاح مكان العملة (لتكون على اليمين)
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  
+  // تعبير نمطي (Regex) يفصل الأرقام عن الحروف والرموز
+  // المجموعة 1: العملة (إذا كانت في البداية مثل "€ " أو "US $ ")
+  // المجموعة 2: الرقم (مثل "65,99" أو "42,315")
+  // المجموعة 3: العملة (إذا كانت في النهاية)
+  const match = priceStr.match(/^([^\d]*)([\d.,\s]+)([^\d]*)$/);
+  
+  if (match) {
+    let prefix = match[1].trim(); // "€" أو "US $" أو "TRY"
+    let number = match[2].trim(); // "65,99"
+    let suffix = match[3].trim(); // "€" (إذا كانت في النهاية)
+
+    // إذا كانت العملة في البداية، ننقلها للنهاية
+    if (prefix && !suffix) {
+      return `${number} ${prefix}`;
+    }
+    // إذا كانت العملة في النهاية، نتركها (ونضيف مسافة للتنسيق)
+    if (!prefix && suffix) {
+      return `${number} ${suffix}`;
+    }
+    // إذا كان هناك بادئة ولاحقة معاً
+    if (prefix && suffix) {
+      return `${number} ${prefix} ${suffix}`;
+    }
+  }
+  return priceStr;
+}
+
 function getPriceClass(priceStr) {
   if (!priceStr) return 'price-normal';
   const length = priceStr.length;
@@ -50,7 +81,9 @@ function createCard(p) {
   if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
   const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
   
-  const price = p?.prices?.salePrice?.formattedPrice || '—';
+  // استخدام دالة إصلاح العملة
+  const rawPrice = p?.prices?.salePrice?.formattedPrice || '—';
+  const price = formatPrice(rawPrice);
   const priceClass = getPriceClass(price);
   
   const title = p?.title?.displayTitle || 'منتج';
@@ -129,15 +162,13 @@ async function loadMore() {
   if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
 
   isLoading = true; lastRequestTime = Date.now();
-  
-  // إظهار علامة التحميل
   loaderMore.style.display = 'block';
 
   const res = await fetchProducts(currentPage + 1, currentStreamId);
   await new Promise(r => setTimeout(r, 1000)); 
   
   isLoading = false; 
-  loaderMore.style.display = 'none'; // إخفاء علامة التحميل
+  loaderMore.style.display = 'none';
   
   if (res.error) return;
 
