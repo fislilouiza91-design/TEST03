@@ -5,7 +5,7 @@ let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
 let lastRequestTime = 0, scrollDebounceTimer = null;
 const MIN_COOLDOWN_MS = 3000;
 
-// 🔥 جلب النصوص المترجمة من ملفات _locales
+// جلب النصوص المترجمة لواجهة الإضافة
 const msgFreeShipping = chrome.i18n.getMessage("free_shipping") || "Free Shipping";
 const msgNoProducts = chrome.i18n.getMessage("no_products") || "No products found.";
 const msgLoadingMore = chrome.i18n.getMessage("loading_more") || "Loading more...";
@@ -69,7 +69,7 @@ function createCard(p) {
     try {
       if (p?.shipping && p.shipping.shippingFee) {
         const fee = p.shipping.shippingFee;
-        if (fee === 'Free' || fee === 0) {
+        if (fee === 'Free' || fee === 0 || fee === '0') {
           isFreeShipping = true;
         } else if (typeof fee === 'string') {
           shippingText = fee;
@@ -84,7 +84,8 @@ function createCard(p) {
           if (typeof text !== 'string') return false;
           
           const s = text.toLowerCase();
-          return s.includes('free shipping') || s.includes('شحن مجاني') || s.includes('مجاني');
+          // 🔥 التعرف على كلمة شحن مجاني بجميع اللغات
+          return s.includes('free shipping') || s.includes('livraison gratuite') || s.includes('envío gratis') || s.includes('kostenloser versand') || s.includes('бесплатная доставка') || s.includes('شحن مجاني') || s.includes('مجاني');
         });
         if (freeTag) isFreeShipping = true;
       }
@@ -99,6 +100,7 @@ function createCard(p) {
     } else if (shippingText) {
       shippingHtml = `<div style="display: flex; align-items: center; gap: 4px; margin-top: 4px; color: #64748b !important; -webkit-text-fill-color: #64748b !important; font-size: 10px; font-weight: bold; height: 14px;">${truckIcon} <span>${shippingText}</span></div>`;
     } else {
+      // مساحة فارغة للحفاظ على استقامة الكروت
       shippingHtml = `<div style="height: 14px; margin-top: 4px; visibility: hidden;"></div>`;
     }
 
