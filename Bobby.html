@@ -1,168 +1,250 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    
-    body { 
-      width: 100%; height: 100vh; 
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; 
-      background: #ffffff !important; 
-      display: flex; flex-direction: column; overflow: hidden; 
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    }
-    
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
 
-    #results { 
-      flex: 1; 
-      overflow-y: auto; 
-      overflow-x: hidden; 
-      padding: 16px; 
-      width: 100%; 
-      background: #ffffff; 
-      scrollbar-gutter: stable both-edges;
-    }
-    
-    .grid { 
-      display: grid; 
-      grid-template-columns: repeat(3, minmax(0, 1fr)); 
-      gap: 18px 12px; 
-      width: 100%; 
-      align-items: stretch; 
-    }
-    
-    .product-card { 
-      display: flex; flex-direction: column; 
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: #ffffff !important;
-      width: 100%;
-      height: 100%;
-      min-width: 0; 
-      transition: transform 0.25s ease; 
-    }
-    
-    .product-card:hover { transform: translateY(-5px); }
-    
-    .img-box { 
-      width: 100%; 
-      height: 160px; 
-      background: #ffffff; 
-      position: relative;
-      overflow: hidden; 
-      border-radius: 8px; 
-      box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
-      margin-bottom: 8px;
-      transition: box-shadow 0.25s ease; 
-      padding: 6px; 
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    
-    .product-card:hover .img-box { box-shadow: 0 8px 16px rgba(0,0,0,0.15); }
-    
-    .img-box img { 
-      width: 100%; height: 100%; 
-      object-fit: contain; 
-    }
-    
-    .info { 
-      display: flex; 
-      flex-direction: column; 
-      width: 100%;
-      flex: 1; 
-      padding: 0 4px; 
-      min-width: 0;
-    }
-    
-    .title { 
-      font-size: 12px; 
-      color: #222222;
-      font-weight: 500;
-      line-height: 1.3; 
-      height: 32px; 
-      overflow: hidden; 
-      display: -webkit-box; 
-      -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; 
-      margin-bottom: 6px; 
-      unicode-bidi: plaintext; 
-      text-align: start; 
-      word-break: break-word; 
-      overflow-wrap: break-word;
-    }
-    
-    .meta-row {
-      display: flex; 
-      align-items: center; 
-      gap: 4px;
-      font-size: 11px; 
-      color: #777777;
-      height: 16px; 
-      margin-bottom: 4px;
-      direction: ltr; 
-      justify-content: flex-start;
-    }
-    .divider { color: #d1d5db; margin: 0 2px; font-size: 10px; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #555555; font-weight: 600; }
-    .star { color: #ffa41c; font-size: 12px; }
-    
-    /* السعر لا يدفع نفسه للأسفل */
-    .price { 
-      font-size: 16px; 
-      font-weight: 800; 
-      color: #000000 !important; 
-      white-space: nowrap; 
-      direction: ltr; 
-      text-align: start;
-      height: 22px;
-      margin-bottom: 4px; 
-      letter-spacing: -0.5px;
-      overflow: hidden;
-      text-overflow: ellipsis; 
-    }
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' }
+};
 
-    /* 🔥 الشحن يدفع نفسه دائماً إلى أقصى الأسفل */
-    .shipping-row {
-      display: flex; 
-      align-items: center; 
-      gap: 4px;
-      font-size: 11px; 
-      color: #008f00; 
-      font-weight: 600;
-      height: 16px; 
-      margin-top: auto; /* هذا هو السطر السحري */
-      direction: ltr; 
-      justify-content: flex-start;
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
+            }
+        }
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
+        lang = String(lang).split('-')[0].split('_')[0].toLowerCase();
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function removeWidget() {
+    if (widgetWrapper) {
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
     }
+}
 
-    .skeleton { background: #f1f5f9; border-radius: 4px; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    .skeleton-card { display: flex; flex-direction: column; gap: 6px; background: #fff; }
-    .skeleton-img { width: 100%; height: 160px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
-    .skeleton-text { width: 100%; height: 12px; margin-top: 4px; }
-    .skeleton-text.short { width: 60%; }
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-    #loader-more { display: none; text-align: center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background: #fff; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,71,71,0.3); border-top-color: #ff4747; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span> جاري جلب المزيد...</div>
-  </div>
-  <script src="popup.js"></script>
-</body>
-</html>
+        let isOpen = false;
+        let currentSide = 'left'; 
+        let activeSort = 'popular';
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'alifinder-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid #f1f5f9; border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 75px;
+            width: 580px; max-width: 90vw; height: 88vh; 
+            background: #ffffff !important; border-radius: 16px;
+            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden;
+        `;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('popup/popup.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.style.cssText = `
+            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
+        `;
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
+        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                } else {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                }
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
+                font-weight: 700; font-size: 13px; color: #64748b;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
+            `;
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            
+            // تطبيق التدوير الأولي بناءً على الجهة
+            if (currentSide === 'left') {
+                btn.style.transform = 'rotate(180deg)';
+            }
+
+            // 🔥 إضافة تأثير النبض (مع الحفاظ على التدوير إذا كان في اليسار)
+            btn.onmousedown = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
+            };
+            btn.onmouseup = btn.onmouseleave = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+            };
+
+            btn.onclick = () => {
+                const isCurrentlyActive = (activeSort === sortValue);
+                if (isCurrentlyActive && isOpen) {
+                    togglePanel(false); 
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                    togglePanel(true); 
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                }
+            };
+            return btn;
+        };
+
+        const btnRating = createSortBtn(t('rating'), 'rating');
+        const btnPopular = createSortBtn(t('popular'), 'popular');
+        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
+
+        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+        btnPopular.style.color = 'white';
+        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnRating);
+        pillContainer.appendChild(btnPopular);
+        pillContainer.appendChild(btnCheapest);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        function setSide(side) {
+            currentSide = side;
+            
+            // 🔥 تدوير النصوص عند تغيير الجهة
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') {
+                    btn.style.transform = 'rotate(180deg)';
+                } else {
+                    btn.style.transform = 'rotate(0deg)';
+                }
+            });
+
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
+                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
+                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', () => {
+            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) {
+                if (currentSide !== 'left') setSide('left');
+            } else {
+                if (currentSide !== 'right') setSide('right');
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+        });
+    } catch(err) {
+        console.error("AliFinder Error:", err);
+    }
+}
+
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
