@@ -1,137 +1,239 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    :root {
-      --text-main: #1e293b;
-      --text-muted: #64748b;
-      --green: #008f00;
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
+
+// قراءة لغة الموقع التي تم تمريرها من content.js
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
+
+// قاموس الترجمة للنصوص داخل النافذة
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' }
+};
+
+// دالة جلب الترجمة
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key]) 
+        ? POPUP_TRANSLATIONS[siteLang][key] 
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || 0;
+}
+
+// تنسيق عدد المبيعات (مثال: 800+ sold)
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function getPriceClass(priceStr) {
+  if (!priceStr) return 'price-normal';
+  const length = priceStr.length;
+  if (length > 11) return 'price-xs';
+  if (length > 8) return 'price-sm';
+  return 'price-normal';
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+    
+    const price = p?.prices?.salePrice?.formattedPrice || '—';
+    
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = false;
+
+    try {
+      if (p?.shipping && (p.shipping.freeShipping === true || p.shipping.shippingFee === 0 || p.shipping.shippingFee === '0')) {
+        isFreeShipping = true;
+      }
+      if (p?.sellingPoints && Array.isArray(p.sellingPoints)) {
+        const freeTag = p.sellingPoints.find(sp => {
+          let text = '';
+          if (typeof sp === 'string') text = sp;
+          else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
+          if (typeof text !== 'string') return false;
+          const s = text.toLowerCase();
+          // التعرف على الشحن المجاني بجميع اللغات
+          return s.includes('free shipping') || s.includes('бесплатная доставка') || s.includes('бесплатно') || s.includes('livraison gratuite') || s.includes('envío gratis') || s.includes('شحن مجاني') || s.includes('مجاني');
+        });
+        if (freeTag) isFreeShipping = true;
+      }
+    } catch (err) {}
+
+    // أيقونة الشحن (ورقة شجر خضراء مطابقة للصورة)
+    const leafIcon = `<svg width="11" height="11" viewBox="0 0 24 24" fill="#008f00" xmlns="http://www.w3.org/2000/svg"><path d="M17.5,2.5C13.3,2.5 8.4,5 5.4,9.6C3,13.3 2.5,17.8 2.5,21.5C6.2,21.5 10.7,21 14.4,18.6C19,15.6 21.5,10.7 21.5,6.5C21.5,4.5 20.5,2.5 17.5,2.5Z"/></svg>`;
+
+    let shippingHtml = '';
+    if (isFreeShipping) {
+      shippingHtml = `<div class="shipping-row">${leafIcon} <span>${msgFreeShipping}</span></div>`;
+    } else {
+      shippingHtml = `<div class="shipping-row" style="visibility: hidden;"></div>`;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    
-    body { 
-      width: 100%; height: 100vh; 
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; 
-      background: #ffffff; /* خلفية بيضاء نظيفة */
-      display: flex; flex-direction: column; overflow: hidden; 
-    }
-    
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-
-    #results { flex: 1; overflow-y: auto; padding: 8px; width: 100%; }
-    
-    /* شبكة 3 أعمدة */
-    .grid { 
-      display: grid; 
-      grid-template-columns: repeat(3, 1fr); 
-      gap: 12px; /* مسافة بين المنتجات */
-      width: 100%; 
-      align-content: start; 
-    }
-    
-    /* 🔥 الكارت مسطح تماماً (بدون حدود أو ظلال) */
-    .product-card { 
-      display: flex; flex-direction: column; 
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: transparent;
-    }
-    
-    /* حاوية الصورة المربعة */
-    .img-box { 
-      width: 100%; 
-      aspect-ratio: 1 / 1; 
-      background: #f8fafc; 
-      position: relative;
-      overflow: hidden; 
-      border-radius: 6px; /* زوايا دائرية للصورة فقط */
-    }
-    .img-box img { 
-      width: 100%; height: 100%; object-fit: cover; 
-    }
-    
-    /* زر + على الصورة */
-    .add-btn {
-      position: absolute;
-      bottom: 6px;
-      right: 6px;
-      width: 26px;
-      height: 26px;
-      background: white;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.2);
-      color: #333;
-      font-size: 16px;
-      font-weight: bold;
-      cursor: pointer;
-      line-height: 1;
-    }
-    
-    /* تفاصيل المنتج */
-    .info { padding: 6px 0; display: flex; flex-direction: column; }
-    
-    /* العنوان */
-    .title { 
-      font-size: 12px; color: #333; line-height: 1.3; 
-      height: 32px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; margin-bottom: 4px; 
-      unicode-bidi: plaintext; text-align: start; 
-    }
-    
-    /* الشحن */
-    .shipping-row {
-      display: flex; align-items: center; gap: 3px;
-      font-size: 10px; color: var(--green); font-weight: 600;
-      margin-bottom: 3px; height: 14px;
-      unicode-bidi: plaintext; text-align: start;
-    }
-    
-    /* المبيعات والتقييم */
-    .meta-row {
-      display: flex; align-items: center; gap: 6px;
-      font-size: 10px; color: var(--text-muted);
-      margin-bottom: 4px; height: 14px;
-      direction: ltr; justify-content: flex-end;
-    }
-    .sold { color: #888; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #555; font-weight: 600; }
-    .star { color: #ffa41c; font-size: 11px; }
-    
-    /* السعر */
-    .price { 
-      font-size: 16px; font-weight: 800; color: #000; 
-      white-space: nowrap; direction: ltr; text-align: start;
+    // سطر المبيعات والتقييم
+    let metaHtml = '';
+    if (soldText || rating) {
+      metaHtml = `<div class="meta-row">
+        ${soldText ? `<span class="sold">${soldText}</span>` : ''}
+        ${soldText && rating ? `<span style="color:#cbd5e1">|</span>` : ''}
+        ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+      </div>`;
+    } else {
+      metaHtml = `<div class="meta-row" style="visibility: hidden;"></div>`;
     }
 
-    /* هياكل التحميل */
-    .skeleton { background: #e2e8f0; border-radius: 4px; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    .skeleton-card { display: flex; flex-direction: column; gap: 6px; }
-    .skeleton-img { width: 100%; aspect-ratio: 1/1; border-radius: 6px; }
-    .skeleton-text { width: 100%; height: 12px; margin-top: 4px; }
-    .skeleton-text.short { width: 60%; }
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+    a.setAttribute('dir', 'auto'); 
 
-    #loader-more { display: none; text-align: center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,71,71,0.3); border-top-color: #ff4747; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span> جاري جلب المزيد...</div>
-  </div>
-  <script src="popup.js"></script>
-</body>
-</html>
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.src='https://ae01.alicdn.com/kf/Sb5d29e2d4f6748f89b0a6f5b6f4f2c2cM.png'">
+        <div class="add-btn">+</div>
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${shippingHtml}
+        ${metaHtml}
+        <div class="price">${price}</div>
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
+  }
+}
+
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+  
+  if (!globalProducts || globalProducts.length === 0) { 
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`; 
+    return; 
+  }
+  
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop(); 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+  
+  if (res.error) { 
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`; 
+    return; 
+  }
+  
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000)); 
+  
+  isLoading = false; 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+// استقبال أمر الترتيب من الأزرار الجانبية
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop(); 
+      if (!isLoading && globalProducts.length > 0) {
+        render(false); 
+      }
+    }
+  }
+});
+
+loadInitial();
