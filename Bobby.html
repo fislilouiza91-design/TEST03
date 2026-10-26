@@ -29,18 +29,18 @@
       align-content: start; 
     }
     
-    /* 🔥 إضافة تأثير الارتفاع (Hover) */
+    /* تأثير الارتفاع (Hover) */
     .product-card { 
       display: flex; flex-direction: column; 
       text-decoration: none; color: inherit;
       position: relative;
       background: #ffffff !important;
       width: 100%;
-      transition: transform 0.25s ease; /* حركة ناعمة */
+      transition: transform 0.25s ease; 
     }
     
     .product-card:hover { 
-      transform: translateY(-5px); /* الكارت يرتفع 5 بكسل */
+      transform: translateY(-5px); 
     }
     
     /* حاوية الصورة */
@@ -53,10 +53,9 @@
       border-radius: 0px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
       margin-bottom: 4px;
-      transition: box-shadow 0.25s ease; /* حركة ناعمة للظل */
+      transition: box-shadow 0.25s ease; 
     }
     
-    /* زيادة الظل قليلاً عند تمرير الماوس ليعطي إحساساً بالعمق */
     .product-card:hover .img-box {
       box-shadow: 0 8px 16px rgba(0,0,0,0.15);
     }
@@ -91,20 +90,6 @@
       text-align: start; 
     }
     
-    /* الشحن */
-    .shipping-row {
-      display: flex; 
-      align-items: center; 
-      gap: 4px;
-      font-size: 11px; 
-      color: #008f00; 
-      font-weight: 600;
-      height: 16px; 
-      margin-bottom: 2px;
-      direction: ltr; 
-      justify-content: flex-start;
-    }
-    
     /* المبيعات والتقييم */
     .meta-row {
       display: flex; 
@@ -121,7 +106,7 @@
     .rating { display: flex; align-items: center; gap: 2px; color: #555555; font-weight: 600; }
     .star { color: #ffa41c; font-size: 12px; }
     
-    /* السعر */
+    /* 🔥 السعر (تمت إزالة margin-top: auto منه) */
     .price { 
       font-size: 16px; 
       font-weight: 800; 
@@ -130,8 +115,22 @@
       direction: ltr; 
       text-align: start;
       height: 22px;
-      margin-top: auto; 
+      margin-bottom: 4px; 
       letter-spacing: -0.5px;
+    }
+
+    /* 🔥 الشحن (تمت إضافة margin-top: auto له ليدفع نفسه للأسفل) */
+    .shipping-row {
+      display: flex; 
+      align-items: center; 
+      gap: 4px;
+      font-size: 11px; 
+      color: #008f00; 
+      font-weight: 600;
+      height: 16px; 
+      margin-top: auto; 
+      direction: ltr; 
+      justify-content: flex-start;
     }
 
     /* هياكل التحميل */
