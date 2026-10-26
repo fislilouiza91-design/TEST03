@@ -12,8 +12,6 @@
       display: flex; flex-direction: column; overflow: hidden; 
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
-      
-      /* 🔥 منع الصفحة الخلفية من التمرير */
       overscroll-behavior: none; 
     }
     
@@ -29,8 +27,6 @@
       width: 100%; 
       background: #ffffff; 
       scrollbar-gutter: stable both-edges;
-      
-      /* 🔥 منع تمرير الصفحة الخلفية عند الوصول للنهاية */
       overscroll-behavior-y: contain; 
     }
     
@@ -165,7 +161,9 @@
       <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
       <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
     </div>
-    <div id="loader-more"><span class="spinner"></span> جاري جلب المزيد...</div>
+    
+    <!-- 🔥 تم إزالة النص الثابت من هنا -->
+    <div id="loader-more"><span class="spinner"></span></div>
   </div>
   <script src="popup.js"></script>
 </body>
