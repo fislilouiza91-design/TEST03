@@ -8,13 +8,26 @@ const MIN_COOLDOWN_MS = 3000;
 const urlParams = new URLSearchParams(window.location.search);
 const siteLang = urlParams.get('siteLang') || 'en';
 
+// 🌍 قاموس نصوص النافذة (17 لغة)
 const POPUP_TRANSLATIONS = {
     'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
     'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
-    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
     'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
     'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
-    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' }
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
+    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
+    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
+    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
+    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
+    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
+    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
+    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
+    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
+    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
+    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
+    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' }
 };
 
 const t_popup = (key) => {
@@ -28,7 +41,6 @@ const msgNoProducts = t_popup('no_products');
 const msgLoadingMore = t_popup('loading_more');
 const msgSold = t_popup('sold');
 
-// تحديث نص زر التحميل السفلي فور تشغيل السكريبت
 if (loaderMore) {
     loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
 }
@@ -108,7 +120,21 @@ function createCard(p) {
           else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
           if (typeof text !== 'string') return false;
           const s = text.toLowerCase();
-          return s.includes('free shipping') || s.includes('livraison gratuite') || s.includes('envío gratis') || s.includes('شحن مجاني') || s.includes('مجاني') || s.includes('бесплатно');
+          
+          // 🔥 البحث الشامل عن الشحن المجاني بجميع اللغات
+          return s.includes('free shipping') || 
+                 s.includes('livraison gratuite') || 
+                 s.includes('envío gratis') || 
+                 s.includes('frete grátis') || s.includes('frete gratis') || s.includes('envio grátis') || s.includes('envio gratis') || 
+                 s.includes('spedizione gratuita') || 
+                 s.includes('gratis verzending') || 
+                 s.includes('darmowa dostawa') || 
+                 s.includes('ücretsiz kargo') || 
+                 s.includes('送料無料') || s.includes('무료 배송') || 
+                 s.includes('ส่งฟรี') || s.includes('miễn phí vận chuyển') || 
+                 s.includes('gratis ongkir') || s.includes('משלוח חינם') || 
+                 s.includes('безкоштовна доставка') || s.includes('бесплатная доставка') || s.includes('бесплатно') || 
+                 s.includes('شحن مجاني') || s.includes('مجاني');
         });
         if (freeTag) isFreeShipping = true;
       }
@@ -131,7 +157,6 @@ function createCard(p) {
     const a = document.createElement('a');
     a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
     
-    // 🔥 إضافة dir="auto" لكل نص لضمان اتجاه صحيح
     a.innerHTML = `
       <div class="img-box">
         <img src="${img}" onerror="this.style.display='none'">
