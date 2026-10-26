@@ -58,6 +58,23 @@ if (loaderMore) {
     loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
 }
 
+function showSkeletons() {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" dir="auto" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  grid.innerHTML = `
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+  `;
+}
+
 function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
 
 async function fetchProducts(page, streamId) {
@@ -190,9 +207,8 @@ function render(appendOnly = false, newProducts = []) {
     grid = document.getElementById('main-grid');
   }
   
-  // 🔥 التعديل هنا: لا تمسح الهياكل إذا كنا في طور التحميل الأولي
   if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
-    if (isLoading) return; // اترك الهياكل الرمادية (Skeletons) كما هي
+    if (isLoading) return; 
     grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`; 
     return; 
   }
@@ -215,7 +231,7 @@ async function loadInitial() {
   scrollToTop(); 
   if(loaderMore) loaderMore.style.display = 'none';
   
-  // نترك الهياكل الرمادية تظهر (موجودة في HTML)
+  showSkeletons();
   
   lastRequestTime = Date.now();
   const res = await fetchProducts(1, null) || {};
@@ -228,8 +244,6 @@ async function loadInitial() {
   
   globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
   hasMore = globalProducts.length >= 20;
-  
-  // الآن بعد أن وصلت البيانات، سيتم مسح الهياكل وعرض المنتجات
   render(false); scrollToTop();
 }
 
@@ -265,16 +279,22 @@ resultsEl.addEventListener('scroll', () => {
   }, 300);
 });
 
+// 🔥 التعديل هنا: الترتيب المحلي فقط دون تصفير أو إعادة تحميل
 window.addEventListener('message', (event) => {
   if (event.data && event.data.action === 'SORT') {
     const newSort = event.data.sort;
+    
+    // إذا كان الترتيب مختلفاً عن الحالي، قم بإعادة الترتيب
     if (currentSort !== newSort) {
       currentSort = newSort;
-      scrollToTop(); 
+      scrollToTop(); // العودة لأعلى الصفحة
+      
+      // لا نقوم بمسح المنتجات أو عرض الهياكل، بل نعيد ترتيب ما هو موجود فقط
       if (!isLoading && globalProducts.length > 0) {
         render(false); 
       }
     }
+    // إذا كان نفس الترتيب (currentSort === newSort)، فلن يحدث أي شيء
   }
 });
 
