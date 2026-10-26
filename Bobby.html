@@ -1,188 +1,279 @@
-{
-  "appName": { "message": "AliFinder - 最优惠价格" },
-  "appDesc": { "message": "在AliExpress上以更优惠的价格寻找相同的产品。" },
-  "btn_cheapest": { "message": "最便宜" },
-  "btn_popular": { "message": "最畅销" },
-  "btn_rating": { "message": "评分最高" },
-  "free_shipping": { "message": "免运费" },
-  "no_products": { "message": "未找到产品。" },
-  "loading_more": { "message": "正在加载更多..." },
-  "sold": { "message": "已售" }
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени' }
+};
+
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
+            }
+        }
+        
+        let lowerLang = String(lang).toLowerCase();
+        if (lowerLang.includes('zh-cn') || lowerLang.includes('zh_cn')) return 'zh_CN';
+        if (lowerLang.includes('zh-tw') || lowerLang.includes('zh_tw')) return 'zh_TW';
+        
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
+        
+        lang = lowerLang.split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
 }
 
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
 
-{
-  "appName": { "message": "AliFinder - 最優惠價格" },
-  "appDesc": { "message": "在AliExpress上以更優惠的價格尋找相同的產品。" },
-  "btn_cheapest": { "message": "最便宜" },
-  "btn_popular": { "message": "最暢銷" },
-  "btn_rating": { "message": "評分最高" },
-  "free_shipping": { "message": "免運費" },
-  "no_products": { "message": "未找到產品。" },
-  "loading_more": { "message": "正在載入更多..." },
-  "sold": { "message": "已售" }
+function removeWidget() {
+    if (widgetWrapper) {
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
+    }
 }
 
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-{
-  "appName": { "message": "AliFinder - Harga Terbaik" },
-  "appDesc": { "message": "Cari produk yang sama di AliExpress dengan harga yang lebih baik." },
-  "btn_cheapest": { "message": "Paling Murah" },
-  "btn_popular": { "message": "Paling Laris" },
-  "btn_rating": { "message": "Penilaian Terbaik" },
-  "free_shipping": { "message": "Penghantaran Percuma" },
-  "no_products": { "message": "Tiada produk ditemui." },
-  "loading_more": { "message": "Memuatkan lagi..." },
-  "sold": { "message": "terjual" }
+        let isOpen = false;
+        let currentSide = 'left'; 
+        let activeSort = 'popular';
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'alifinder-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid #f1f5f9; border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 75px;
+            width: 580px; max-width: 90vw; height: 88vh; 
+            background: #ffffff !important; border-radius: 16px;
+            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden;
+        `;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('popup/popup.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.style.cssText = `
+            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
+        `;
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
+        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                } else {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                }
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
+                font-weight: 700; font-size: 13px; color: #64748b;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
+            `;
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            
+            if (currentSide === 'left') {
+                btn.style.transform = 'rotate(180deg)';
+            }
+
+            btn.onmousedown = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
+            };
+            btn.onmouseup = btn.onmouseleave = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+            };
+
+            btn.onclick = () => {
+                const isCurrentlyActive = (activeSort === sortValue);
+                if (isCurrentlyActive && isOpen) {
+                    togglePanel(false); 
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                    togglePanel(true); 
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                }
+            };
+            return btn;
+        };
+
+        const btnRating = createSortBtn(t('rating'), 'rating');
+        const btnPopular = createSortBtn(t('popular'), 'popular');
+        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
+
+        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+        btnPopular.style.color = 'white';
+        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnRating);
+        pillContainer.appendChild(btnPopular);
+        pillContainer.appendChild(btnCheapest);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        function setSide(side) {
+            currentSide = side;
+            
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') {
+                    btn.style.transform = 'rotate(180deg)';
+                } else {
+                    btn.style.transform = 'rotate(0deg)';
+                }
+            });
+
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
+                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
+                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', () => {
+            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) {
+                if (currentSide !== 'left') setSide('left');
+            } else {
+                if (currentSide !== 'right') setSide('right');
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+        });
+    } catch(err) {
+        console.error("AliFinder Error:", err);
+    }
 }
 
-
-{
-  "appName": { "message": "AliFinder - Pinakamahusay na Presyo" },
-  "appDesc": { "message": "Maghanap ng magkatulad na produkto sa AliExpress sa mas magandang presyo." },
-  "btn_cheapest": { "message": "Pinakamura" },
-  "btn_popular": { "message": "Pinakamabenta" },
-  "btn_rating": { "message": "Pinakamataas na rating" },
-  "free_shipping": { "message": "Libreng pagpapadala" },
-  "no_products": { "message": "Walang nahanap na produkto." },
-  "loading_more": { "message": "Naglo-load ng higit pa..." },
-  "sold": { "message": "nabenta" }
-}
-
-
-{
-  "appName": { "message": "AliFinder - सर्वोत्तम मूल्य" },
-  "appDesc": { "message": "बेहतर कीमत पर AliExpress पर समान उत्पाद खोजें।" },
-  "btn_cheapest": { "message": "सबसे सस्ता" },
-  "btn_popular": { "message": "सर्वाधिक बिकने वाला" },
-  "btn_rating": { "message": "सर्वोच्च रेटेड" },
-  "free_shipping": { "message": "मुफ्त शिपिंग" },
-  "no_products": { "message": "कोई उत्पाद नहीं मिला।" },
-  "loading_more": { "message": "और लोड हो रहा है..." },
-  "sold": { "message": "बिक गया" }
-}
-
-
-{
-  "appName": { "message": "AliFinder - Bästa Pris" },
-  "appDesc": { "message": "Hitta identiska produkter på AliExpress till ett bättre pris." },
-  "btn_cheapest": { "message": "Billigast" },
-  "btn_popular": { "message": "Bästsäljare" },
-  "btn_rating": { "message": "Bäst betyg" },
-  "free_shipping": { "message": "Fri frakt" },
-  "no_products": { "message": "Inga produkter hittades." },
-  "loading_more": { "message": "Laddar mer..." },
-  "sold": { "message": "sålda" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Bedste Pris" },
-  "appDesc": { "message": "Find identiske produkter på AliExpress til en bedre pris." },
-  "btn_cheapest": { "message": "Billigste" },
-  "btn_popular": { "message": "Bedst sælgende" },
-  "btn_rating": { "message": "Bedst bedømt" },
-  "free_shipping": { "message": "Gratis fragt" },
-  "no_products": { "message": "Ingen produkter fundet." },
-  "loading_more": { "message": "Indlæser mere..." },
-  "sold": { "message": "solgt" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Paras Hinta" },
-  "appDesc": { "message": "Löydä identtiset tuotteet AliExpressistä parempaan hintaan." },
-  "btn_cheapest": { "message": "Halvin" },
-  "btn_popular": { "message": "Myydyin" },
-  "btn_rating": { "message": "Parhaiten arvosteltu" },
-  "free_shipping": { "message": "Ilmainen toimitus" },
-  "no_products": { "message": "Tuotteita ei löytynyt." },
-  "loading_more": { "message": "Ladataan lisää..." },
-  "sold": { "message": "myyty" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Beste Pris" },
-  "appDesc": { "message": "Finn identiske produkter på AliExpress til en bedre pris." },
-  "btn_cheapest": { "message": "Billigst" },
-  "btn_popular": { "message": "Bestselger" },
-  "btn_rating": { "message": "Best vurdert" },
-  "free_shipping": { "message": "Gratis frakt" },
-  "no_products": { "message": "Ingen produkter funnet." },
-  "loading_more": { "message": "Laster mer..." },
-  "sold": { "message": "solgt" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Nejlepší Cena" },
-  "appDesc": { "message": "Najděte identické produkty na AliExpress za lepší cenu." },
-  "btn_cheapest": { "message": "Nejlevnější" },
-  "btn_popular": { "message": "Nejprodávanější" },
-  "btn_rating": { "message": "Nejlépe hodnocené" },
-  "free_shipping": { "message": "Doprava zdarma" },
-  "no_products": { "message": "Nebyly nalezeny žádné produkty." },
-  "loading_more": { "message": "Načítání dalších..." },
-  "sold": { "message": "prodáno" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Cel Mai Bun Preț" },
-  "appDesc": { "message": "Găsiți produse identice pe AliExpress la un preț mai bun." },
-  "btn_cheapest": { "message": "Cel mai ieftin" },
-  "btn_popular": { "message": "Cele mai vândute" },
-  "btn_rating": { "message": "Cele mai bine evaluate" },
-  "free_shipping": { "message": "Transport gratuit" },
-  "no_products": { "message": "Nu s-au găsit produse." },
-  "loading_more": { "message": "Se încarcă mai multe..." },
-  "sold": { "message": "vândute" }
-}
-
-
-
-{
-  "appName": { "message": "AliFinder - Legjobb Ár" },
-  "appDesc": { "message": "Találjon azonos termékeket az AliExpressen jobb áron." },
-  "btn_cheapest": { "message": "Legolcsóbb" },
-  "btn_popular": { "message": "Legkelendőbb" },
-  "btn_rating": { "message": "Legjobbra értékelt" },
-  "free_shipping": { "message": "Ingyenes szállítás" },
-  "no_products": { "message": "Nem található termék." },
-  "loading_more": { "message": "Továbbiak betöltése..." },
-  "sold": { "message": "eladva" }
-}
-
-
-
-
-{
-  "appName": { "message": "AliFinder - Καλύτερη Τιμή" },
-  "appDesc": { "message": "Βρείτε πανομοιότυπα προϊόντα στο AliExpress σε καλύτερη τιμή." },
-  "btn_cheapest": { "message": "Φθηνότερα" },
-  "btn_popular": { "message": "Δημοφιλέστερα" },
-  "btn_rating": { "message": "Καλύτερα αξιολογημένα" },
-  "free_shipping": { "message": "Δωρεάν αποστολή" },
-  "no_products": { "message": "Δεν βρέθηκαν προϊόντα." },
-  "loading_more": { "message": "Φόρτωση περισσότερων..." },
-  "sold": { "message": "πωλήθηκαν" }
-}
-
-
-{
-  "appName": { "message": "AliFinder - Най-добра цена" },
-  "appDesc": { "message": "Намерете идентични продукти в AliExpress на по-добра цена." },
-  "btn_cheapest": { "message": "Най-евтини" },
-  "btn_popular": { "message": "Най-продавани" },
-  "btn_rating": { "message": "Най-високо оценени" },
-  "free_shipping": { "message": "Безплатна доставка" },
-  "no_products": { "message": "Няма намерени продукти." },
-  "loading_more": { "message": "Зареждане на още..." },
-  "sold": { "message": "продадени" }
-}
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
