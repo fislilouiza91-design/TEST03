@@ -1,901 +1,415 @@
-// src/smart-pipeline.js - 3 مزودين + Endpoint الذهبي
-import fetch from 'node-fetch';
-import crypto from 'crypto';
-import { createClient } from '@libsql/client';
-import { generateCrossVariations, generateFromProductTitles, saveVariations } from './keyword-variations.js';
-
-const db = createClient({
-  url: process.env.TURSO_URL,
-  authToken: process.env.TURSO_TOKEN,
-});
-
-const APIFY_TOKEN = process.env.APIFY_TOKEN;
-const SCRAPINGANT_KEY = process.env.SCRAPINGANT_API_KEY;
-const SCRAPERAPI_KEY = process.env.SCRAPERAPI_API_KEY;
-const BRIGHTDATA_KEY = process.env.BRIGHTDATA_API_KEY;
-const BRIGHTDATA_ZONE = process.env.BRIGHTDATA_ZONE || 'aliexpress_unlocker';
-
-// ═══════════════════════════════════════════
-// الإعدادات
-// ═══════════════════════════════════════════
-
-const DISCOVERY_KEYWORDS = 10;
-const ENRICHMENT_KEYWORDS = 35;      // ⭐ رفعنا من 30 إلى 35 (استغلال أفضل)
-const PAGES_PER_KEYWORD = 3;
-const MAX_CONSECUTIVE_FAILURES = 3;
-const APIFY_MAX_ITEMS = 50;
-
-const FALLBACK_SEEDS = [
-  'bluetooth earphones', 'women dress', 'men t-shirt',
-  'kitchen knife', 'makeup brush', 'yoga mat',
-  'kids toy', 'car charger', 'dog collar', 'drill bit',
-];
-
-const COMMON_WORDS = new Set([
-  'for','the','and','with','from','new','hot','best','free','high','pro',
-  'sale','shipping','pcs','piece','set','plus','original','official','good',
-  'quality','smart','portable','wireless','digital','type','model','color',
-  'size','men','women','kids','baby','without','use','used','home',
-  'car','phone','case','made','material','style','fashion','design','item',
-  'top','super','ultra','mini','max','premium','fast','pack','box',
-]);
-
-// ⭐ حالة المزودين الثلاثة
-const providerState = {
-  scrapingant: { status: 'active', consecutiveFailures: 0, reason: null },
-  brightdata: { status: 'active', consecutiveFailures: 0, reason: null },
-  scraperapi: { status: 'active', consecutiveFailures: 0, reason: null },
-};
-
-// ═══════════════════════════════════════════
-// 1. استرجاع/حفظ حالة المزودين
-// ═══════════════════════════════════════════
-
-async function restoreProviderState() {
-  try {
-    const saved = await db.execute(
-      `SELECT value FROM system_state WHERE key = 'providers_status'`
-    );
-    if (saved.rows.length === 0) return;
-
-    const prev = JSON.parse(saved.rows[0].value);
-    const ageHours = (Date.now() - prev.savedAt) / (1000 * 60 * 60);
-    if (ageHours > 24) {
-      console.log('🔄 مضى 24+ ساعة — إعادة تعيين الحالة');
-      return;
-    }
-
-    for (const key of ['scrapingant', 'brightdata', 'scraperapi']) {
-      if (prev[key]?.status === 'disabled' && ageHours < 24) {
-        providerState[key].status = 'disabled';
-        providerState[key].reason = prev[key].reason;
-        console.log(`⚠️ ${key}: معطل (من الدورة السابقة)`);
-      }
-    }
-  } catch (e) {}
+--- _locales/en/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Find identical products on AliExpress for a better price." },
+  "btn_cheapest": { "message": "Cheapest" },
+  "btn_popular": { "message": "Best Selling" },
+  "btn_rating": { "message": "Best Rated" },
+  "free_shipping": { "message": "Free shipping" },
+  "no_products": { "message": "No products found." },
+  "loading_more": { "message": "Loading more..." },
+  "sold": { "message": "sold" }
 }
 
-async function saveProviderState() {
-  try {
-    await db.execute({
-      sql: `INSERT OR REPLACE INTO system_state (key, value, updated_at) 
-            VALUES ('providers_status', ?, ?)`,
-      args: [JSON.stringify({
-        scrapingant: providerState.scrapingant,
-        brightdata: providerState.brightdata,
-        scraperapi: providerState.scraperapi,
-        savedAt: Date.now(),
-      }), Date.now()],
-    });
-  } catch (e) {}
+--- _locales/ar/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "اعثر على منتجات مماثلة على AliExpress بسعر أفضل." },
+  "btn_cheapest": { "message": "الأرخص" },
+  "btn_popular": { "message": "الأكثر طلباً" },
+  "btn_rating": { "message": "الأكثر تقيماً" },
+  "free_shipping": { "message": "شحن مجاني" },
+  "no_products": { "message": "لم يتم العثور على منتجات." },
+  "loading_more": { "message": "جاري جلب المزيد..." },
+  "sold": { "message": "مباع" }
 }
 
-// ═══════════════════════════════════════════
-// 2. فحص صحة Apify
-// ═══════════════════════════════════════════
-
-async function checkApifyHealth() {
-  console.log('🏥 فحص صحة Apify...');
-  try {
-    const actorId = 'apt_marble~aliexpress-search-scraper';
-    const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-
-    const response = await fetch(runUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keyword: 'bluetooth earphones', country: 'us', maxItems: 1 }),
-      timeout: 60000,
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      if (err.includes('insufficient') || err.includes('limit') || err.includes('402')) {
-        console.log('  ❌ Apify: نفد الرصيد');
-        return { healthy: false, reason: 'no_credit' };
-      }
-      return { healthy: false, reason: 'error' };
-    }
-
-    const items = await response.json();
-    if (Array.isArray(items) && items.length > 0) {
-      console.log('  ✅ Apify: يعمل');
-      return { healthy: true };
-    }
-    return { healthy: false, reason: 'empty' };
-  } catch (error) {
-    console.log(`  ❌ Apify: ${error.message.substring(0, 60)}`);
-    return { healthy: false, reason: 'network' };
-  }
+--- _locales/bg/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Намерете идентични продукти в AliExpress на по-добра цена." },
+  "btn_cheapest": { "message": "Най-евтини" },
+  "btn_popular": { "message": "Най-продавани" },
+  "btn_rating": { "message": "Най-високо оценени" },
+  "free_shipping": { "message": "Безплатна доставка" },
+  "no_products": { "message": "Няма намерени продукти." },
+  "loading_more": { "message": "Зареждане на още..." },
+  "sold": { "message": "продадени" }
 }
 
-// ═══════════════════════════════════════════
-// 3. اختيار Seeds
-// ═══════════════════════════════════════════
-
-async function pickDiscoverySeeds(count) {
-  const existing = await db.execute({
-    sql: `SELECT keyword, category, source, run_count, last_run_at
-          FROM keywords_pipeline
-          WHERE enabled = 1
-          ORDER BY 
-            CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            run_count ASC, last_run_at ASC
-          LIMIT ?`,
-    args: [count * 3],
-  });
-
-  if (existing.rows.length === 0) {
-    for (const seed of FALLBACK_SEEDS) {
-      await db.execute({
-        sql: `INSERT OR IGNORE INTO keywords_pipeline (keyword, source, priority, created_at)
-              VALUES (?, 'fallback_seed', 1, ?)`,
-        args: [seed, Date.now()],
-      });
-    }
-    const retry = await db.execute({
-      sql: `SELECT keyword, category, source FROM keywords_pipeline
-            WHERE enabled = 1 ORDER BY run_count ASC LIMIT ?`,
-      args: [count],
-    });
-    return retry.rows;
-  }
-
-  const byCategory = new Map();
-  for (const row of existing.rows) {
-    const cat = row.category || 'unknown';
-    if (!byCategory.has(cat)) byCategory.set(cat, []);
-    byCategory.get(cat).push(row);
-  }
-
-  const picked = [];
-  const cats = [...byCategory.keys()];
-  while (picked.length < count && cats.length > 0) {
-    let added = false;
-    for (const cat of cats) {
-      const rows = byCategory.get(cat);
-      if (rows.length > 0 && picked.length < count) {
-        picked.push(rows.shift());
-        added = true;
-      }
-    }
-    if (!added) break;
-  }
-
-  return picked.slice(0, count);
+--- _locales/cs/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Najděte identické produkty na AliExpress za lepší cenu." },
+  "btn_cheapest": { "message": "Nejlevnější" },
+  "btn_popular": { "message": "Nejprodávanější" },
+  "btn_rating": { "message": "Nejlépe hodnocené" },
+  "free_shipping": { "message": "Doprava zdarma" },
+  "no_products": { "message": "Nebyly nalezeny žádné produkty." },
+  "loading_more": { "message": "Načítání dalších..." },
+  "sold": { "message": "prodáno" }
 }
 
-// ═══════════════════════════════════════════
-// 4. Apify Discovery
-// ═══════════════════════════════════════════
-
-async function runApifyDiscovery() {
-  console.log('\n🎭 Apify Discovery...');
-  const seeds = await pickDiscoverySeeds(DISCOVERY_KEYWORDS);
-  console.log(`  📋 ${seeds.length} كلمة\n`);
-
-  let totalProducts = 0;
-  let totalKeywords = 0;
-
-  for (const seed of seeds) {
-    try {
-      console.log(`  🔍 "${seed.keyword}"`);
-      const items = await runApifyActor(seed.keyword, APIFY_MAX_ITEMS);
-
-      if (!Array.isArray(items) || items.length === 0) {
-        await markProcessed(seed.keyword, false);
-        continue;
-      }
-
-      const result = await saveApifyProducts(items, seed.keyword);
-      totalProducts += result.saved;
-      totalKeywords += result.newKeywords;
-
-      console.log(`     ✅ ${result.saved} منتج | ${result.newKeywords} كلمة`);
-      await markProcessed(seed.keyword, result.saved > 0);
-      await new Promise(r => setTimeout(r, 1000));
-    } catch (e) {
-      console.log(`     ❌ ${e.message.substring(0, 50)}`);
-      await markProcessed(seed.keyword, false);
-    }
-  }
-
-  return { totalProducts, totalKeywords };
+--- _locales/da/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Find identiske produkter på AliExpress til en bedre pris." },
+  "btn_cheapest": { "message": "Billigste" },
+  "btn_popular": { "message": "Bedst sælgende" },
+  "btn_rating": { "message": "Bedst bedømt" },
+  "free_shipping": { "message": "Gratis fragt" },
+  "no_products": { "message": "Ingen produkter fundet." },
+  "loading_more": { "message": "Indlæser mere..." },
+  "sold": { "message": "solgt" }
 }
 
-// ═══════════════════════════════════════════
-// 5. Enrichment
-// ═══════════════════════════════════════════
-
-async function runEnrichment(isEmergency = false) {
-  if (isEmergency) {
-    console.log('\n🚨 Emergency Mode - توليد variations...');
-    const crossVars = await generateCrossVariations();
-    const titleVars = await generateFromProductTitles();
-    const inserted = await saveVariations([...crossVars, ...titleVars].slice(0, 50));
-    console.log(`  ✅ ${inserted} كلمة أُضيفت`);
-  }
-
-  const keywords = await pickKeywordsFromDB(ENRICHMENT_KEYWORDS);
-  console.log(`\n📋 ${keywords.length} كلمة (${PAGES_PER_KEYWORD} صفحات)\n`);
-
-  if (keywords.length === 0) return { totalSaved: 0 };
-
-  let totalSaved = 0;
-  let stats = { scrapingant: 0, brightdata: 0, scraperapi: 0 };
-  let blocked = false;
-
-  for (const row of keywords) {
-    const anyActive = providerState.scrapingant.status === 'active' ||
-                      providerState.brightdata.status === 'active' ||
-                      providerState.scraperapi.status === 'active';
-
-    if (!anyActive) {
-      blocked = true;
-      break;
-    }
-
-    console.log(`\n🔍 "${row.keyword}"`);
-    let keywordSaved = 0;
-
-    for (let page = 1; page <= PAGES_PER_KEYWORD; page++) {
-      try {
-        const { html, source } = await fetchWithFallback(row.keyword, page);
-
-        if (!html) {
-          console.log(`      ⛔ p${page}: كل المزودين فشلوا`);
-          blocked = true;
-          break;
-        }
-
-        stats[source]++;
-
-        if (html.length < 5000) {
-          console.log(`      ⚠️ p${page}: HTML صغير (${html.length}) — محظور`);
-          continue;
-        }
-
-        const products = parseItems(html);
-        const saved = await saveProductsBatch(products, row.keyword);
-
-        console.log(`      ✅ p${page}: ${products.length} حلّل، ${saved} مخزّن (${source})`);
-        keywordSaved += saved;
-
-        if (products.length === 0) {
-          console.log(`      ⏹️ لا مزيد من النتائج`);
-          break;
-        }
-
-        await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
-
-      } catch (error) {
-        console.log(`      ❌ p${page}: ${error.message.substring(0, 60)}`);
-      }
-    }
-
-    if (blocked) break;
-
-    if (keywordSaved > 0) {
-      console.log(`  📦 "${row.keyword}": ${keywordSaved} منتج`);
-      totalSaved += keywordSaved;
-    }
-
-    await markProcessed(row.keyword, keywordSaved > 0);
-  }
-
-  console.log(`\n📊 Enrichment:`);
-  console.log(`  📦 مخزّن: ${totalSaved}`);
-  console.log(`  🔵 ScrapingAnt: ${stats.scrapingant} | 🟣 BrightData: ${stats.brightdata} | 🟠 ScraperAPI: ${stats.scraperapi}`);
-
-  return { totalSaved, blocked };
+--- _locales/de/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Finden Sie identische Produkte auf AliExpress zu einem besseren Preis." },
+  "btn_cheapest": { "message": "Günstigste" },
+  "btn_popular": { "message": "Bestseller" },
+  "btn_rating": { "message": "Am besten bewertet" },
+  "free_shipping": { "message": "Kostenloser Versand" },
+  "no_products": { "message": "Keine Produkte gefunden." },
+  "loading_more": { "message": "Mehr laden..." },
+  "sold": { "message": "verkauft" }
 }
 
-// ═══════════════════════════════════════════
-// 6. Apify Actor
-// ═══════════════════════════════════════════
-
-async function runApifyActor(keyword, maxItems = 20) {
-  const actorId = 'apt_marble~aliexpress-search-scraper';
-  const runUrl = `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items?token=${APIFY_TOKEN}`;
-
-  const response = await fetch(runUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keyword, country: 'us', currency: 'USD', maxItems }),
-    timeout: 300000,
-  });
-
-  if (!response.ok) throw new Error(`Apify ${response.status}`);
-  return await response.json();
+--- _locales/el/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Βρείτε πανομοιότυπα προϊόντα στο AliExpress σε καλύτερη τιμή." },
+  "btn_cheapest": { "message": "Φθηνότερα" },
+  "btn_popular": { "message": "Δημοφιλέστερα" },
+  "btn_rating": { "message": "Καλύτερα αξιολογημένα" },
+  "free_shipping": { "message": "Δωρεάν αποστολή" },
+  "no_products": { "message": "Δεν βρέθηκαν προϊόντα." },
+  "loading_more": { "message": "Φόρτωση περισσότερων..." },
+  "sold": { "message": "πωλήθηκαν" }
 }
 
-// ═══════════════════════════════════════════
-// 7. دوال مساعدة
-// ═══════════════════════════════════════════
-
-function generateImageHash(url) {
-  if (!url) return null;
-  const m = url.match(/\/([^/]+\.(jpg|jpeg|png|webp))/i);
-  if (m) return crypto.createHash('md5').update(m[1]).digest('hex').substring(0, 16);
-  return null;
+--- _locales/es/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Encuentra productos idénticos en AliExpress a un mejor precio." },
+  "btn_cheapest": { "message": "Más barato" },
+  "btn_popular": { "message": "Más vendido" },
+  "btn_rating": { "message": "Mejor valorado" },
+  "free_shipping": { "message": "Envío gratis" },
+  "no_products": { "message": "No se encontraron productos." },
+  "loading_more": { "message": "Cargando más..." },
+  "sold": { "message": "vendidos" }
 }
 
-function extractTokens(title) {
-  if (!title) return '';
-  const stop = new Set(['for','the','and','with','from','new','hot','best','free',
-    'high','pro','sale','shipping','pcs','piece','set']);
-  return title.toLowerCase()
-    .replace(/[^\w\s-]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !stop.has(w) && !/^\d+$/.test(w))
-    .slice(0, 12)
-    .join(' ');
+--- _locales/fi/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Löydä identtiset tuotteet AliExpressistä parempaan hintaan." },
+  "btn_cheapest": { "message": "Halvin" },
+  "btn_popular": { "message": "Myydyin" },
+  "btn_rating": { "message": "Parhaiten arvosteltu" },
+  "free_shipping": { "message": "Ilmainen toimitus" },
+  "no_products": { "message": "Tuotteita ei löytynyt." },
+  "loading_more": { "message": "Ladataan lisää..." },
+  "sold": { "message": "myyty" }
 }
 
-// ═══════════════════════════════════════════
-// 8. حفظ Apify Products
-// ═══════════════════════════════════════════
-
-async function saveApifyProducts(items, seedKeyword) {
-  const now = Date.now();
-  let saved = 0;
-  const statements = [];
-  const derived = new Map();
-
-  for (const item of items) {
-    if (!item.productId || !item.title) continue;
-    if (item.title.length < 15) continue;
-
-    const tokens = extractTokens(item.title);
-    const words = tokens.split(' ').filter(w => w.length >= 4 && !COMMON_WORDS.has(w));
-
-    statements.push({
-      sql: `INSERT OR IGNORE INTO products 
-            (product_id, title, title_tokens, category_path,
-             current_price_usd, original_price_usd, rating, orders_count,
-             image_url, image_hash, source_keyword, source_type,
-             first_seen_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'apify', ?, ?)`,
-      args: [String(item.productId), item.title, tokens,
-        (item.categoryPath || []).join(','),
-        parseFloat(item.price || 0), parseFloat(item.originalPrice || 0),
-        parseFloat(item.rating || 0), parseInt(item.soldCount || 0),
-        item.imageUrl || '', generateImageHash(item.imageUrl),
-        seedKeyword, now, now],
-    });
-
-    for (let i = 0; i < words.length - 1; i++) {
-      const bigram = `${words[i]} ${words[i + 1]}`;
-      if (bigram.length >= 10 && bigram.length <= 35) {
-        derived.set(bigram, (derived.get(bigram) || 0) + 1);
-      }
-    }
-  }
-
-  if (statements.length > 0) {
-    try {
-      const result = await db.batch(statements, 'write');
-      for (const r of result) if (r.rowsAffected > 0) saved++;
-    } catch (e) {}
-  }
-
-  const sorted = [...derived.entries()].filter(([_, f]) => f >= 2)
-    .sort((a, b) => b[1] - a[1]).slice(0, 10);
-
-  let newKeywords = 0;
-  for (const [kw] of sorted) {
-    const r = await db.execute({
-      sql: `INSERT OR IGNORE INTO keywords_pipeline 
-            (keyword, source, priority, created_at) VALUES (?, 'apify_derived', 7, ?)`,
-      args: [kw, now],
-    });
-    if (r.rowsAffected > 0) newKeywords++;
-  }
-
-  return { saved, newKeywords };
+--- _locales/fr/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Trouvez des produits identiques sur AliExpress à un meilleur prix." },
+  "btn_cheapest": { "message": "Moins cher" },
+  "btn_popular": { "message": "Plus vendu" },
+  "btn_rating": { "message": "Mieux noté" },
+  "free_shipping": { "message": "Livraison gratuite" },
+  "no_products": { "message": "Aucun produit trouvé." },
+  "loading_more": { "message": "Chargement..." },
+  "sold": { "message": "vendus" }
 }
 
-// ═══════════════════════════════════════════
-// 9. اختيار Keywords
-// ═══════════════════════════════════════════
-
-async function pickKeywordsFromDB(count) {
-  const all = await db.execute({
-    sql: `SELECT keyword, category FROM keywords_pipeline
-          WHERE enabled = 1
-          ORDER BY 
-            CASE WHEN last_run_at = 0 THEN 0 ELSE 1 END,
-            priority ASC, run_count ASC, last_run_at ASC
-          LIMIT ?`,
-    args: [count * 3],
-  });
-
-  if (all.rows.length === 0) return [];
-
-  const byCat = new Map();
-  for (const row of all.rows) {
-    const cat = row.category || 'unknown';
-    if (!byCat.has(cat)) byCat.set(cat, []);
-    byCat.get(cat).push(row);
-  }
-
-  const picked = [];
-  const cats = [...byCat.keys()];
-  while (picked.length < count && cats.length > 0) {
-    let added = false;
-    for (const cat of cats) {
-      const rows = byCat.get(cat);
-      if (rows.length > 0 && picked.length < count) {
-        picked.push(rows.shift());
-        added = true;
-      }
-    }
-    if (!added) break;
-  }
-
-  return picked;
+--- _locales/he/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "מצא מוצרים זהים ב-AliExpress במחיר טוב יותר." },
+  "btn_cheapest": { "message": "הזול ביותר" },
+  "btn_popular": { "message": "הנמכר ביותר" },
+  "btn_rating": { "message": "המדורג הגבוה ביותר" },
+  "free_shipping": { "message": "משלוח חינם" },
+  "no_products": { "message": "לא נמצאו מוצרים." },
+  "loading_more": { "message": "טוען עוד..." },
+  "sold": { "message": "נמכרו" }
 }
 
-async function markProcessed(keyword, success) {
-  await db.execute({
-    sql: `UPDATE keywords_pipeline
-          SET last_run_at = ?, run_count = run_count + 1,
-              success_count = success_count + ?, fail_count = fail_count + ?
-          WHERE keyword = ?`,
-    args: [Date.now(), success ? 1 : 0, success ? 0 : 1, keyword],
-  });
+--- _locales/hi/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "बेहतर कीमत पर AliExpress पर समान उत्पाद खोजें।" },
+  "btn_cheapest": { "message": "सबसे सस्ता" },
+  "btn_popular": { "message": "सर्वाधिक बिकने वाला" },
+  "btn_rating": { "message": "सर्वोच्च रेटेड" },
+  "free_shipping": { "message": "मुफ्त शिपिंग" },
+  "no_products": { "message": "कोई उत्पाद नहीं मिला।" },
+  "loading_more": { "message": "और लोड हो रहा है..." },
+  "sold": { "message": "बिक गया" }
 }
 
-// ═══════════════════════════════════════════
-// ⭐ 10. الوصفة الذهبية: buildSearchUrl
-// ═══════════════════════════════════════════
-
-function buildSearchUrl(keyword, page = 1) {
-  return `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(keyword)}&catId=0&page=${page}`;
+--- _locales/hu/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Találjon azonos termékeket az AliExpressen jobb áron." },
+  "btn_cheapest": { "message": "Legolcsóbb" },
+  "btn_popular": { "message": "Legkelendőbb" },
+  "btn_rating": { "message": "Legjobbra értékelt" },
+  "free_shipping": { "message": "Ingyenes szállítás" },
+  "no_products": { "message": "Nem található termék." },
+  "loading_more": { "message": "Továbbiak betöltése..." },
+  "sold": { "message": "eladva" }
 }
 
-// ═══════════════════════════════════════════
-// ⭐ 11. ScrapingAnt (browser: false)
-// ═══════════════════════════════════════════
-
-async function fetchFromScrapingAnt(keyword, page = 1) {
-  const targetUrl = buildSearchUrl(keyword, page);
-  const url = new URL('https://api.scrapingant.com/v2/general');
-
-  url.searchParams.set('x-api-key', SCRAPINGANT_KEY);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('browser', 'false');
-  url.searchParams.set('proxy_country', 'US');
-
-  const res = await fetch(url.toString(), { timeout: 60000 });
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    const lowerErr = errBody.toLowerCase();
-
-    if (lowerErr.includes('concurrency') || lowerErr.includes('too many')) {
-      throw new Error('CONCURRENCY: ScrapingAnt');
-    }
-    if (res.status === 429 || lowerErr.includes('rate limit')) {
-      throw new Error('RATE: ScrapingAnt');
-    }
-    if (lowerErr.includes('credits exhausted') || lowerErr.includes('quota') ||
-        lowerErr.includes('no credits') || res.status === 402) {
-      throw new Error('QUOTA: ScrapingAnt');
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error('AUTH: ScrapingAnt');
-    }
-    throw new Error(`ScrapingAnt ${res.status}`);
-  }
-
-  return await res.text();
+--- _locales/id/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Temukan produk identik di AliExpress dengan harga lebih baik." },
+  "btn_cheapest": { "message": "Termurah" },
+  "btn_popular": { "message": "Terlaris" },
+  "btn_rating": { "message": "Rating Tertinggi" },
+  "free_shipping": { "message": "Gratis Ongkir" },
+  "no_products": { "message": "Produk tidak ditemukan." },
+  "loading_more": { "message": "Memuat lebih banyak..." },
+  "sold": { "message": "terjual" }
 }
 
-// ═══════════════════════════════════════════
-// ⭐ 12. BrightData Web Unlocker (جديد)
-// ═══════════════════════════════════════════
-
-async function fetchFromBrightData(keyword, page = 1) {
-  const targetUrl = buildSearchUrl(keyword, page);  // ⭐ Endpoint ذهبي
-
-  const res = await fetch('https://api.brightdata.com/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${BRIGHTDATA_KEY.trim()}`,
-    },
-    body: JSON.stringify({
-      zone: BRIGHTDATA_ZONE.trim(),
-      url: targetUrl,
-      format: 'raw',
-      country: 'us',
-    }),
-    timeout: 90000,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    const lowerErr = errBody.toLowerCase();
-
-    if (lowerErr.includes('concurrency') || lowerErr.includes('too many')) {
-      throw new Error('CONCURRENCY: BrightData');
-    }
-    if (res.status === 429 || lowerErr.includes('rate limit')) {
-      throw new Error('RATE: BrightData');
-    }
-    if (lowerErr.includes('credits exhausted') || lowerErr.includes('quota') ||
-        lowerErr.includes('out of') || res.status === 402) {
-      throw new Error('QUOTA: BrightData');
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error('AUTH: BrightData');
-    }
-    throw new Error(`BrightData ${res.status}`);
-  }
-
-  return await res.text();
+--- _locales/it/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Trova prodotti identici su AliExpress a un prezzo migliore." },
+  "btn_cheapest": { "message": "Più economico" },
+  "btn_popular": { "message": "Più venduto" },
+  "btn_rating": { "message": "Più votato" },
+  "free_shipping": { "message": "Spedizione gratuita" },
+  "no_products": { "message": "Nessun prodotto trovato." },
+  "loading_more": { "message": "Caricamento..." },
+  "sold": { "message": "venduti" }
 }
 
-// ═══════════════════════════════════════════
-// ⭐ 13. ScraperAPI (render: false)
-// ═══════════════════════════════════════════
-
-async function fetchFromScraperAPI(keyword, page = 1) {
-  const targetUrl = buildSearchUrl(keyword, page);
-  const url = new URL('https://api.scraperapi.com/');
-
-  url.searchParams.set('api_key', SCRAPERAPI_KEY);
-  url.searchParams.set('url', targetUrl);
-  url.searchParams.set('render', 'false');
-  url.searchParams.set('country_code', 'us');
-
-  const res = await fetch(url.toString(), { timeout: 60000 });
-
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    const lowerErr = errBody.toLowerCase();
-
-    if (lowerErr.includes('concurrency') || lowerErr.includes('too many concurrent')) {
-      throw new Error('CONCURRENCY: ScraperAPI');
-    }
-    if (res.status === 429 || lowerErr.includes('rate limit')) {
-      throw new Error('RATE: ScraperAPI');
-    }
-    if (lowerErr.includes('credits exhausted') || lowerErr.includes('no credits') ||
-        lowerErr.includes('quota') || res.status === 402) {
-      throw new Error('QUOTA: ScraperAPI');
-    }
-    if (res.status === 401 || res.status === 403) {
-      throw new Error('AUTH: ScraperAPI');
-    }
-    throw new Error(`ScraperAPI ${res.status}`);
-  }
-
-  return await res.text();
+--- _locales/ja/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "AliExpressで同じ商品をより良い価格で見つけましょう。" },
+  "btn_cheapest": { "message": "最も安い" },
+  "btn_popular": { "message": "ベストセラー" },
+  "btn_rating": { "message": "最高評価" },
+  "free_shipping": { "message": "送料無料" },
+  "no_products": { "message": "商品が見つかりません。" },
+  "loading_more": { "message": "さらに読み込む..." },
+  "sold": { "message": "販売済み" }
 }
 
-// ═══════════════════════════════════════════
-// ⭐ 14. Circuit Breaker + Fallback (3 مزودين)
-// ═══════════════════════════════════════════
-
-async function fetchWithFallback(keyword, page = 1) {
-  // ⭐ الترتيب حسب الرصيد:
-  // ScrapingAnt (10,000) → BrightData (5,000) → ScraperAPI (1,000)
-  const providers = [
-    { name: 'scrapingant', fn: fetchFromScrapingAnt, state: providerState.scrapingant, icon: '🔵' },
-    { name: 'brightdata', fn: fetchFromBrightData, state: providerState.brightdata, icon: '🟣' },
-    { name: 'scraperapi', fn: fetchFromScraperAPI, state: providerState.scraperapi, icon: '🟠' },
-  ];
-
-  for (const p of providers) {
-    if (p.state.status === 'disabled') {
-      continue;
-    }
-
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`      ${p.icon} ${p.name} p${page} (${attempt}/3)...`);
-        const html = await p.fn(keyword, page);
-
-        p.state.consecutiveFailures = 0;
-        return { html, source: p.name };
-
-      } catch (e) {
-        const msg = e.message;
-        console.log(`      ⚠️ ${msg.substring(0, 80)}`);
-
-        if (msg.includes('QUOTA')) {
-          console.log(`      🔴 ${p.name}: نفد الرصيد → تعطيل`);
-          p.state.status = 'disabled';
-          p.state.reason = 'quota_exhausted';
-          break;
-        }
-
-        if (msg.includes('AUTH')) {
-          console.log(`      🔴 ${p.name}: مفتاح خاطئ → تعطيل`);
-          p.state.status = 'disabled';
-          p.state.reason = 'auth_failed';
-          break;
-        }
-
-        if (msg.includes('CONCURRENCY') || msg.includes('RATE')) {
-          if (attempt < 3) {
-            const waitMs = 2000 * attempt;
-            console.log(`      ⏳ انتظار ${waitMs}ms...`);
-            await new Promise(r => setTimeout(r, waitMs));
-            continue;
-          } else {
-            p.state.consecutiveFailures++;
-            if (p.state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-              console.log(`      🔴 ${p.name}: تعطيل (فشل ${p.state.consecutiveFailures}×)`);
-              p.state.status = 'disabled';
-              p.state.reason = 'too_many_failures';
-            }
-            break;
-          }
-        }
-
-        p.state.consecutiveFailures++;
-        break;
-      }
-    }
-  }
-
-  return { html: null, source: null };
+--- _locales/ko/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "AliExpress에서 더 나은 가격으로 동일한 제품을 찾아보세요." },
+  "btn_cheapest": { "message": "가장 저렴한" },
+  "btn_popular": { "message": "베스트셀러" },
+  "btn_rating": { "message": "최고 평점" },
+  "free_shipping": { "message": "무료 배송" },
+  "no_products": { "message": "상품을 찾을 수 없습니다." },
+  "loading_more": { "message": "더 불러오는 중..." },
+  "sold": { "message": "판매됨" }
 }
 
-// ═══════════════════════════════════════════
-// 15. Parser (JSON مدمج)
-// ═══════════════════════════════════════════
-
-function extractText(v) {
-  if (v == null) return '';
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
-  if (typeof v === 'boolean') return v ? 'true' : '';
-  if (typeof v === 'object') {
-    const keys = ['displayTitle', 'text', 'title', 'value', 'name',
-      'formatedActivityPrice', 'formatedPrice', 'minActivityPrice', 'minPrice',
-      'price', 'desc', 'label'];
-    for (const k of keys) {
-      if (v[k] != null && typeof v[k] !== 'object') return String(v[k]);
-    }
-    for (const k in v) {
-      if (typeof v[k] === 'string' && v[k].length > 0) return v[k];
-    }
-    return '';
-  }
-  return String(v);
+--- _locales/ms/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Cari produk yang sama di AliExpress dengan harga yang lebih baik." },
+  "btn_cheapest": { "message": "Paling Murah" },
+  "btn_popular": { "message": "Paling Laris" },
+  "btn_rating": { "message": "Penilaian Terbaik" },
+  "free_shipping": { "message": "Penghantaran Percuma" },
+  "no_products": { "message": "Tiada produk ditemui." },
+  "loading_more": { "message": "Memuatkan lagi..." },
+  "sold": { "message": "terjual" }
 }
 
-function extractJsonArray(html, marker) {
-  const i = html.indexOf(marker);
-  if (i < 0) return null;
-  const j = html.indexOf('[', i);
-  if (j < 0) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let k = j; k < html.length; k++) {
-    const c = html[k];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return html.slice(j, k + 1); }
-  }
-  return null;
+--- _locales/nl/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Vind identieke producten op AliExpress voor een betere prijs." },
+  "btn_cheapest": { "message": "Goedkoopste" },
+  "btn_popular": { "message": "Best verkocht" },
+  "btn_rating": { "message": "Best beoordeeld" },
+  "free_shipping": { "message": "Gratis verzending" },
+  "no_products": { "message": "Geen producten gevonden." },
+  "loading_more": { "message": "Meer laden..." },
+  "sold": { "message": "verkocht" }
 }
 
-function clean(s) {
-  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+--- _locales/no/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Finn identiske produkter på AliExpress til en bedre pris." },
+  "btn_cheapest": { "message": "Billigst" },
+  "btn_popular": { "message": "Bestselger" },
+  "btn_rating": { "message": "Best vurdert" },
+  "free_shipping": { "message": "Gratis frakt" },
+  "no_products": { "message": "Ingen produkter funnet." },
+  "loading_more": { "message": "Laster mer..." },
+  "sold": { "message": "solgt" }
 }
 
-function parseItems(html) {
-  const arrText = extractJsonArray(html, '"itemList"') || extractJsonArray(html, '"gridItems"');
-
-  if (arrText) {
-    let arr;
-    try { arr = JSON.parse(arrText); } catch (e) { arr = null; }
-
-    if (Array.isArray(arr) && arr.length > 0) {
-      const out = [];
-      for (const o of arr) {
-        try {
-          if (!o || typeof o !== 'object') continue;
-          const id = o.productId || o.id || (o.item && o.item.productId);
-          if (!id) continue;
-
-          const rawTitle = o.title || (o.item && o.item.title) || o.displayTitle || '';
-          const title = clean(extractText(rawTitle));
-
-          let img = '';
-          if (o.image) {
-            img = typeof o.image === 'string' ? o.image : (o.image.imgUrl || o.image.imageUrl || o.image.url || '');
-          }
-          if (!img && o.picUrl) {
-            img = typeof o.picUrl === 'string' ? o.picUrl : (o.picUrl.imgUrl || o.picUrl.url || '');
-          }
-          if (img && img.startsWith('//')) img = 'https:' + img;
-
-          const p = o.prices || {};
-          const sale = p.salePrice || {};
-          const orig = p.originalPrice || {};
-          const price = extractText(sale.formatedActivityPrice || sale.formatedPrice ||
-                        sale.minActivityPrice || sale.minPrice || p.formatedPrice || p.minPrice || '');
-          const oldPrice = extractText(orig.formatedPrice || orig.minPrice || '');
-          const discount = extractText(o.discount || sale.discount || '');
-
-          const rating = extractText(
-            (o.evaluation && (o.evaluation.starRating || o.evaluation.averageStar)) ||
-            o.averageStarRate || o.starRating || ''
-          );
-          const sold = extractText(o.tradeDesc || o.sold || o.soldCount || '');
-
-          out.push({
-            product_id: String(id),
-            title: title || 'Product',
-            price: parseFloat(String(price).replace(/[^\d.]/g, '')) || 0,
-            original_price: parseFloat(String(oldPrice).replace(/[^\d.]/g, '')) || 0,
-            discount: discount,
-            rating: parseFloat(String(rating).replace(/[^\d.]/g, '')) || 0,
-            orders_count: String(sold),
-            image_url: img,
-          });
-        } catch (e) {}
-      }
-
-      if (out.length > 0) {
-        console.log(`        📊 JSON: ${out.length}`);
-        return out;
-      }
-    }
-  }
-
-  const re = /"productId"\s*:\s*"(\d{6,})"/g;
-  const seen = new Set();
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (seen.has(m[1])) continue;
-    seen.add(m[1]);
-    out.push({
-      product_id: m[1],
-      title: 'Product',
-      price: 0,
-      original_price: 0,
-      discount: '',
-      rating: 0,
-      orders_count: '',
-      image_url: '',
-    });
-  }
-
-  if (out.length > 0) console.log(`        📊 regex: ${out.length}`);
-  return out;
+--- _locales/pl/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Znajdź identyczne produkty na AliExpress w lepszej cenie." },
+  "btn_cheapest": { "message": "Najtańsze" },
+  "btn_popular": { "message": "Bestsellery" },
+  "btn_rating": { "message": "Najwyżej oceniane" },
+  "free_shipping": { "message": "Darmowa dostawa" },
+  "no_products": { "message": "Nie znaleziono produktów." },
+  "loading_more": { "message": "Ładowanie..." },
+  "sold": { "message": "sprzedano" }
 }
 
-// ═══════════════════════════════════════════
-// 16. حفظ Batch
-// ═══════════════════════════════════════════
-
-async function saveProductsBatch(products, keyword) {
-  if (products.length === 0) return 0;
-
-  const now = Date.now();
-  const statements = products
-    .filter(p => p.product_id && p.title && p.title.length > 5)
-    .map(p => ({
-      sql: `INSERT OR IGNORE INTO products 
-            (product_id, title, title_tokens, current_price_usd,
-             original_price_usd, rating, orders_count, image_url,
-             image_hash, source_keyword, source_type,
-             first_seen_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enrichment', ?, ?)`,
-      args: [p.product_id, p.title, extractTokens(p.title), p.price || 0,
-        p.original_price || 0, p.rating || 0, 0,
-        p.image_url || '', generateImageHash(p.image_url), keyword, now, now],
-    }));
-
-  if (statements.length === 0) return 0;
-
-  let inserted = 0;
-  try {
-    const result = await db.batch(statements, 'write');
-    for (const r of result) if (r.rowsAffected > 0) inserted++;
-  } catch (e) {
-    console.error(`        ❌ ${e.message.substring(0, 60)}`);
-  }
-
-  return inserted;
+--- _locales/pt/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Encontre produtos idênticos no AliExpress por um preço melhor." },
+  "btn_cheapest": { "message": "Mais barato" },
+  "btn_popular": { "message": "Mais vendido" },
+  "btn_rating": { "message": "Melhor avaliado" },
+  "free_shipping": { "message": "Frete grátis" },
+  "no_products": { "message": "Nenhum produto encontrado." },
+  "loading_more": { "message": "Carregando mais..." },
+  "sold": { "message": "vendidos" }
 }
 
-// ═══════════════════════════════════════════
-// 17. الدالة الرئيسية
-// ═══════════════════════════════════════════
-
-async function main() {
-  const start = Date.now();
-  console.log('🧠 Smart Pipeline - 3 مزودين + Endpoint الذهبي\n');
-  console.log('═'.repeat(55));
-  console.log('🎯 Endpoint: /wholesale?SearchText=');
-  console.log('🎯 الترتيب: ScrapingAnt → BrightData → ScraperAPI');
-  console.log('═'.repeat(55));
-
-  await restoreProviderState();
-  const health = await checkApifyHealth();
-
-  let result;
-
-  if (health.healthy) {
-    console.log('\n✅ Apify سليم → Discovery + Enrichment\n');
-    const discovery = await runApifyDiscovery();
-    console.log('\n' + '─'.repeat(55));
-    const enrichment = await runEnrichment(false);
-    result = {
-      mode: 'normal',
-      apifyProducts: discovery.totalProducts,
-      apifyKeywords: discovery.totalKeywords,
-      enrichmentProducts: enrichment.totalSaved,
-    };
-  } else {
-    console.log(`\n🚨 Apify معطل (${health.reason}) → Emergency Mode\n`);
-    const emergency = await runEnrichment(true);
-    result = {
-      mode: 'emergency',
-      reason: health.reason,
-      emergencyProducts: emergency.totalSaved,
-    };
-  }
-
-  await saveProviderState();
-
-  const stats = await db.execute(`
-    SELECT 
-      (SELECT COUNT(*) FROM products) as total_products,
-      (SELECT COUNT(*) FROM keywords_pipeline) as total_keywords,
-      (SELECT COUNT(*) FROM keywords_pipeline WHERE last_run_at = 0) as pending
-  `);
-
-  const s = stats.rows[0];
-  const mins = ((Date.now() - start) / 60000).toFixed(1);
-
-  console.log(`\n${'═'.repeat(55)}`);
-  console.log(`📊 تقرير Smart Pipeline (${mins} دقيقة)`);
-  console.log(`${'═'.repeat(55)}`);
-  console.log(`  🎯 الوضع: ${result.mode.toUpperCase()}`);
-  console.log(`  📦 منتجات: ${s.total_products}`);
-  console.log(`  📚 كلمات: ${s.total_keywords}`);
-  console.log(`  ⏳ في الانتظار: ${s.pending}`);
-  console.log(`\n🔌 حالة المزودين:`);
-  console.log(`  🔵 ScrapingAnt (10K): ${providerState.scrapingant.status} (${providerState.scrapingant.consecutiveFailures} فشل)`);
-  console.log(`  🟣 BrightData (5K): ${providerState.brightdata.status} (${providerState.brightdata.consecutiveFailures} فشل)`);
-  console.log(`  🟠 ScraperAPI (1K): ${providerState.scraperapi.status} (${providerState.scraperapi.consecutiveFailures} فشل)`);
+--- _locales/ro/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Găsiți produse identice pe AliExpress la un preț mai bun." },
+  "btn_cheapest": { "message": "Cel mai ieftin" },
+  "btn_popular": { "message": "Cele mai vândute" },
+  "btn_rating": { "message": "Cele mai bine evaluate" },
+  "free_shipping": { "message": "Transport gratuit" },
+  "no_products": { "message": "Nu s-au găsit produse." },
+  "loading_more": { "message": "Se încarcă mai multe..." },
+  "sold": { "message": "vândute" }
 }
 
-main().catch(err => {
-  console.error('💥 خطأ قاتل:', err);
-  process.exit(1);
-});
+--- _locales/ru/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Находите идентичные товары на AliExpress по лучшей цене." },
+  "btn_cheapest": { "message": "Самые дешевые" },
+  "btn_popular": { "message": "Бестселлеры" },
+  "btn_rating": { "message": "Лучший рейтинг" },
+  "free_shipping": { "message": "Бесплатная доставка" },
+  "no_products": { "message": "Товары не найдены." },
+  "loading_more": { "message": "Загрузка..." },
+  "sold": { "message": "продано" }
+}
+
+--- _locales/sv/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Hitta identiska produkter på AliExpress till ett bättre pris." },
+  "btn_cheapest": { "message": "Billigast" },
+  "btn_popular": { "message": "Bästsäljare" },
+  "btn_rating": { "message": "Bäst betyg" },
+  "free_shipping": { "message": "Fri frakt" },
+  "no_products": { "message": "Inga produkter hittades." },
+  "loading_more": { "message": "Laddar mer..." },
+  "sold": { "message": "sålda" }
+}
+
+--- _locales/th/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "ค้นหาสินค้าที่เหมือนกันใน AliExpress ในราคาที่ดีกว่า" },
+  "btn_cheapest": { "message": "ถูกที่สุด" },
+  "btn_popular": { "message": "ขายดีที่สุด" },
+  "btn_rating": { "message": "คะแนนสูงสุด" },
+  "free_shipping": { "message": "ส่งฟรี" },
+  "no_products": { "message": "ไม่พบสินค้า" },
+  "loading_more": { "message": "กำลังโหลดเพิ่มเติม..." },
+  "sold": { "message": "ขายแล้ว" }
+}
+
+--- _locales/tl/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Maghanap ng magkatulad na produkto sa AliExpress sa mas magandang presyo." },
+  "btn_cheapest": { "message": "Pinakamura" },
+  "btn_popular": { "message": "Pinakamabenta" },
+  "btn_rating": { "message": "Pinakamataas na rating" },
+  "free_shipping": { "message": "Libreng pagpapadala" },
+  "no_products": { "message": "Walang nahanap na produkto." },
+  "loading_more": { "message": "Naglo-load ng higit pa..." },
+  "sold": { "message": "nabenta" }
+}
+
+--- _locales/tr/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "AliExpress'te aynı ürünleri daha iyi bir fiyata bulun." },
+  "btn_cheapest": { "message": "En Ucuz" },
+  "btn_popular": { "message": "En Çok Satan" },
+  "btn_rating": { "message": "En İyi Puan" },
+  "free_shipping": { "message": "Ücretsiz Kargo" },
+  "no_products": { "message": "Ürün bulunamadı." },
+  "loading_more": { "message": "Daha fazla yükleniyor..." },
+  "sold": { "message": "satıldı" }
+}
+
+--- _locales/uk/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Знаходьте ідентичні товари на AliExpress за кращою ціною." },
+  "btn_cheapest": { "message": "Найдешевші" },
+  "btn_popular": { "message": "Бестселери" },
+  "btn_rating": { "message": "Найвищий рейтинг" },
+  "free_shipping": { "message": "Безкоштовна доставка" },
+  "no_products": { "message": "Товари не знайдено." },
+  "loading_more": { "message": "Завантаження..." },
+  "sold": { "message": "продано" }
+}
+
+--- _locales/vi/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "Tìm sản phẩm giống hệt trên AliExpress với giá tốt hơn." },
+  "btn_cheapest": { "message": "Rẻ nhất" },
+  "btn_popular": { "message": "Bán chạy nhất" },
+  "btn_rating": { "message": "Đánh giá tốt nhất" },
+  "free_shipping": { "message": "Miễn phí vận chuyển" },
+  "no_products": { "message": "Không tìm thấy sản phẩm." },
+  "loading_more": { "message": "Đang tải thêm..." },
+  "sold": { "message": "đã bán" }
+}
+
+--- _locales/zh_CN/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "在AliExpress上以更优惠的价格寻找相同的产品。" },
+  "btn_cheapest": { "message": "最便宜" },
+  "btn_popular": { "message": "最畅销" },
+  "btn_rating": { "message": "评分最高" },
+  "free_shipping": { "message": "免运费" },
+  "no_products": { "message": "未找到产品。" },
+  "loading_more": { "message": "正在加载更多..." },
+  "sold": { "message": "已售" }
+}
+
+--- _locales/zh_TW/messages.json ---
+{
+  "appName": { "message": "Nezzer - AliExpress Price Finder" },
+  "appDesc": { "message": "在AliExpress上以更優惠的價格尋找相同的產品。" },
+  "btn_cheapest": { "message": "最便宜" },
+  "btn_popular": { "message": "最暢銷" },
+  "btn_rating": { "message": "評分最高" },
+  "free_shipping": { "message": "免運費" },
+  "no_products": { "message": "未找到產品。" },
+  "loading_more": { "message": "正在載入更多..." },
+  "sold": { "message": "已售" }
+}
