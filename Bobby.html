@@ -1,260 +1,233 @@
-let widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
-
-// 🌍 قاموس لغات أزرار الشريط الجانبي
-const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
-    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
-    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
-    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
-    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
-    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld' },
-    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane' },
-    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
-    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
-    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
-    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด' },
-    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất' },
-    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi' },
-    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר' },
-    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг' }
-};
-
-function getSiteLang() {
-    try {
-        let lang = document.documentElement.lang || '';
-        if (!lang) {
-            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
-            if (match) {
-                const cookieStr = decodeURIComponent(match[1]);
-                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
-                if (localeMatch) lang = localeMatch[1];
-            }
-        }
-        if (!lang) {
-            if (location.href.includes('aliexpress.ru')) lang = 'ru';
-            else if (location.href.includes('aliexpress.us')) lang = 'en';
-            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
-            else lang = 'en';
-        }
-        lang = String(lang).split('-')[0].split('_')[0].toLowerCase();
-        return SITE_TRANSLATIONS[lang] ? lang : 'en';
-    } catch(e) { return 'en'; }
+=== en (الإنجليزية) ===
+{
+  "appName": { "message": "AliFinder - Best Price" },
+  "appDesc": { "message": "Find identical products on AliExpress for a better price." },
+  "btn_cheapest": { "message": "Cheapest" },
+  "btn_popular": { "message": "Best Selling" },
+  "btn_rating": { "message": "Best Rated" },
+  "free_shipping": { "message": "Free shipping" },
+  "no_products": { "message": "No products found." },
+  "loading_more": { "message": "Loading more..." },
+  "sold": { "message": "sold" }
 }
 
-const t = (key) => {
-    try {
-        const lang = getSiteLang();
-        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
-    } catch(e) { return key; }
-};
-
-function removeWidget() {
-    if (widgetWrapper) {
-        widgetWrapper.remove();
-        widgetWrapper = null;
-        iframeContainer = null;
-        iframe = null;
-        sidebar = null;
-    }
+=== ar (العربية) ===
+{
+  "appName": { "message": "AliFinder - أفضل سعر" },
+  "appDesc": { "message": "اعثر على منتجات مماثلة على AliExpress بسعر أفضل." },
+  "btn_cheapest": { "message": "الأرخص" },
+  "btn_popular": { "message": "الأكثر طلباً" },
+  "btn_rating": { "message": "الأكثر تقيماً" },
+  "free_shipping": { "message": "شحن مجاني" },
+  "no_products": { "message": "لم يتم العثور على منتجات." },
+  "loading_more": { "message": "جاري جلب المزيد..." },
+  "sold": { "message": "مباع" }
 }
 
-function injectWidget() {
-    try {
-        if (widgetWrapper) return;
-        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
-
-        let isOpen = false;
-        let currentSide = 'left'; 
-        let activeSort = 'popular';
-
-        widgetWrapper = document.createElement('div');
-        widgetWrapper.id = 'alifinder-widget-wrapper';
-        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
-
-        sidebar = document.createElement('div');
-        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
-
-        const pillContainer = document.createElement('div');
-        pillContainer.style.cssText = `
-            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
-            padding: 20px 10px; border-radius: 0 40px 40px 0;
-            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
-            display: flex; flex-direction: column; align-items: center; gap: 15px;
-            pointer-events: auto; transition: all 0.3s ease;
-            border: 1px solid #f1f5f9; border-left: none;
-        `;
-
-        iframeContainer = document.createElement('div');
-        iframeContainer.style.cssText = `
-            position: absolute; top: 50%; left: 75px;
-            width: 580px; max-width: 90vw; height: 88vh; 
-            background: #ffffff !important; border-radius: 16px;
-            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
-            transform: translateY(-50%) translateX(-105%);
-            opacity: 0; pointer-events: none; visibility: hidden;
-            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
-            display: flex; overflow: hidden;
-        `;
-
-        const siteLang = getSiteLang();
-        iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('popup/popup.html') + '?siteLang=' + siteLang;
-        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
-        iframeContainer.appendChild(iframe);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.style.cssText = `
-            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
-            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
-        `;
-        dragHandle.innerHTML = '⋮⋮';
-        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
-        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
-
-        function togglePanel(forceOpen = null) {
-            if (forceOpen === true) isOpen = true;
-            else if (forceOpen === false) isOpen = false;
-            else isOpen = !isOpen;
-
-            if (isOpen) {
-                iframeContainer.style.visibility = 'visible';
-                iframeContainer.style.opacity = '1';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-                iframeContainer.style.pointerEvents = 'auto';
-            } else {
-                iframeContainer.style.opacity = '0';
-                iframeContainer.style.pointerEvents = 'none';
-                if (currentSide === 'right') {
-                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                } else {
-                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                }
-                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
-            }
-        }
-
-        const createSortBtn = (text, sortValue) => {
-            const btn = document.createElement('div');
-            btn.style.cssText = `
-                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
-                background: transparent; border-radius: 20px; cursor: pointer;
-                font-weight: 700; font-size: 13px; color: #64748b;
-                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
-            `;
-            btn.innerText = text;
-            btn.setAttribute('data-sort', sortValue);
-            
-            if (currentSide === 'left') {
-                btn.style.transform = 'rotate(180deg)';
-            }
-
-            btn.onmousedown = () => {
-                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
-            };
-            btn.onmouseup = btn.onmouseleave = () => {
-                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
-            };
-
-            btn.onclick = () => {
-                const isCurrentlyActive = (activeSort === sortValue);
-                if (isCurrentlyActive && isOpen) {
-                    togglePanel(false); 
-                } else {
-                    activeSort = sortValue;
-                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
-                    });
-                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                    btn.style.color = 'white';
-                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-                    togglePanel(true); 
-                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                }
-            };
-            return btn;
-        };
-
-        const btnRating = createSortBtn(t('rating'), 'rating');
-        const btnPopular = createSortBtn(t('popular'), 'popular');
-        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
-
-        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-        btnPopular.style.color = 'white';
-        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-
-        pillContainer.appendChild(dragHandle);
-        pillContainer.appendChild(btnRating);
-        pillContainer.appendChild(btnPopular);
-        pillContainer.appendChild(btnCheapest);
-
-        sidebar.appendChild(pillContainer);
-        widgetWrapper.appendChild(sidebar);
-        widgetWrapper.appendChild(iframeContainer);
-        document.body.appendChild(widgetWrapper);
-
-        function setSide(side) {
-            currentSide = side;
-            
-            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
-                if (side === 'left') {
-                    btn.style.transform = 'rotate(180deg)';
-                } else {
-                    btn.style.transform = 'rotate(0deg)';
-                }
-            });
-
-            if (side === 'right') {
-                sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '40px 0 0 40px';
-                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
-                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
-                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-            } else {
-                sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 40px 40px 0';
-                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
-                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
-                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-            }
-        }
-
-        let isDragging = false;
-        dragHandle.addEventListener('mousedown', () => {
-            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; 
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            if (e.clientX < window.innerWidth / 2) {
-                if (currentSide !== 'left') setSide('left');
-            } else {
-                if (currentSide !== 'right') setSide('right');
-            }
-        });
-
-        window.addEventListener('mouseup', () => {
-            if (!isDragging) return;
-            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
-        });
-    } catch(err) {
-        console.error("AliFinder Error:", err);
-    }
+=== es (الإسبانية) ===
+{
+  "appName": { "message": "AliFinder - Mejor Precio" },
+  "appDesc": { "message": "Encuentra productos idénticos en AliExpress a un mejor precio." },
+  "btn_cheapest": { "message": "Más barato" },
+  "btn_popular": { "message": "Más vendido" },
+  "btn_rating": { "message": "Mejor valorado" },
+  "free_shipping": { "message": "Envío gratis" },
+  "no_products": { "message": "No se encontraron productos." },
+  "loading_more": { "message": "Cargando más..." },
+  "sold": { "message": "vendidos" }
 }
 
-injectWidget();
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
-    }
-}).observe(document, {subtree: true, childList: true});
+=== pt_BR (البرتغالية - البرازيل) ===
+{
+  "appName": { "message": "AliFinder - Melhor Preço" },
+  "appDesc": { "message": "Encontre produtos idênticos no AliExpress por um preço melhor." },
+  "btn_cheapest": { "message": "Mais barato" },
+  "btn_popular": { "message": "Mais vendido" },
+  "btn_rating": { "message": "Melhor avaliado" },
+  "free_shipping": { "message": "Frete grátis" },
+  "no_products": { "message": "Nenhum produto encontrado." },
+  "loading_more": { "message": "Carregando mais..." },
+  "sold": { "message": "vendidos" }
+}
+
+=== ru (الروسية) ===
+{
+  "appName": { "message": "AliFinder - Лучшая цена" },
+  "appDesc": { "message": "Находите идентичные товары на AliExpress по лучшей цене." },
+  "btn_cheapest": { "message": "Самые дешевые" },
+  "btn_popular": { "message": "Бестселлеры" },
+  "btn_rating": { "message": "Лучший рейтинг" },
+  "free_shipping": { "message": "Бесплатная доставка" },
+  "no_products": { "message": "Товары не найдены." },
+  "loading_more": { "message": "Загрузка..." },
+  "sold": { "message": "продано" }
+}
+
+=== fr (الفرنسية) ===
+{
+  "appName": { "message": "AliFinder - Meilleur Prix" },
+  "appDesc": { "message": "Trouvez des produits identiques sur AliExpress à un meilleur prix." },
+  "btn_cheapest": { "message": "Moins cher" },
+  "btn_popular": { "message": "Plus vendu" },
+  "btn_rating": { "message": "Mieux noté" },
+  "free_shipping": { "message": "Livraison gratuite" },
+  "no_products": { "message": "Aucun produit trouvé." },
+  "loading_more": { "message": "Chargement..." },
+  "sold": { "message": "vendus" }
+}
+
+=== de (الألمانية) ===
+{
+  "appName": { "message": "AliFinder - Bester Preis" },
+  "appDesc": { "message": "Finden Sie identische Produkte auf AliExpress zu einem besseren Preis." },
+  "btn_cheapest": { "message": "Günstigste" },
+  "btn_popular": { "message": "Bestseller" },
+  "btn_rating": { "message": "Am besten bewertet" },
+  "free_shipping": { "message": "Kostenloser Versand" },
+  "no_products": { "message": "Keine Produkte gefunden." },
+  "loading_more": { "message": "Mehr laden..." },
+  "sold": { "message": "verkauft" }
+}
+
+=== it (الإيطالية) ===
+{
+  "appName": { "message": "AliFinder - Miglior Prezzo" },
+  "appDesc": { "message": "Trova prodotti identici su AliExpress a un prezzo migliore." },
+  "btn_cheapest": { "message": "Più economico" },
+  "btn_popular": { "message": "Più venduto" },
+  "btn_rating": { "message": "Più votato" },
+  "free_shipping": { "message": "Spedizione gratuita" },
+  "no_products": { "message": "Nessun prodotto trovato." },
+  "loading_more": { "message": "Caricamento..." },
+  "sold": { "message": "venduti" }
+}
+
+=== nl (الهولندية) ===
+{
+  "appName": { "message": "AliFinder - Beste Prijs" },
+  "appDesc": { "message": "Vind identieke producten op AliExpress voor een betere prijs." },
+  "btn_cheapest": { "message": "Goedkoopste" },
+  "btn_popular": { "message": "Best verkocht" },
+  "btn_rating": { "message": "Best beoordeeld" },
+  "free_shipping": { "message": "Gratis verzending" },
+  "no_products": { "message": "Geen producten gevonden." },
+  "loading_more": { "message": "Meer laden..." },
+  "sold": { "message": "verkocht" }
+}
+
+=== pl (البولندية) ===
+{
+  "appName": { "message": "AliFinder - Najlepsza Cena" },
+  "appDesc": { "message": "Znajdź identyczne produkty na AliExpress w lepszej cenie." },
+  "btn_cheapest": { "message": "Najtańsze" },
+  "btn_popular": { "message": "Bestsellery" },
+  "btn_rating": { "message": "Najwyżej oceniane" },
+  "free_shipping": { "message": "Darmowa dostawa" },
+  "no_products": { "message": "Nie znaleziono produktów." },
+  "loading_more": { "message": "Ładowanie..." },
+  "sold": { "message": "sprzedano" }
+}
+
+=== tr (التركية) ===
+{
+  "appName": { "message": "AliFinder - En İyi Fiyat" },
+  "appDesc": { "message": "AliExpress'te aynı ürünleri daha iyi bir fiyata bulun." },
+  "btn_cheapest": { "message": "En Ucuz" },
+  "btn_popular": { "message": "En Çok Satan" },
+  "btn_rating": { "message": "En İyi Puan" },
+  "free_shipping": { "message": "Ücretsiz Kargo" },
+  "no_products": { "message": "Ürün bulunamadı." },
+  "loading_more": { "message": "Daha fazla yükleniyor..." },
+  "sold": { "message": "satıldı" }
+}
+
+=== ko (الكورية) ===
+{
+  "appName": { "message": "AliFinder - 최저가" },
+  "appDesc": { "message": "AliExpress에서 더 나은 가격으로 동일한 제품을 찾아보세요." },
+  "btn_cheapest": { "message": "가장 저렴한" },
+  "btn_popular": { "message": "베스트셀러" },
+  "btn_rating": { "message": "최고 평점" },
+  "free_shipping": { "message": "무료 배송" },
+  "no_products": { "message": "상품을 찾을 수 없습니다." },
+  "loading_more": { "message": "더 불러오는 중..." },
+  "sold": { "message": "판매됨" }
+}
+
+=== ja (اليابانية) ===
+{
+  "appName": { "message": "AliFinder - ベストプライス" },
+  "appDesc": { "message": "AliExpressで同じ商品をより良い価格で見つけましょう。" },
+  "btn_cheapest": { "message": "最も安い" },
+  "btn_popular": { "message": "ベストセラー" },
+  "btn_rating": { "message": "最高評価" },
+  "free_shipping": { "message": "送料無料" },
+  "no_products": { "message": "商品が見つかりません。" },
+  "loading_more": { "message": "さらに読み込む..." },
+  "sold": { "message": "販売済み" }
+}
+
+=== th (التايلاندية) ===
+{
+  "appName": { "message": "AliFinder - ราคาดีที่สุด" },
+  "appDesc": { "message": "ค้นหาสินค้าที่เหมือนกันใน AliExpress ในราคาที่ดีกว่า" },
+  "btn_cheapest": { "message": "ถูกที่สุด" },
+  "btn_popular": { "message": "ขายดีที่สุด" },
+  "btn_rating": { "message": "คะแนนสูงสุด" },
+  "free_shipping": { "message": "ส่งฟรี" },
+  "no_products": { "message": "ไม่พบสินค้า" },
+  "loading_more": { "message": "กำลังโหลดเพิ่มเติม..." },
+  "sold": { "message": "ขายแล้ว" }
+}
+
+=== vi (الفيتنامية) ===
+{
+  "appName": { "message": "AliFinder - Giá Tốt Nhất" },
+  "appDesc": { "message": "Tìm sản phẩm giống hệt trên AliExpress với giá tốt hơn." },
+  "btn_cheapest": { "message": "Rẻ nhất" },
+  "btn_popular": { "message": "Bán chạy nhất" },
+  "btn_rating": { "message": "Đánh giá tốt nhất" },
+  "free_shipping": { "message": "Miễn phí vận chuyển" },
+  "no_products": { "message": "Không tìm thấy sản phẩm." },
+  "loading_more": { "message": "Đang tải thêm..." },
+  "sold": { "message": "đã bán" }
+}
+
+=== id (الإندونيسية) ===
+{
+  "appName": { "message": "AliFinder - Harga Terbaik" },
+  "appDesc": { "message": "Temukan produk identik di AliExpress dengan harga lebih baik." },
+  "btn_cheapest": { "message": "Termurah" },
+  "btn_popular": { "message": "Terlaris" },
+  "btn_rating": { "message": "Rating Tertinggi" },
+  "free_shipping": { "message": "Gratis Ongkir" },
+  "no_products": { "message": "Produk tidak ditemukan." },
+  "loading_more": { "message": "Memuat lebih banyak..." },
+  "sold": { "message": "terjual" }
+}
+
+=== he (العبرية) ===
+{
+  "appName": { "message": "AliFinder - המחיר הטוב ביותר" },
+  "appDesc": { "message": "מצא מוצרים זהים ב-AliExpress במחיר טוב יותר." },
+  "btn_cheapest": { "message": "הזול ביותר" },
+  "btn_popular": { "message": "הנמכר ביותר" },
+  "btn_rating": { "message": "המדורג הגבוה ביותר" },
+  "free_shipping": { "message": "משלוח חינם" },
+  "no_products": { "message": "לא נמצאו מוצרים." },
+  "loading_more": { "message": "טוען עוד..." },
+  "sold": { "message": "נמכרו" }
+}
+
+=== uk (الأوكرانية) ===
+{
+  "appName": { "message": "AliFinder - Найкраща Ціна" },
+  "appDesc": { "message": "Знаходьте ідентичні товари на AliExpress за кращою ціною." },
+  "btn_cheapest": { "message": "Найдешевші" },
+  "btn_popular": { "message": "Бестселери" },
+  "btn_rating": { "message": "Найвищий рейтинг" },
+  "free_shipping": { "message": "Безкоштовна доставка" },
+  "no_products": { "message": "Товари не знайдено." },
+  "loading_more": { "message": "Завантаження..." },
+  "sold": { "message": "продано" }
+}
