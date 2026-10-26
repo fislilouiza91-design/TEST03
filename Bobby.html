@@ -1,168 +1,237 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    
-    body { 
-      width: 100%; height: 100vh; 
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; 
-      background: #ffffff !important; 
-      display: flex; flex-direction: column; overflow: hidden; 
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    }
-    
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-    #results { 
-      flex: 1; 
-      overflow-y: auto; 
-      overflow-x: hidden; 
-      padding: 16px; 
-      width: 100%; 
-      background: #ffffff; 
-      scrollbar-gutter: stable both-edges;
-    }
-    
-    .grid { 
-      display: grid; 
-      grid-template-columns: repeat(3, minmax(0, 1fr)); 
-      gap: 18px 12px; 
-      width: 100%; 
-      align-items: stretch; 
-    }
-    
-    .product-card { 
-      display: flex; flex-direction: column; 
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: #ffffff !important;
-      width: 100%;
-      height: 100%;
-      min-width: 0; 
-      transition: transform 0.25s ease; 
-    }
-    
-    .product-card:hover { transform: translateY(-5px); }
-    
-    /* 🔥 تم تكبير ارتفاع الصورة إلى 160 بكسل */
-    .img-box { 
-      width: 100%; 
-      height: 160px; 
-      background: #ffffff; 
-      position: relative;
-      overflow: hidden; 
-      border-radius: 8px; 
-      box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
-      margin-bottom: 8px;
-      transition: box-shadow 0.25s ease; 
-      padding: 6px; 
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    
-    .product-card:hover .img-box { box-shadow: 0 8px 16px rgba(0,0,0,0.15); }
-    
-    .img-box img { 
-      width: 100%; height: 100%; 
-      object-fit: contain; 
-    }
-    
-    .info { 
-      display: flex; 
-      flex-direction: column; 
-      width: 100%;
-      flex: 1; 
-      padding: 0 4px; 
-      min-width: 0;
-    }
-    
-    .title { 
-      font-size: 12px; 
-      color: #222222;
-      font-weight: 500;
-      line-height: 1.3; 
-      height: 32px; 
-      overflow: hidden; 
-      display: -webkit-box; 
-      -webkit-line-clamp: 2; 
-      -webkit-box-orient: vertical; 
-      margin-bottom: 6px; 
-      unicode-bidi: plaintext; 
-      text-align: start; 
-      word-break: break-word; 
-      overflow-wrap: break-word;
-    }
-    
-    .meta-row {
-      display: flex; 
-      align-items: center; 
-      gap: 4px;
-      font-size: 11px; 
-      color: #777777;
-      height: 16px; 
-      margin-bottom: 4px;
-      direction: ltr; 
-      justify-content: flex-start;
-    }
-    .divider { color: #d1d5db; margin: 0 2px; font-size: 10px; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #555555; font-weight: 600; }
-    .star { color: #ffa41c; font-size: 12px; }
-    
-    .price { 
-      font-size: 16px; 
-      font-weight: 800; 
-      color: #000000 !important; 
-      white-space: nowrap; 
-      direction: ltr; 
-      text-align: start;
-      height: 22px;
-      margin-bottom: 4px; 
-      letter-spacing: -0.5px;
-      overflow: hidden;
-      text-overflow: ellipsis; 
-    }
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
 
-    .shipping-row {
-      display: flex; 
-      align-items: center; 
-      gap: 4px;
-      font-size: 11px; 
-      color: #008f00; 
-      font-weight: 600;
-      height: 16px; 
-      margin-top: auto; 
-      direction: ltr; 
-      justify-content: flex-start;
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' }
+};
+
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key]) 
+        ? POPUP_TRANSLATIONS[siteLang][key] 
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
+}
+
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
+  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
+  if (match) {
+    let prefix = match[1] ? match[1].trim() : '';
+    let number = match[2] ? match[2].trim() : '';
+    let suffix = match[3] ? match[3].trim() : '';
+    let currency = suffix || prefix;
+    if (number && currency) {
+      return `${number} ${currency}`;
     }
+  }
+  return cleanStr; 
+}
 
-    /* تحديث ارتفاع الهياكل أيضاً لتناسب الحجم الجديد */
-    .skeleton { background: #f1f5f9; border-radius: 4px; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    .skeleton-card { display: flex; flex-direction: column; gap: 6px; background: #fff; }
-    .skeleton-img { width: 100%; height: 160px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
-    .skeleton-text { width: 100%; height: 12px; margin-top: 4px; }
-    .skeleton-text.short { width: 60%; }
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
 
-    #loader-more { display: none; text-align: center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background: #fff; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,71,71,0.3); border-top-color: #ff4747; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-      <div class="skeleton-card"><div class="skeleton skeleton-img"></div><div class="skeleton skeleton-text"></div><div class="skeleton skeleton-text short"></div></div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span> جاري جلب المزيد...</div>
-  </div>
-  <script src="popup.js"></script>
-</body>
-</html>
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+    
+    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = false;
+
+    try {
+      if (p?.shipping) {
+        const fee = p.shipping.shippingFee;
+        const amount = p.shipping.freightAmount?.value || p.shipping.freightAmount;
+        if (p.shipping.freeShipping === true || fee === 0 || fee === '0' || fee === '0.00' || fee === 'Free' || amount === 0 || amount === '0') {
+          isFreeShipping = true;
+        }
+      }
+      
+      if (!isFreeShipping && p?.sellingPoints && Array.isArray(p.sellingPoints)) {
+        const freeTag = p.sellingPoints.find(sp => {
+          let text = '';
+          if (typeof sp === 'string') text = sp;
+          else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
+          if (typeof text !== 'string') return false;
+          const s = text.toLowerCase();
+          return s.includes('free shipping') || s.includes('livraison gratuite') || s.includes('envío gratis') || s.includes('شحن مجاني') || s.includes('مجاني') || s.includes('бесплатно');
+        });
+        if (freeTag) isFreeShipping = true;
+      }
+    } catch (err) {}
+
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#008f00" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+
+    let shippingHtml = isFreeShipping 
+      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
+      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
+
+    let metaHtml = (soldText || rating) 
+      ? `<div class="meta-row">
+          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText && rating ? `<span class="divider">|</span>` : ''}
+          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+         </div>`
+      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+    a.setAttribute('dir', 'auto'); 
+
+    // 🔥 الترتيب الجديد: العنوان -> المبيعات/التقييم -> السعر -> الشحن
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${metaHtml}
+        <div class="price">${price}</div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
+  }
+}
+
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+  
+  if (!globalProducts || globalProducts.length === 0) { 
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`; 
+    return; 
+  }
+  
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop(); 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+  
+  if (res.error) { 
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`; 
+    return; 
+  }
+  
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000)); 
+  
+  isLoading = false; 
+  if(loaderMore) loaderMore.style.display = 'none';
+  
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop(); 
+      if (!isLoading && globalProducts.length > 0) {
+        render(false); 
+      }
+    }
+  }
+});
+
+loadInitial();
