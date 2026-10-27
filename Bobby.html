@@ -4,62 +4,85 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const randomDelay = () => sleep(400 + Math.random() * 600);
 
 async function ensureToken(tabId) {
-    let domainsToTry = [
-        "https://www.aliexpress.ru/",
-        "https://www.aliexpress.com/",
-        "https://login.aliexpress.com/"
-    ];
-
-    for (let domain of domainsToTry) {
-        try {
-            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
-            if (cookie && cookie.value) {
-                return cookie.value.split('_')[0];
-            }
-        } catch (e) {}
-    }
-
-    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
-    
-    await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: (u) => {
-            const controller = new AbortController();
-            setTimeout(() => controller.abort(), 3000);
-            try {
-                const fd = new FormData(); 
-                fd.append("data", "");
-                fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include", signal: controller.signal }).catch(()=>{});
-            } catch (e) {}
-        },
-        args: [url],
-    });
-    
-    await sleep(1500);
-
-    for (let domain of domainsToTry) {
-        try {
-            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
-            if (cookie && cookie.value) {
-                return cookie.value.split('_')[0];
-            }
-        } catch (e) {}
-    }
-    
+    // 1. المحاولة المباشرة: القراءة من داخل الصفحة (الأكثر موثوقية)
     try {
         const [result] = await chrome.scripting.executeScript({
             target: { tabId },
             world: 'MAIN',
             func: () => {
-                const match = document.cookie.match(/_m_h5_tk=([^;]+)/);
+                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
                 return match ? match[1].split('_')[0] : null;
             }
         });
-        return result?.result || null;
+        if (result?.result) {
+            console.log('[Nezzer] Token found directly from page:', result.result);
+            return result.result;
+        }
     } catch (e) {
-        return null;
+        console.warn('[Nezzer] Direct page read failed:', e);
     }
+
+    // 2. المحاولة عبر واجهة الكوكيز (chrome.cookies) في نطاقات متعددة
+    let domainsToTry = [
+        "https://www.aliexpress.ru/",
+        "https://www.aliexpress.com/",
+        "https://login.aliexpress.com/"
+    ];
+    for (let domain of domainsToTry) {
+        try {
+            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
+            if (cookie && cookie.value) {
+                console.log(`[Nezzer] Token found via chrome.cookies in ${domain}`);
+                return cookie.value.split('_')[0];
+            }
+        } catch (e) {}
+    }
+
+    // 3. المحاولة الأخيرة: إجبار السيرفر على إصدار توكن جديد
+    console.log('[Nezzer] No token found. Forcing token generation...');
+    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+    
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (u) => {
+                try {
+                    const fd = new FormData(); 
+                    fd.append("data", "");
+                    fetch(u, { 
+                        method: "POST", 
+                        headers: { "Content-Type": "application/x-www-form-urlencoded" }, 
+                        body: new URLSearchParams(fd), 
+                        credentials: "include" 
+                    }).catch(()=>{});
+                } catch (e) {}
+            },
+            args: [url],
+        });
+    } catch (e) {}
+
+    // الانتظار قليلاً (3 ثوانٍ) لمنح المتصفح وقتاً لحفظ الكوكي
+    await sleep(3000);
+
+    // 4. قراءة أخيرة بعد إجبار التوليد
+    try {
+        const [result] = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: () => {
+                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
+                return match ? match[1].split('_')[0] : null;
+            }
+        });
+        if (result?.result) {
+            console.log('[Nezzer] Token generated and found:', result.result);
+            return result.result;
+        }
+    } catch (e) {}
+
+    console.error('[Nezzer] FAILED to obtain token after all attempts.');
+    return null;
 }
 
 async function scraperInPage({ productId, page, streamId, md5Code, initialToken }) {
@@ -99,6 +122,8 @@ async function scraperInPage({ productId, page, streamId, md5Code, initialToken 
   const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
 
   const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
+  
+  // محاولة جلب المنتجات من النطاق الروسي أولاً، ثم العالمي
   const tryDomains = ["ru", "com"];
   
   for (let apiDomain of tryDomains) {
