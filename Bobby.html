@@ -2,20 +2,18 @@ import { md5 } from './lib/crypto.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// دالة لجلب التوكن من الكوكيز
 async function getToken(tabId) {
-    // 1. المحاولة من الكوكيز مباشرة
     let domainsToTry = ["https://www.aliexpress.ru/", "https://www.aliexpress.com/"];
     for (let domain of domainsToTry) {
         try {
             let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
             if (cookie && cookie.value) {
-                return cookie.value.split('_')[0]; // التوكن هو الجزء الأول قبل _
+                console.log("[Nezzer] Token found in cookies");
+                return cookie.value.split('_')[0];
             }
         } catch (e) {}
     }
 
-    // 2. إذا لم نجد التوكن، نقرأه من داخل الصفحة
     try {
         const [result] = await chrome.scripting.executeScript({
             target: { tabId },
@@ -25,13 +23,16 @@ async function getToken(tabId) {
                 return match ? match[1].split('_')[0] : null;
             }
         });
-        if (result?.result) return result.result;
+        if (result?.result) {
+            console.log("[Nezzer] Token found in page DOM");
+            return result.result;
+        }
     } catch (e) {}
 
+    console.log("[Nezzer] Token not found!");
     return null;
 }
 
-// دالة لجمع بيانات المتصفح (مثل cna و xman)
 function collectPageData() {
     const cnaMatch = document.cookie.match(/(?:^|;\s*)cna=([^;]+)/);
     const cna = cnaMatch ? cnaMatch[1] : '';
@@ -50,16 +51,15 @@ function collectPageData() {
 }
 
 async function fetchSimilarProducts({ page = 1, streamId = null }) {
+    console.log("[Nezzer] fetchSimilarProducts started...");
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
     
     const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
 
-    // 1. جلب التوكن
     const token = await getToken(tab.id);
     if (!token) return { error: 'NO_TOKEN' };
 
-    // 2. جمع بيانات الصفحة
     let pageData;
     try {
         const [result] = await chrome.scripting.executeScript({
@@ -74,13 +74,11 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
 
     if (!pageData) return { error: 'PAGE_DATA_NULL' };
 
-    // 3. توليد التوقيع وإرسال الطلب
     try {
         const timestamp = Date.now();
         const appKey = "24815441";
         const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
         
-        // إعدادات السوق الروسي
         const y = {
             DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: pageData.cna, currency: "RUB",
             image: pageData.ogImage ? pageData.ogImage.split("_")[0] : "", isNewImageSearch: true, lang: "ru_RU", locale: "ru_RU",
@@ -96,14 +94,17 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         if (streamId) { y.streamId = streamId; y.realReffer = ""; }
 
         const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
-        
-        // حساب التوقيع: token&timestamp&appKey&dataString
         const sign = md5(`${token}&${timestamp}&${appKey}&${dataString}`).toLowerCase();
         
-        // رابط الطلب (نستخدم النطاق العالمي لأنه المستقر، مع تمرير إعدادات RU)
+        // استخدام النطاق العالمي مع تمرير إعدادات RU
         const url = `https://recom-acs.aliexpress.com/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=${appKey}&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson`;
 
-        // إرسال الطلب من الخلفية (يتجاوز CORS)
+        console.log("[Nezzer] Sending fetch request to:", url);
+
+        // إضافة مؤقت لإلغاء الطلب إذا تأخر السيرفر (تجنب التعليق)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 ثوانٍ كحد أقصى
+
         const response = await fetch(url, {
             method: "POST",
             headers: { 
@@ -111,10 +112,13 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
                 "Referer": "https://aliexpress.ru/"
             },
             body: `data=${encodeURIComponent(dataString)}`,
-            credentials: "include"
+            credentials: "include",
+            signal: controller.signal
         });
 
-        // معالجة الاستجابة (قد تكون JSON أو JSONP)
+        clearTimeout(timeoutId);
+        console.log("[Nezzer] Response received:", response.status);
+
         const text = await response.text();
         let json;
         try {
@@ -124,19 +128,21 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
             if (match) {
                 json = JSON.parse(match[1]);
             } else {
+                console.log("[Nezzer] Invalid JSON:", text);
                 return { error: 'INVALID_RESPONSE_FORMAT: ' + text.substring(0, 50) };
             }
         }
 
-        // التحقق من وجود تحدي أمني (x5sec)
+        console.log("[Nezzer] API Response:", json);
+
         if (json?.ret && json.ret[0] && json.ret[0].includes('RGV587_ERROR')) {
-            return { error: 'SECURITY_CHECK_REQUIRED: يرجى تحديث الصفحة أو التمرير لأسفل قليلاً ثم إعادة المحاولة.' };
+            return { error: 'SECURITY_CHECK: يرجى تحديث الصفحة والمحاولة مرة أخرى.' };
         }
 
         const products = json?.data?.mods?.itemList?.content ?? [];
 
         if (products.length === 0) {
-            return { error: 'EMPTY_RESULT: لم يتم العثور على منتجات. قد تحتاج لتحديث الصفحة.' };
+            return { error: 'EMPTY_RESULT: لم يتم العثور على منتجات.' };
         }
 
         return {
@@ -147,6 +153,10 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         };
 
     } catch (error) {
+        console.log("[Nezzer] Fetch error:", error);
+        if (error.name === 'AbortError') {
+            return { error: 'TIMEOUT: استغرق السيرفر وقتاً طويلاً للرد. قد يكون هناك حماية.' };
+        }
         return { error: 'FETCH_FAILED: ' + error.message };
     }
 }
