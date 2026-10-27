@@ -3,169 +3,103 @@ import { md5 } from './lib/crypto.js';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const randomDelay = () => sleep(400 + Math.random() * 600);
 
-async function ensureToken(tabId) {
-    // 1. قراءة مباشرة من الصفحة (الطريقة الأضمن)
-    try {
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: () => {
-                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
-                return match ? match[1].split('_')[0] : null;
-            }
-        });
-        if (result?.result) return result.result;
-    } catch (e) {}
-
-    // 2. البحث في نطاقات الكوكيز
-    let domainsToTry = ["https://www.aliexpress.ru/", "https://www.aliexpress.com/"];
-    for (let domain of domainsToTry) {
-        try {
-            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
-            if (cookie && cookie.value) return cookie.value.split('_')[0];
-        } catch (e) {}
-    }
-
-    // 3. إجبار السيرفر الروسي على إصدار توكن
-    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+// دالة لجمع البيانات من الصفحة (بدون إرسال طلبات شبكة)
+function collectPageData() {
+    const tokenMatch = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
+    const token = tokenMatch ? tokenMatch[1].split('_')[0] : null;
     
-    try {
-        await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: (u) => {
-                try {
-                    const fd = new FormData(); fd.append("data", "");
-                    fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" }).catch(()=>{});
-                } catch (e) {}
-            },
-            args: [url],
-        });
-    } catch (e) {}
-
-    await sleep(2000);
-
-    // 4. قراءة أخيرة
-    try {
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: () => {
-                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
-                return match ? match[1].split('_')[0] : null;
-            }
-        });
-        if (result?.result) return result.result;
-    } catch (e) {}
-
-    return null;
-}
-
-async function scraperInPage({ productId, page, streamId, md5Code, initialToken }) {
-  const md5Fn = new Function('return ' + md5Code)();
-  const token = initialToken || document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
-  
-  if (!token) return { error: 'NO_TOKEN' };
-
-  const cna = document.cookie?.split("cna=")[1]?.split(";")[0];
-  const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
-  const acsRt = xman?.split("acs_rt=")[1];
-  
-  // إجبار الإعدادات الروسية
-  const locale = "ru_RU";
-  const currency = "RUB";
-  const region = "RU";
-
-  const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
-  const ogImage = document.querySelector('meta[property="og:image"]')?.content;
-
-  const y = {
-    DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
-    image: ogImage?.split("_")[0], isNewImageSearch: true, lang: locale, locale: locale,
-    osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
-    recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
-    searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
-    sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
-    "x-appKey": 24815441,
-    "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
-    _city: "", _currency: currency, _state: ""
-  };
-
-  if (streamId) { y.streamId = streamId; y.realReffer = ""; }
-
-  const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
-  const timestamp = Date.now();
-  const sign = md5Fn(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
-
-  const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
-  
-  // استخدام النطاق الروسي حصرياً
-  const url = `https://recom-acs.aliexpress.ru/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
-
-  try {
-    const fd = new FormData();
-    fd.append("data", dataString);
+    const cnaMatch = document.cookie.match(/(?:^|;\s*)cna=([^;]+)/);
+    const cna = cnaMatch ? cnaMatch[1] : '';
     
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const xmanMatch = document.cookie.match(/(?:^|;\s*)xman_us_f=([^;]+)/);
+    const xman = xmanMatch ? decodeURIComponent(xmanMatch[1]) : '';
+    const acsRt = xman.split('acs_rt=')[1] || '';
+    
+    const pageIdElement = document.querySelector("a[st_page_id]");
+    const pageId = pageIdElement ? pageIdElement.getAttribute("st_page_id") : "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+    
+    const ogImageElement = document.querySelector('meta[property="og:image"]');
+    const ogImage = ogImageElement ? ogImageElement.content : '';
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { 
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Referer": "https://aliexpress.ru/" // ترويسة مهمة جداً للسيرفر الروسي
-      },
-      body: new URLSearchParams(fd),
-      credentials: "include",
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    
-    const json = await response.json();
-    const products = json?.data?.mods?.itemList?.content ?? [];
-    
     return {
-      products: products,
-      streamId: json?.data?.pageInfo?.streamId,
-      ret: json?.ret?.[0],
-      host: location.host
+        token,
+        cna,
+        acsRt,
+        pageId,
+        ogImage,
+        host: location.host
     };
-  } catch (e) {
-    return { error: e.message };
-  }
 }
 
 async function fetchSimilarProducts({ page = 1, streamId = null }) {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
-  
-  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
-  const initialToken = await ensureToken(tab.id);
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
+    
+    const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
 
-  let lastError;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+    // 1. جمع البيانات من الصفحة
+    let pageData;
     try {
-      const md5Code = md5.toString();
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        world: 'MAIN',
-        func: scraperInPage,
-        args: [{ productId, page, streamId, md5Code, initialToken }],
-      });
-
-      const data = result?.result;
-      if (!data) throw new Error('EMPTY_RESULT');
-      if (data.error) throw new Error(data.error);
-      if (data.ret && !data.ret.startsWith('SUCCESS') && data.ret !== 'SUCCESS') throw new Error('API_' + data.ret);
-
-      return data;
-    } catch (err) {
-      lastError = err;
-      if (attempt < 2) await randomDelay();
+        const [result] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            world: 'MAIN',
+            func: collectPageData
+        });
+        pageData = result?.result;
+    } catch (e) {
+        return { error: 'PAGE_DATA_FAILED' };
     }
-  }
-  return { error: lastError?.message || 'UNKNOWN_ERROR' };
+
+    if (!pageData || !pageData.token) return { error: 'NO_TOKEN' };
+
+    // 2. إرسال الطلب من الخلفية (لتجنب CORS)
+    try {
+        const md5Fn = md5;
+        const timestamp = Date.now();
+        
+        const y = {
+            DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: pageData.cna, currency: "RUB",
+            image: pageData.ogImage.split("_")[0], isNewImageSearch: true, lang: "ru_RU", locale: "ru_RU",
+            osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+            recommendInfo: JSON.stringify({ cna: pageData.cna, foreverRandomToken: pageData.acsRt, pageId: pageData.pageId }),
+            searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: "RU", shpt_co: "RU",
+            sortOrder: "default", sortType: "default", sversion: 10000, visitorId: pageData.cna,
+            "x-appKey": 24815441,
+            "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+            _city: "", _currency: "RUB", _state: ""
+        };
+
+        if (streamId) { y.streamId = streamId; y.realReffer = ""; }
+
+        const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
+        const sign = md5Fn(`${pageData.token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+        
+        const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
+        const url = `https://recom-acs.aliexpress.ru/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { 
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://aliexpress.ru/"
+            },
+            body: `data=${encodeURIComponent(dataString)}`,
+            credentials: "include"
+        });
+
+        const json = await response.json();
+        const products = json?.data?.mods?.itemList?.content ?? [];
+
+        return {
+            products: products,
+            streamId: json?.data?.pageInfo?.streamId,
+            ret: json?.ret?.[0],
+            host: pageData.host
+        };
+
+    } catch (error) {
+        return { error: 'FETCH_FAILED' };
+    }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
