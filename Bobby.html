@@ -24,7 +24,7 @@ async function ensureToken(tabId) {
     } catch (e) {}
 
     // 3. إجبار السيرفر على توليد التوكن
-    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson`;
     try {
         await chrome.scripting.executeScript({
             target: { tabId },
@@ -111,7 +111,9 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         const sign = md5(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
         
         const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
-        const url = `https://recom-acs.aliexpress.ru/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+        
+        // تم إزالة dataType=jsonp من الرابط
+        const url = `https://recom-acs.aliexpress.ru/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson`;
 
         const response = await fetch(url, {
             method: "POST",
@@ -123,7 +125,21 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
             credentials: "include"
         });
 
-        const json = await response.json();
+        // قراءة النص أولاً لتنظيفه إذا كان يحتوي على JSONP
+        const text = await response.text();
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (e) {
+            // إذا كان الرد بصيغة mtopjsonp123({...})، نقوم باستخراج الـ JSON فقط
+            const match = text.match(/^[^(]*\((.*)\)/s);
+            if (match) {
+                json = JSON.parse(match[1]);
+            } else {
+                return { error: 'INVALID_RESPONSE_FORMAT: ' + text.substring(0, 30) };
+            }
+        }
+
         const products = json?.data?.mods?.itemList?.content ?? [];
 
         return {
