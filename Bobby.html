@@ -1,101 +1,116 @@
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
 async function fetchSimilarProducts({ page = 1, streamId = null }) {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
-    
-    const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
 
-    // جلب صورة المنتج الأساسي (مطلوبة للبحث في الواجهة الروسية)
-    let pageData;
-    try {
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            world: 'MAIN',
-            func: () => {
-                const ogImageElement = document.querySelector('meta[property="og:image"]');
-                return { 
-                    ogImage: ogImageElement ? ogImageElement.content : '',
-                    host: location.host
-                };
-            }
-        });
-        pageData = result?.result;
-    } catch (e) {
-        return { error: 'PAGE_DATA_FAILED' };
-    }
+    // 1. حقن اعتراض الـ API داخل الصفحة
+    await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+            if (window.__NEZZER_INTERCEPTED__) return;
+            window.__NEZZER_INTERCEPTED__ = true;
+            window.__NEZZER_API_DATA__ = null;
 
-    if (!pageData || !pageData.ogImage) return { error: 'NO_IMAGE_FOUND' };
-
-    try {
-        // استخدام الواجهة الداخلية لموقع aliexpress.ru لجلب الأسعار الحقيقية
-        const url = 'https://aliexpress.ru/aeglodetailweb/api/recommend/v2/query';
-        
-        const payload = {
-            productId: productId,
-            imageUrl: pageData.ogImage.split('_')[0],
-            page: page,
-            pageSize: 20,
-            searchBizScene: "imageSearch",
-            shipToCountry: "RU",
-            currency: "RUB",
-            locale: "ru_RU",
-            platform: "pc"
-        };
-
-        const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/plain, */*"
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            return { error: 'RU_API_ERROR: ' + response.status };
-        }
-
-        const json = await response.json();
-        
-        // استخراج المنتجات من استجابة الموقع الروسي
-        let rawProducts = json?.data?.mods?.itemList?.content || 
-                           json?.result?.mods?.itemList?.content || 
-                           json?.data?.itemList || 
-                           [];
-
-        // تحويل البيانات لتتوافق مع واجهة الإضافة
-        const products = rawProducts.map(p => {
-            const priceNum = p?.prices?.salePrice?.minPrice || 
-                             p?.prices?.salePrice?.formattedPrice || 
-                             p?.price?.formattedPrice || 
-                             p?.price?.minPrice || '0';
-            
-            return {
-                productId: p.productId || p.id,
-                title: { displayTitle: p.title?.displayTitle || p.title || 'Product' },
-                image: { imgUrl: p.image?.imgUrl || p.imageUrl || '' },
-                prices: { 
-                    salePrice: { 
-                        formattedPrice: typeof priceNum === 'string' && priceNum.includes('₽') ? priceNum : `${priceNum} ₽`,
-                        minPrice: p?.prices?.salePrice?.minPrice || p?.price?.minPrice || 0
-                    } 
-                },
-                trade: { tradeCount: p.trade?.tradeCount || p.tradeCount || 0 },
-                evaluation: { starRating: p.evaluation?.starRating || p.starRating || 0 }
+            const originalFetch = window.fetch;
+            window.fetch = async function(...args) {
+                const response = await originalFetch.apply(this, args);
+                try {
+                    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
+                    if (url && (url.includes('recommend') || url.includes('similar')) && response.ok) {
+                        const clone = response.clone();
+                        clone.json().then(data => {
+                            // التحقق من وجود بيانات المنتجات في الاستجابة
+                            if (data && (data.data || data.result || data.mods)) {
+                                window.__NEZZER_API_DATA__ = data;
+                            }
+                        }).catch(e => {});
+                    }
+                } catch (e) {}
+                return response;
             };
-        });
+        }
+    });
 
-        return {
-            products: products,
-            streamId: null, // الواجهة الروسية لا تستخدم streamId بنفس الطريقة
-            ret: 'SUCCESS',
-            host: pageData.host
-        };
+    // 2. تحريك الصفحة للأسفل لإجبار الموقع على جلب منتجات جديدة
+    await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+            window.scrollTo(0, document.body.scrollHeight * 0.8);
+        }
+    });
 
-    } catch (error) {
-        return { error: 'FETCH_FAILED: ' + error.message };
+    // 3. الانتظار 3 ثوانٍ حتى يقوم الموقع بطلب البيانات
+    await new Promise(r => setTimeout(r, 3000));
+
+    // 4. استرجاع البيانات التي تم اعتراضها
+    const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => window.__NEZZER_API_DATA__
+    });
+
+    const apiData = result?.result;
+    
+    if (!apiData) {
+        return { error: 'API_DATA_NOT_FOUND: يرجى التمرير لأسفل الصفحة قليلاً ثم إعادة المحاولة.' };
     }
+
+    // 5. استخراج المنتجات من الاستجابة (دعم الهياكل المختلفة لموقع .ru)
+    let rawProducts = 
+        apiData?.data?.mods?.itemList?.content || 
+        apiData?.result?.mods?.itemList?.content || 
+        apiData?.data?.itemList || 
+        apiData?.mods?.itemList?.content || 
+        [];
+
+    // إذا لم نجد المنتجات، نبحث في المصفوفات الأخرى
+    if (rawProducts.length === 0) {
+        const findArray = (obj) => {
+            for (let key in obj) {
+                if (Array.isArray(obj[key]) && obj[key].length > 0 && obj[key][0].productId) return obj[key];
+                if (typeof obj[key] === 'object' && obj[key] !== null) {
+                    const found = findArray(obj[key]);
+                    if (found) return found;
+                }
+            }
+            return null;
+        };
+        rawProducts = findArray(apiData) || [];
+    }
+
+    // 6. تحويل البيانات لتتوافق مع واجهة الإضافة
+    const products = rawProducts.map(p => {
+        const priceNum = p?.prices?.salePrice?.minPrice || 
+                         p?.prices?.salePrice?.formattedPrice || 
+                         p?.price?.formattedPrice || 
+                         p?.price?.minPrice || '0';
+        
+        return {
+            productId: p.productId || p.id || p.itemId,
+            title: { displayTitle: p.title?.displayTitle || p.title || 'Product' },
+            image: { imgUrl: p.image?.imgUrl || p.imageUrl || p.imgUrl || '' },
+            prices: { 
+                salePrice: { 
+                    formattedPrice: typeof priceNum === 'string' && priceNum.includes('₽') ? priceNum : `${priceNum} ₽`,
+                    minPrice: p?.prices?.salePrice?.minPrice || p?.price?.minPrice || 0
+                } 
+            },
+            trade: { tradeCount: p.trade?.tradeCount || p.tradeCount || 0 },
+            evaluation: { starRating: p.evaluation?.starRating || p.starRating || 0 }
+        };
+    });
+
+    if (products.length === 0) {
+         return { error: 'NO_PRODUCTS_EXTRACTED' };
+    }
+
+    return {
+        products: products,
+        streamId: null, 
+        ret: 'SUCCESS',
+        host: location.host
+    };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
