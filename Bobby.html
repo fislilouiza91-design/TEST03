@@ -1,13 +1,57 @@
 import { md5 } from './lib/crypto.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const randomDelay = () => sleep(400 + Math.random() * 600);
 
-// دالة لجمع البيانات من الصفحة (بدون إرسال طلبات شبكة)
+async function ensureToken(tabId) {
+    // 1. البحث في الكوكيز (الطريقة الرسمية)
+    try {
+        let cookie = await chrome.cookies.get({ url: "https://www.aliexpress.ru/", name: "_m_h5_tk" });
+        if (!cookie) cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        if (cookie && cookie.value) return cookie.value.split('_')[0];
+    } catch(e) {}
+
+    // 2. البحث من داخل الصفحة
+    try {
+        const [result] = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: () => {
+                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
+                return match ? match[1].split('_')[0] : null;
+            }
+        });
+        if (result?.result) return result.result;
+    } catch (e) {}
+
+    // 3. إجبار السيرفر على توليد التوكن
+    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (u) => {
+                try {
+                    const fd = new FormData(); fd.append("data", "");
+                    fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" }).catch(()=>{});
+                } catch (e) {}
+            },
+            args: [url],
+        });
+    } catch (e) {}
+
+    await sleep(2000);
+
+    // 4. إعادة المحاولة الأخيرة
+    try {
+        let cookie = await chrome.cookies.get({ url: "https://www.aliexpress.ru/", name: "_m_h5_tk" });
+        if (!cookie) cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        if (cookie && cookie.value) return cookie.value.split('_')[0];
+    } catch(e) {}
+
+    return null;
+}
+
 function collectPageData() {
-    const tokenMatch = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
-    const token = tokenMatch ? tokenMatch[1].split('_')[0] : null;
-    
     const cnaMatch = document.cookie.match(/(?:^|;\s*)cna=([^;]+)/);
     const cna = cnaMatch ? cnaMatch[1] : '';
     
@@ -21,14 +65,7 @@ function collectPageData() {
     const ogImageElement = document.querySelector('meta[property="og:image"]');
     const ogImage = ogImageElement ? ogImageElement.content : '';
 
-    return {
-        token,
-        cna,
-        acsRt,
-        pageId,
-        ogImage,
-        host: location.host
-    };
+    return { cna, acsRt, pageId, ogImage, host: location.host };
 }
 
 async function fetchSimilarProducts({ page = 1, streamId = null }) {
@@ -37,7 +74,9 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
     
     const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
 
-    // 1. جمع البيانات من الصفحة
+    const token = await ensureToken(tab.id);
+    if (!token) return { error: 'NO_TOKEN' };
+
     let pageData;
     try {
         const [result] = await chrome.scripting.executeScript({
@@ -50,16 +89,13 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         return { error: 'PAGE_DATA_FAILED' };
     }
 
-    if (!pageData || !pageData.token) return { error: 'NO_TOKEN' };
+    if (!pageData) return { error: 'PAGE_DATA_NULL' };
 
-    // 2. إرسال الطلب من الخلفية (لتجنب CORS)
     try {
-        const md5Fn = md5;
         const timestamp = Date.now();
-        
         const y = {
             DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: pageData.cna, currency: "RUB",
-            image: pageData.ogImage.split("_")[0], isNewImageSearch: true, lang: "ru_RU", locale: "ru_RU",
+            image: pageData.ogImage ? pageData.ogImage.split("_")[0] : "", isNewImageSearch: true, lang: "ru_RU", locale: "ru_RU",
             osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
             recommendInfo: JSON.stringify({ cna: pageData.cna, foreverRandomToken: pageData.acsRt, pageId: pageData.pageId }),
             searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: "RU", shpt_co: "RU",
@@ -72,7 +108,7 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         if (streamId) { y.streamId = streamId; y.realReffer = ""; }
 
         const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
-        const sign = md5Fn(`${pageData.token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+        const sign = md5(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
         
         const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
         const url = `https://recom-acs.aliexpress.ru/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
@@ -98,7 +134,7 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
         };
 
     } catch (error) {
-        return { error: 'FETCH_FAILED' };
+        return { error: 'FETCH_FAILED: ' + error.message };
     }
 }
 
