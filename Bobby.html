@@ -2,46 +2,72 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
 
-    // 1. حقن اعتراض الـ API داخل الصفحة
+    // 1. حقن الاعتراض المزدوج (fetch + XMLHttpRequest)
     await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         world: 'MAIN',
         func: () => {
-            if (window.__NEZZER_INTERCEPTED__) return;
-            window.__NEZZER_INTERCEPTED__ = true;
+            if (window.__NEZZER_HOOKED__) return;
+            window.__NEZZER_HOOKED__ = true;
             window.__NEZZER_API_DATA__ = null;
 
+            const catchData = (data) => {
+                if (!data) return;
+                const str = JSON.stringify(data);
+                if (str.includes('productId') || str.includes('itemList')) {
+                    window.__NEZZER_API_DATA__ = data;
+                }
+            };
+
+            // اعتراض fetch
             const originalFetch = window.fetch;
             window.fetch = async function(...args) {
                 const response = await originalFetch.apply(this, args);
                 try {
-                    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
-                    if (url && (url.includes('recommend') || url.includes('similar')) && response.ok) {
-                        const clone = response.clone();
-                        clone.json().then(data => {
-                            // التحقق من وجود بيانات المنتجات في الاستجابة
-                            if (data && (data.data || data.result || data.mods)) {
-                                window.__NEZZER_API_DATA__ = data;
-                            }
-                        }).catch(e => {});
-                    }
+                    const clone = response.clone();
+                    clone.json().then(catchData).catch(() => {});
                 } catch (e) {}
                 return response;
+            };
+
+            // اعتراض XMLHttpRequest
+            const originalXHR = window.XMLHttpRequest;
+            window.XMLHttpRequest = function() {
+                const xhr = new originalXHR();
+                const originalOpen = xhr.open;
+                xhr.open = function(method, url) {
+                    xhr.addEventListener('load', function() {
+                        try {
+                            const data = JSON.parse(xhr.responseText);
+                            catchData(data);
+                        } catch (e) {}
+                    });
+                    return originalOpen.apply(this, arguments);
+                };
+                return xhr;
             };
         }
     });
 
-    // 2. تحريك الصفحة للأسفل لإجبار الموقع على جلب منتجات جديدة
+    // 2. تمرير الصفحة ببطء لأسفل لإجبار الموقع على جلب المنتجات المشابهة
     await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         world: 'MAIN',
         func: () => {
-            window.scrollTo(0, document.body.scrollHeight * 0.8);
+            let totalHeight = 0;
+            let distance = 100;
+            let timer = setInterval(() => {
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+                if(totalHeight >= 1500) {
+                    clearInterval(timer);
+                }
+            }, 100);
         }
     });
 
-    // 3. الانتظار 3 ثوانٍ حتى يقوم الموقع بطلب البيانات
-    await new Promise(r => setTimeout(r, 3000));
+    // 3. الانتظار 4 ثوانٍ حتى يكتمل جلب البيانات
+    await new Promise(r => setTimeout(r, 4000));
 
     // 4. استرجاع البيانات التي تم اعتراضها
     const [result] = await chrome.scripting.executeScript({
@@ -53,56 +79,54 @@ async function fetchSimilarProducts({ page = 1, streamId = null }) {
     const apiData = result?.result;
     
     if (!apiData) {
-        return { error: 'API_DATA_NOT_FOUND: يرجى التمرير لأسفل الصفحة قليلاً ثم إعادة المحاولة.' };
+        return { error: 'API_DATA_NOT_FOUND: الموقع لم يقم بجلب البيانات. يرجى التمرير لأسفل الصفحة قليلاً بيدك ثم إعادة المحاولة.' };
     }
 
-    // 5. استخراج المنتجات من الاستجابة (دعم الهياكل المختلفة لموقع .ru)
-    let rawProducts = 
-        apiData?.data?.mods?.itemList?.content || 
-        apiData?.result?.mods?.itemList?.content || 
-        apiData?.data?.itemList || 
-        apiData?.mods?.itemList?.content || 
-        [];
-
-    // إذا لم نجد المنتجات، نبحث في المصفوفات الأخرى
-    if (rawProducts.length === 0) {
-        const findArray = (obj) => {
-            for (let key in obj) {
-                if (Array.isArray(obj[key]) && obj[key].length > 0 && obj[key][0].productId) return obj[key];
-                if (typeof obj[key] === 'object' && obj[key] !== null) {
-                    const found = findArray(obj[key]);
-                    if (found) return found;
-                }
+    // 5. استخراج المصفوفة التي تحتوي على المنتجات (بحث عميق)
+    const findProductsArray = (obj) => {
+        if (!obj) return null;
+        if (Array.isArray(obj)) {
+            if (obj.length > 0 && (obj[0].productId || obj[0].itemId || obj[0].id)) return obj;
+            for (let item of obj) {
+                const found = findProductsArray(item);
+                if (found) return found;
             }
-            return null;
-        };
-        rawProducts = findArray(apiData) || [];
-    }
+        } else if (typeof obj === 'object') {
+            for (let key in obj) {
+                const found = findProductsArray(obj[key]);
+                if (found) return found;
+            }
+        }
+        return null;
+    };
+
+    let rawProducts = findProductsArray(apiData) || [];
 
     // 6. تحويل البيانات لتتوافق مع واجهة الإضافة
     const products = rawProducts.map(p => {
         const priceNum = p?.prices?.salePrice?.minPrice || 
                          p?.prices?.salePrice?.formattedPrice || 
                          p?.price?.formattedPrice || 
-                         p?.price?.minPrice || '0';
+                         p?.price?.minPrice || 
+                         p?.price || '0';
         
         return {
             productId: p.productId || p.id || p.itemId,
-            title: { displayTitle: p.title?.displayTitle || p.title || 'Product' },
-            image: { imgUrl: p.image?.imgUrl || p.imageUrl || p.imgUrl || '' },
+            title: { displayTitle: p.title?.displayTitle || p.title || p.titleText || 'Product' },
+            image: { imgUrl: p.image?.imgUrl || p.imageUrl || p.imgUrl || p.image || '' },
             prices: { 
                 salePrice: { 
-                    formattedPrice: typeof priceNum === 'string' && priceNum.includes('₽') ? priceNum : `${priceNum} ₽`,
-                    minPrice: p?.prices?.salePrice?.minPrice || p?.price?.minPrice || 0
+                    formattedPrice: typeof priceNum === 'string' && (priceNum.includes('₽') || priceNum.includes('руб')) ? priceNum : `${priceNum} ₽`,
+                    minPrice: p?.prices?.salePrice?.minPrice || p?.price?.minPrice || p?.price || 0
                 } 
             },
-            trade: { tradeCount: p.trade?.tradeCount || p.tradeCount || 0 },
-            evaluation: { starRating: p.evaluation?.starRating || p.starRating || 0 }
+            trade: { tradeCount: p.trade?.tradeCount || p.tradeCount || p.sold || 0 },
+            evaluation: { starRating: p.evaluation?.starRating || p.starRating || p.rating || 0 }
         };
     });
 
     if (products.length === 0) {
-         return { error: 'NO_PRODUCTS_EXTRACTED' };
+         return { error: 'NO_PRODUCTS_EXTRACTED: تم جلب البيانات ولكن لم يتم العثور على منتجات.' };
     }
 
     return {
