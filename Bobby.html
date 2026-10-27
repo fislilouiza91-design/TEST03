@@ -1,11 +1,57 @@
-{
-  "appName": { "message": "Nezzer RU - AliExpress Price Finder" },
-  "appDesc": { "message": "Find identical products on AliExpress for a better price." },
-  "btn_cheapest": { "message": "Cheapest" },
-  "btn_popular": { "message": "Best Selling" },
-  "btn_rating": { "message": "Best Rated" },
-  "free_shipping": { "message": "Free shipping" },
-  "no_products": { "message": "No products found." },
-  "loading_more": { "message": "Loading more..." },
-  "sold": { "message": "sold" }
+async function ensureToken(tabId) {
+    // 1. نجرب البحث عن التوكن في النطاقات المحتملة
+    let domainsToTry = [
+        "https://www.aliexpress.ru/",
+        "https://www.aliexpress.com/",
+        "https://login.aliexpress.com/"
+    ];
+
+    for (let domain of domainsToTry) {
+        try {
+            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
+            if (cookie && cookie.value) {
+                console.log(`[Nezzer] Found token in ${domain}`);
+                return cookie.value.split('_')[0];
+            }
+        } catch (e) {}
+    }
+
+    // 2. إذا لم نجد الكوكي، نرسل طلباً وهمياً لإجبار السيرفر على إصداره
+    const url = `https://recom-acs.aliexpress.ru/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+    
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: async (u) => {
+            try {
+                const fd = new FormData(); fd.append("data", "");
+                await fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" });
+            } catch (e) {}
+        },
+        args: [url],
+    });
+    
+    // 3. ننتظر قليلاً ثم نعيد المحاولة
+    await new Promise(r => setTimeout(r, 1500));
+
+    for (let domain of domainsToTry) {
+        try {
+            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
+            if (cookie && cookie.value) {
+                return cookie.value.split('_')[0];
+            }
+        } catch (e) {}
+    }
+    
+    // 4. الخطة البديلة: القراءة المباشرة من الصفحة
+    const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: () => {
+            const match = document.cookie.match(/_m_h5_tk=([^;]+)/);
+            return match ? match[1].split('_')[0] : null;
+        }
+    });
+
+    return result?.result || null;
 }
