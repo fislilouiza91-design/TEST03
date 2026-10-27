@@ -1,57 +1,226 @@
-export function md5(e) {
-    function t(e, t) { return e << t | e >>> 32 - t; }
-    function r(e, t) {
-        var r, o, a, n, i;
-        return a = 2147483648 & e, n = 2147483648 & t, i = (1073741823 & e) + (1073741823 & t),
-        (r = 1073741824 & e) & (o = 1073741824 & t) ? 2147483648 ^ i ^ a ^ n : r | o ? 1073741824 & i ? 3221225472 ^ i ^ a ^ n : 1073741824 ^ i ^ a ^ n : i ^ a ^ n;
-    }
-    function o(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e & t | ~e & r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function a(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e & r | t & ~r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function n(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return e ^ t ^ r; }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function i(e, o, a, n, i, c, s) {
-        return e = r(e, r(r(function(e, t, r) { return t ^ (e | ~r); }(o, a, n), i), s)), r(t(e, c), o);
-    }
-    function c(e) {
-        var t, r = "", o = "";
-        for (t = 0; 3 >= t; t++) r += (o = "0" + (e >>> 8 * t & 255).toString(16)).substr(o.length - 2, 2);
-        return r;
-    }
-    var s, p, u, d, m, l, f, g, h, y;
-    for (y = function(e) {
-        for (var t, r = e.length, o = r + 8, a = 16 * ((o - o % 64) / 64 + 1), n = new Array(a - 1), i = 0, c = 0; r > c;)
-            i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | e.charCodeAt(c) << i, c++;
-        return i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | 128 << i, n[a - 2] = r << 3, n[a - 1] = r >>> 29, n;
-    }(e = function(e) {
-        e = e.replace(/\r\n/g, "\n");
-        for (var t = "", r = 0; r < e.length; r++) {
-            var o = e.charCodeAt(r);
-            128 > o ? t += String.fromCharCode(o) : o > 127 && 2048 > o ? (t += String.fromCharCode(o >> 6 | 192), t += String.fromCharCode(63 & o | 128)) : (t += String.fromCharCode(o >> 12 | 224), t += String.fromCharCode(o >> 6 & 63 | 128), t += String.fromCharCode(63 & o | 128));
-        }
-        return t;
-    }(e)), l = 1732584193, f = 4023233417, g = 2562383102, h = 271733878, s = 0; s < y.length; s += 16)
-        p = l, u = f, d = g, m = h,
-        l = o(l, f, g, h, y[s + 0], 7, 3614090360), h = o(h, l, f, g, y[s + 1], 12, 3905402710), g = o(g, h, l, f, y[s + 2], 17, 606105819), f = o(f, g, h, l, y[s + 3], 22, 3250441966),
-        l = o(l, f, g, h, y[s + 4], 7, 4118548399), h = o(h, l, f, g, y[s + 5], 12, 1200080426), g = o(g, h, l, f, y[s + 6], 17, 2821735955), f = o(f, g, h, l, y[s + 7], 22, 4249261313),
-        l = o(l, f, g, h, y[s + 8], 7, 1770035416), h = o(h, l, f, g, y[s + 9], 12, 2336552879), g = o(g, h, l, f, y[s + 10], 17, 4294925233), f = o(f, g, h, l, y[s + 11], 22, 2304563134),
-        l = o(l, f, g, h, y[s + 12], 7, 1804603682), h = o(h, l, f, g, y[s + 13], 12, 4254626195), g = o(g, h, l, f, y[s + 14], 17, 2792965006), l = a(l, f = o(f, g, h, l, y[s + 15], 22, 1236535329), g, h, y[s + 1], 5, 4129170786),
-        h = a(h, l, f, g, y[s + 6], 9, 3225465664), g = a(g, h, l, f, y[s + 11], 14, 643717713), f = a(f, g, h, l, y[s + 0], 20, 3921069994),
-        l = a(l, f, g, h, y[s + 5], 5, 3593408605), h = a(h, l, f, g, y[s + 10], 9, 38016083), g = a(g, h, l, f, y[s + 15], 14, 3634488961), f = a(f, g, h, l, y[s + 4], 20, 3889429448),
-        l = a(l, f, g, h, y[s + 9], 5, 568446438), h = a(h, l, f, g, y[s + 14], 9, 3275163606), g = a(g, h, l, f, y[s + 3], 14, 4107603335), f = a(f, g, h, l, y[s + 8], 20, 1163531501),
-        l = a(l, f, g, h, y[s + 13], 5, 2850285829), h = a(h, l, f, g, y[s + 2], 9, 4243563512), g = a(g, h, l, f, y[s + 7], 14, 1735328473), l = n(l, f = a(f, g, h, l, y[s + 12], 20, 2368359562), g, h, y[s + 5], 4, 4294588738),
-        h = n(h, l, f, g, y[s + 8], 11, 2272392833), g = n(g, h, l, f, y[s + 11], 16, 1839030562), f = n(f, g, h, l, y[s + 14], 23, 4259657740),
-        l = n(l, f, g, h, y[s + 1], 4, 2763975236), h = n(h, l, f, g, y[s + 4], 11, 1272893353), g = n(g, h, l, f, y[s + 7], 16, 4139469664), f = n(f, g, h, l, y[s + 10], 23, 3200236656),
-        l = n(l, f, g, h, y[s + 13], 4, 681279174), h = n(h, l, f, g, y[s + 0], 11, 3936430074), g = n(g, h, l, f, y[s + 3], 16, 3572445317), f = n(f, g, h, l, y[s + 6], 23, 76029189),
-        l = n(l, f, g, h, y[s + 9], 4, 3654602809), h = n(h, l, f, g, y[s + 12], 11, 3873151461), g = n(g, h, l, f, y[s + 15], 16, 530742520), l = i(l, f = n(f, g, h, l, y[s + 2], 23, 3299628645), g, h, y[s + 0], 6, 4096336452),
-        h = i(h, l, f, g, y[s + 7], 10, 1126891415), g = i(g, h, l, f, y[s + 14], 15, 2878612391), f = i(f, g, h, l, y[s + 5], 21, 4237533241),
-        l = i(l, f, g, h, y[s + 12], 6, 1700485571), h = i(h, l, f, g, y[s + 3], 10, 2399980690), g = i(g, h, l, f, y[s + 10], 15, 4293915773), f = i(f, g, h, l, y[s + 1], 21, 2240044497),
-        l = i(l, f, g, h, y[s + 8], 6, 1873313359), h = i(h, l, f, g, y[s + 15], 10, 4264355552), g = i(g, h, l, f, y[s + 6], 15, 2734768916), f = i(f, g, h, l, y[s + 13], 21, 1309151649),
-        l = i(l, f, g, h, y[s + 4], 6, 4149444226), h = i(h, l, f, g, y[s + 11], 10, 3174756917), g = i(g, h, l, f, y[s + 2], 15, 718787259), f = i(f, g, h, l, y[s + 9], 21, 3951481745),
-        l = r(l, p), f = r(f, u), g = r(g, d), h = r(h, m);
-    return (c(l) + c(f) + c(g) + c(h)).toLowerCase();
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+
+const SITE_TRANSLATIONS = {
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' }
+};
+
+function getSiteLang() {
+    let lang = document.documentElement.lang || '';
+    let lowerLang = String(lang).toLowerCase();
+    lang = lowerLang.split('-')[0].split('_')[0];
+    return SITE_TRANSLATIONS[lang] ? lang : 'ru';
 }
+
+const t = (key) => {
+    const lang = getSiteLang();
+    return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['ru'][key];
+};
+
+function removeWidget() {
+    if (widgetWrapper) {
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
+    }
+}
+
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
+
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = 'popular';
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid #f1f5f9; border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 75px;
+            width: 580px; max-width: 90vw; height: 88vh;
+            background: #ffffff !important; border-radius: 16px;
+            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden;
+        `;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.style.cssText = `
+            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
+        `;
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
+        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                } else {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                }
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
+                font-weight: 700; font-size: 13px; color: #64748b;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
+            `;
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+
+            if (currentSide === 'left') {
+                btn.style.transform = 'rotate(180deg)';
+            }
+
+            btn.onmousedown = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
+            };
+            btn.onmouseup = btn.onmouseleave = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+            };
+
+            btn.onclick = () => {
+                const isCurrentlyActive = (activeSort === sortValue);
+                if (isCurrentlyActive && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                    togglePanel(true);
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                }
+            };
+            return btn;
+        };
+
+        const btnRating = createSortBtn(t('rating'), 'rating');
+        const btnPopular = createSortBtn(t('popular'), 'popular');
+        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
+
+        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+        btnPopular.style.color = 'white';
+        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnRating);
+        pillContainer.appendChild(btnPopular);
+        pillContainer.appendChild(btnCheapest);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        function setSide(side) {
+            currentSide = side;
+
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') {
+                    btn.style.transform = 'rotate(180deg)';
+                } else {
+                    btn.style.transform = 'rotate(0deg)';
+                }
+            });
+
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
+                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
+                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', () => {
+            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) {
+                if (currentSide !== 'left') setSide('left');
+            } else {
+                if (currentSide !== 'right') setSide('right');
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+        });
+    } catch(err) {
+        console.error("Nezzer Error:", err);
+    }
+}
+
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
