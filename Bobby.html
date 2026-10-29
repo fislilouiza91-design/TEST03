@@ -181,8 +181,7 @@ function injectWidget() {
             };
 
             btn.onclick = (e) => {
-                // منع انتشار الحدث لكي لا يغلق النافذة فوراً بسبب مستمع النقر الخارجي
-                e.stopPropagation();
+                e.stopPropagation(); // منع الإغلاق المفاجئ
 
                 const isCurrentlyActive = (activeSort === sortValue);
                 if (isCurrentlyActive && isOpen) {
@@ -220,15 +219,20 @@ function injectWidget() {
         widgetWrapper.appendChild(iframeContainer);
         document.body.appendChild(widgetWrapper);
 
-        // 💡 إضافة مستمع النقر الخارجي للإغلاق
+        // 💡 مستمع النقر الخارجي
         window.addEventListener('mousedown', (e) => {
             if (!isOpen) return;
-            // إذا كان النقر داخل النافذة أو داخل الشريط الجانبي، لا تفعل شيئاً
             if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
-            
-            // إذا كان النقر خارجاً، أغلق النافذة
             togglePanel(false);
         });
+
+        // 💡 مستمع التمرير (Scroll) الخارجي الجديد
+        window.addEventListener('wheel', (e) => {
+            if (!isOpen) return;
+            // إذا كان المؤشر فوق النافذة أو الشريط الجانبي، لا تغلقها
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            togglePanel(false);
+        }, { passive: true });
 
         function setSide(side) {
             currentSide = side;
@@ -260,7 +264,7 @@ function injectWidget() {
 
         let isDragging = false;
         dragHandle.addEventListener('mousedown', (e) => {
-            e.stopPropagation(); // منع إغلاق النافذة عند محاولة سحب الشريط
+            e.stopPropagation();
             isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
         });
 
