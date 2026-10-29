@@ -138,83 +138,22 @@ function createCard(p) {
     const soldText = formatSold(trades);
     const directUrl = `https://${globalHost}/item/${p.productId}.html`;
 
-    // 💡 الماسح الشامل النهائي (Ultimate Deep Scanner) - يدعم 32 لغة
+    // 💡 الماسح الشامل (Ultimate Deep Scanner) - يدعم 32 لغة والحقول المخفية
     function checkFreeShipping(obj) {
         try {
             const str = JSON.stringify(obj).toLowerCase();
             
             const keywords = [
-                // English
-                'free shipping', 'free delivery',
-                // Arabic
-                'شحن مجاني', 'توصيل مجاني', 'مجانا',
-                // French
-                'livraison gratuite',
-                // Spanish
-                'envío gratis', 'envio gratis',
-                // Portuguese (Brazil/Portugal)
-                'frete grátis', 'frete gratis', 'envio grátis',
-                // Russian
-                'бесплатная доставка', 'бесплатно',
-                // German
-                'kostenloser versand', 'kostenlos',
-                // Italian
-                'spedizione gratuita',
-                // Turkish
-                'ücretsiz kargo',
-                // Dutch
-                'gratis verzending',
-                // Polish
-                'darmowa dostawa',
-                // Korean
-                '무료 배송', '무료배송',
-                // Japanese
-                '送料無料',
-                // Chinese (Simplified & Traditional)
-                '免运费', '免運費', '包邮', '包郵',
-                // Vietnamese
-                'miễn phí vận chuyển',
-                // Indonesian
-                'gratis ongkir', 'pengiriman gratis',
-                // Thai
-                'ส่งฟรี', 'จัดส่งฟรี',
-                // Hebrew
-                'משלוח חינם',
-                // Swedish
-                'fri frakt',
-                // Danish
-                'gratis fragt',
-                // Finnish
-                'ilmainen toimitus',
-                // Norwegian
-                'gratis frakt',
-                // Czech
-                'doprava zdarma',
-                // Romanian
-                'transport gratuit',
-                // Hungarian
-                'ingyenes szállítás',
-                // Greek
-                'δωρεάν αποστολή',
-                // Ukrainian
-                'безкоштовна доставка',
-                // Malay
-                'penghantaran percuma',
-                // Tagalog
-                'libreng pagpapadala',
-                // Hindi
-                'मुफ्त शिपिंग', 'मुफ्त डिलीवरी',
-                // Bulgarian
-                'безплатна доставка'
+                'free shipping', 'free delivery', 'frete grátis', 'frete gratis', 'envío gratis', 'envio gratis', 
+                'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 
+                'ücretsiz kargo', '送料無料', '무료 배송', '무료배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 
+                'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir', 'pengiriman gratis'
             ];
-            
             if (keywords.some(kw => str.includes(kw))) return true;
 
-            // البحث في هيكل JSON الخام
             if (str.includes('"shippingfee":0') || str.includes('"shippingfee":"0') || str.includes('"shippingfee":"0.00') || str.includes('"shippingfee":null')) return true;
             if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":"0.00') || str.includes('"freightamount":0') || str.includes('"freightamount":"0') || str.includes('"freightamount":null')) return true;
             
-            // فحص عميق للكائنات
             const checkObj = (o, depth = 0) => {
                 if (!o || typeof o !== 'object' || depth > 6) return false;
                 for (let key in o) {
@@ -222,6 +161,8 @@ function createCard(p) {
                     const v = o[key];
                     
                     if (k === 'freeshipping' && v === true) return true;
+                    if (k.includes('servicecommitment') && String(v).toLowerCase().includes('free')) return true;
+                    if (k.includes('deliveryinfo') && String(v).toLowerCase().includes('free')) return true;
                     
                     if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee')) {
                         const vStr = String(v).toLowerCase();
