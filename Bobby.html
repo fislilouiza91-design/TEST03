@@ -99,17 +99,13 @@ function injectWidget() {
         sidebar = document.createElement('div');
         sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
 
-        // حاوية الشريط الزجاجية
         const pillContainer = document.createElement('div');
         pillContainer.style.cssText = `
-            background: rgba(255, 255, 255, 0.98); 
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            padding: 16px 10px; 
-            border-radius: 0 24px 24px 0;
-            box-shadow: 4px 0 24px rgba(0,0,0,0.08), 0 0 1px rgba(0,0,0,0.1);
-            display: flex; flex-direction: column; align-items: center; gap: 12px;
-            pointer-events: auto; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
             border: 1px solid #f1f5f9; border-left: none;
         `;
 
@@ -131,18 +127,12 @@ function injectWidget() {
         iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
         iframeContainer.appendChild(iframe);
 
-        // مقبض السحب (3 نقاط)
         const dragHandle = document.createElement('div');
         dragHandle.style.cssText = `
-            cursor: grab; color: #cbd5e1; font-size: 20px; line-height: 1;
-            padding: 4px 0; user-select: none; transition: color 0.2s; margin-bottom: 4px;
-            display: flex; flex-direction: column; gap: 3px;
+            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
         `;
-        dragHandle.innerHTML = `
-            <div style="width: 4px; height: 4px; background: currentColor; border-radius: 50%;"></div>
-            <div style="width: 4px; height: 4px; background: currentColor; border-radius: 50%;"></div>
-            <div style="width: 4px; height: 4px; background: currentColor; border-radius: 50%;"></div>
-        `;
+        dragHandle.innerHTML = '⋮⋮';
         dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
         dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
 
@@ -168,18 +158,14 @@ function injectWidget() {
             }
         }
 
-        // تصميم الأزرار (نصوص فقط بدون أيقونات)
         const createSortBtn = (text, sortValue) => {
             const btn = document.createElement('div');
             btn.style.cssText = `
-                writing-mode: vertical-rl; text-orientation: mixed; 
-                padding: 18px 10px; display: flex; align-items: center; justify-content: center;
-                background: transparent; border-radius: 12px; cursor: pointer;
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
                 font-weight: 700; font-size: 13px; color: #64748b;
-                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); user-select: none; letter-spacing: 1px;
-                border: 1px solid transparent;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
             `;
-            
             btn.innerText = text;
             btn.setAttribute('data-sort', sortValue);
 
@@ -187,49 +173,28 @@ function injectWidget() {
                 btn.style.transform = 'rotate(180deg)';
             }
 
-            // تأثيرات Hover
-            btn.onmouseenter = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.background = '#f8fafc';
-                    btn.style.color = '#334155';
-                }
-            };
-            btn.onmouseleave = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.background = 'transparent';
-                    btn.style.color = '#64748b';
-                }
-            };
-
-            // تأثير النقر
             btn.onmousedown = () => {
-                const baseTransform = currentSide === 'left' ? 'rotate(180deg)' : 'rotate(0deg)';
-                btn.style.transform = `${baseTransform} scale(0.95)`;
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
             };
             btn.onmouseup = btn.onmouseleave = () => {
-                const baseTransform = currentSide === 'left' ? 'rotate(180deg)' : 'rotate(0deg)';
-                btn.style.transform = baseTransform;
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
             };
 
-            btn.onclick = () => {
+            btn.onclick = (e) => {
+                // منع انتشار الحدث لكي لا يغلق النافذة فوراً بسبب مستمع النقر الخارجي
+                e.stopPropagation();
+
                 const isCurrentlyActive = (activeSort === sortValue);
                 if (isCurrentlyActive && isOpen) {
                     togglePanel(false);
                 } else {
                     activeSort = sortValue;
-                    // إعادة تعيين جميع الأزرار
                     pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; 
-                        b.style.color = '#64748b'; 
-                        b.style.boxShadow = 'none';
-                        b.style.border = '1px solid transparent';
+                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
                     });
-                    // تفعيل الزر المحدد
                     btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
                     btn.style.color = 'white';
                     btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
-                    
                     togglePanel(true);
                     try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
                 }
@@ -241,11 +206,9 @@ function injectWidget() {
         const btnPopular = createSortBtn(t('popular'), 'popular');
         const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
 
-        // تفعيل الزر الافتراضي (الأكثر مبيعاً)
         btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
         btnPopular.style.color = 'white';
         btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-        btnPopular.style.border = '1px solid rgba(255,107,53,0.5)';
 
         pillContainer.appendChild(dragHandle);
         pillContainer.appendChild(btnRating);
@@ -256,6 +219,16 @@ function injectWidget() {
         widgetWrapper.appendChild(sidebar);
         widgetWrapper.appendChild(iframeContainer);
         document.body.appendChild(widgetWrapper);
+
+        // 💡 إضافة مستمع النقر الخارجي للإغلاق
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            // إذا كان النقر داخل النافذة أو داخل الشريط الجانبي، لا تفعل شيئاً
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            
+            // إذا كان النقر خارجاً، أغلق النافذة
+            togglePanel(false);
+        });
 
         function setSide(side) {
             currentSide = side;
@@ -270,15 +243,15 @@ function injectWidget() {
 
             if (side === 'right') {
                 sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '24px 0 0 24px';
-                pillContainer.style.boxShadow = '-4px 0 24px rgba(0,0,0,0.08), 0 0 1px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
                 pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
                 iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
                 if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
             } else {
                 sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 24px 24px 0';
-                pillContainer.style.boxShadow = '4px 0 24px rgba(0,0,0,0.08), 0 0 1px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
                 pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
                 iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
                 if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
@@ -286,7 +259,8 @@ function injectWidget() {
         }
 
         let isDragging = false;
-        dragHandle.addEventListener('mousedown', () => {
+        dragHandle.addEventListener('mousedown', (e) => {
+            e.stopPropagation(); // منع إغلاق النافذة عند محاولة سحب الشريط
             isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
         });
 
