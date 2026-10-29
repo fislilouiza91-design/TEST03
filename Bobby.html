@@ -138,56 +138,114 @@ function createCard(p) {
     const soldText = formatSold(trades);
     const directUrl = `https://${globalHost}/item/${p.productId}.html`;
 
-    // 💡 الماسح الضوئي العميق (Deep Scanner) للشحن المجاني
-    const checkFreeShipping = (obj, depth = 0) => {
-        if (!obj || depth > 6) return false;
-
-        // 1. فحص النصوص (مثل Tags أو logisticsDesc)
-        if (typeof obj === 'string') {
-            const s = obj.toLowerCase();
+    // 💡 الماسح الشامل النهائي (Ultimate Deep Scanner) - يدعم 32 لغة
+    function checkFreeShipping(obj) {
+        try {
+            const str = JSON.stringify(obj).toLowerCase();
+            
             const keywords = [
-                'free shipping', 'frete grátis', 'frete gratis', 'envío gratis', 'envio gratis', 
-                'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 
-                'ücretsiz kargo', '送料無料', '무료 배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 
-                'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir'
+                // English
+                'free shipping', 'free delivery',
+                // Arabic
+                'شحن مجاني', 'توصيل مجاني', 'مجانا',
+                // French
+                'livraison gratuite',
+                // Spanish
+                'envío gratis', 'envio gratis',
+                // Portuguese (Brazil/Portugal)
+                'frete grátis', 'frete gratis', 'envio grátis',
+                // Russian
+                'бесплатная доставка', 'бесплатно',
+                // German
+                'kostenloser versand', 'kostenlos',
+                // Italian
+                'spedizione gratuita',
+                // Turkish
+                'ücretsiz kargo',
+                // Dutch
+                'gratis verzending',
+                // Polish
+                'darmowa dostawa',
+                // Korean
+                '무료 배송', '무료배송',
+                // Japanese
+                '送料無料',
+                // Chinese (Simplified & Traditional)
+                '免运费', '免運費', '包邮', '包郵',
+                // Vietnamese
+                'miễn phí vận chuyển',
+                // Indonesian
+                'gratis ongkir', 'pengiriman gratis',
+                // Thai
+                'ส่งฟรี', 'จัดส่งฟรี',
+                // Hebrew
+                'משלוח חינם',
+                // Swedish
+                'fri frakt',
+                // Danish
+                'gratis fragt',
+                // Finnish
+                'ilmainen toimitus',
+                // Norwegian
+                'gratis frakt',
+                // Czech
+                'doprava zdarma',
+                // Romanian
+                'transport gratuit',
+                // Hungarian
+                'ingyenes szállítás',
+                // Greek
+                'δωρεάν αποστολή',
+                // Ukrainian
+                'безкоштовна доставка',
+                // Malay
+                'penghantaran percuma',
+                // Tagalog
+                'libreng pagpapadala',
+                // Hindi
+                'मुफ्त शिपिंग', 'मुफ्त डिलीवरी',
+                // Bulgarian
+                'безплатна доставка'
             ];
-            if (keywords.some(kw => s.includes(kw))) return true;
-        }
+            
+            if (keywords.some(kw => str.includes(kw))) return true;
 
-        // 2. فحص الكائنات والمصفوفات
-        if (typeof obj === 'object') {
-            for (let key in obj) {
-                const lowerKey = key.toLowerCase();
-                const val = obj[key];
-
-                // إذا وجدنا حقل freeShipping = true
-                if (lowerKey === 'freeshipping' && val === true) return true;
-
-                // فحص حقول التكلفة
-                if (['shippingfee', 'freightamount', 'shippingcost', 'deliveryfee', 'freight', 'fee'].some(k => lowerKey.includes(k))) {
-                    const valStr = String(val).toLowerCase();
-                    if (val === 0 || valStr === '0' || valStr === '0.00' || valStr === '0,00' || valStr === 'free' || valStr === 'gratis' || valStr === 'grátis') {
-                        return true;
+            // البحث في هيكل JSON الخام
+            if (str.includes('"shippingfee":0') || str.includes('"shippingfee":"0') || str.includes('"shippingfee":"0.00') || str.includes('"shippingfee":null')) return true;
+            if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":"0.00') || str.includes('"freightamount":0') || str.includes('"freightamount":"0') || str.includes('"freightamount":null')) return true;
+            
+            // فحص عميق للكائنات
+            const checkObj = (o, depth = 0) => {
+                if (!o || typeof o !== 'object' || depth > 6) return false;
+                for (let key in o) {
+                    const k = key.toLowerCase();
+                    const v = o[key];
+                    
+                    if (k === 'freeshipping' && v === true) return true;
+                    
+                    if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee')) {
+                        const vStr = String(v).toLowerCase();
+                        if (v === 0 || vStr === '0' || vStr === '0.00' || vStr === '0.0' || vStr === 'free' || vStr === 'gratis' || v === null) {
+                            return true;
+                        }
+                        if (typeof v === 'object' && v !== null) {
+                            if (v.value === 0 || String(v.value) === '0' || String(v.value) === '0.00' || v.value === null) return true;
+                        }
                     }
-                    // فحص إذا كانت القيمة كائناً يحتوي على value: 0
-                    if (typeof val === 'object' && val !== null) {
-                        if (val.value === 0 || String(val.value) === '0' || String(val.value) === '0.00') return true;
+                    
+                    if (typeof v === 'object' && v !== null) {
+                        if (checkObj(v, depth + 1)) return true;
                     }
                 }
-
-                // الاستمرار في البحث داخل الكائنات الفرعية
-                if (typeof val === 'object' && val !== null) {
-                    if (checkFreeShipping(val, depth + 1)) return true;
-                }
-            }
+                return false;
+            };
+            return checkObj(obj);
+        } catch (e) {
+            return false;
         }
-        return false;
-    };
+    }
 
-    let isFreeShipping = false;
-    try {
-        isFreeShipping = checkFreeShipping(p);
-    } catch (err) {}
+    let isFreeShipping = checkFreeShipping(p);
 
     const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
 
