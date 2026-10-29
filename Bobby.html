@@ -138,6 +138,7 @@ function createCard(p) {
     const soldText = formatSold(trades);
     const directUrl = `https://${globalHost}/item/${p.productId}.html`;
 
+    // 💡 الماسح الشامل (Ultimate Deep Scanner) - يدعم 32 لغة والحقول المخفية
     function checkFreeShipping(obj) {
         try {
             const str = JSON.stringify(obj).toLowerCase();
@@ -150,29 +151,26 @@ function createCard(p) {
             ];
             if (keywords.some(kw => str.includes(kw))) return true;
 
-            if (str.includes('"freeshipping":true') || str.includes('"freeshipping":"true"')) return true;
             if (str.includes('"shippingfee":0') || str.includes('"shippingfee":"0') || str.includes('"shippingfee":"0.00') || str.includes('"shippingfee":null')) return true;
-            if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":null')) return true;
+            if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":"0.00') || str.includes('"freightamount":0') || str.includes('"freightamount":"0') || str.includes('"freightamount":null')) return true;
             
             const checkObj = (o, depth = 0) => {
-                if (!o || typeof o !== 'object' || depth > 8) return false; 
+                if (!o || typeof o !== 'object' || depth > 6) return false;
                 for (let key in o) {
                     const k = key.toLowerCase();
                     const v = o[key];
                     
                     if (k === 'freeshipping' && v === true) return true;
+                    if (k.includes('servicecommitment') && String(v).toLowerCase().includes('free')) return true;
+                    if (k.includes('deliveryinfo') && String(v).toLowerCase().includes('free')) return true;
                     
-                    if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee') || k === 'freight') {
+                    if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee')) {
                         const vStr = String(v).toLowerCase();
-                        if (v === 0 || vStr === '0' || vStr === '0.00' || vStr === '0.0' || vStr === 'free' || vStr === 'gratis' || vStr === 'grátis' || v === null) {
+                        if (v === 0 || vStr === '0' || vStr === '0.00' || vStr === '0.0' || vStr === 'free' || vStr === 'gratis' || v === null) {
                             return true;
                         }
                         if (typeof v === 'object' && v !== null) {
                             if (v.value === 0 || String(v.value) === '0' || String(v.value) === '0.00' || v.value === null) return true;
-                            if (v.formattedAmount && String(v.formattedAmount).toLowerCase().includes('free')) return true;
-                            if (v.formatedAmount && String(v.formatedAmount).toLowerCase().includes('free')) return true;
-                            if (v.formattedAmount && String(v.formattedAmount).includes('0.00')) return true;
-                            if (v.formatedAmount && String(v.formatedAmount).includes('0.00')) return true;
                         }
                     }
                     
