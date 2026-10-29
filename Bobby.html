@@ -181,7 +181,7 @@ function injectWidget() {
             };
 
             btn.onclick = (e) => {
-                e.stopPropagation(); // منع الإغلاق المفاجئ
+                e.stopPropagation();
 
                 const isCurrentlyActive = (activeSort === sortValue);
                 if (isCurrentlyActive && isOpen) {
@@ -226,12 +226,36 @@ function injectWidget() {
             togglePanel(false);
         });
 
-        // 💡 مستمع التمرير (Scroll) الخارجي الجديد
+        // 💡 مستمع التمرير (Scroll) الذكي مع مسافة أمان
+        let scrollAccumulated = 0;
+        let scrollResetTimer = null;
+        const SCROLL_THRESHOLD = 150; // المسافة المطلوبة بالبكسل للإغلاق
+
         window.addEventListener('wheel', (e) => {
             if (!isOpen) return;
-            // إذا كان المؤشر فوق النافذة أو الشريط الجانبي، لا تغلقها
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
-            togglePanel(false);
+            
+            // إذا كان المؤشر فوق النافذة أو الشريط الجانبي، لا تغلقها ولا تحسب المسافة
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) {
+                scrollAccumulated = 0;
+                clearTimeout(scrollResetTimer);
+                return;
+            }
+
+            // تجميع مسافة التمرير
+            scrollAccumulated += Math.abs(e.deltaY);
+
+            // إعادة تعيين العداد إذا توقف المستخدم عن التمرير لمدة 150 مللي ثانية
+            clearTimeout(scrollResetTimer);
+            scrollResetTimer = setTimeout(() => {
+                scrollAccumulated = 0;
+            }, 150);
+
+            // إذا تجاوز التمرير المسافة المحددة، أغلق النافذة
+            if (scrollAccumulated >= SCROLL_THRESHOLD) {
+                togglePanel(false);
+                scrollAccumulated = 0;
+                clearTimeout(scrollResetTimer);
+            }
         }, { passive: true });
 
         function setSide(side) {
