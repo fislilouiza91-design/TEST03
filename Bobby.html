@@ -1,171 +1,330 @@
-import { md5 } from './lib/crypto.js';
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
 
-async function getToken(tabId) {
-    let domainsToTry = ["https://www.aliexpress.ru/", "https://www.aliexpress.com/"];
-    for (let domain of domainsToTry) {
-        try {
-            let cookie = await chrome.cookies.get({ url: domain, name: "_m_h5_tk" });
-            if (cookie && cookie.value) {
-                console.log("[Nezzer] Token found in cookies");
-                return cookie.value.split('_')[0];
-            }
-        } catch (e) {}
-    }
+const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
+const isRtl = rtlLanguages.includes(siteLang);
 
-    try {
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: () => {
-                const match = document.cookie.match(/(?:^|;\s*)_m_h5_tk=([^;]+)/);
-                return match ? match[1].split('_')[0] : null;
-            }
-        });
-        if (result?.result) {
-            console.log("[Nezzer] Token found in page DOM");
-            return result.result;
-        }
-    } catch (e) {}
+document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
+document.documentElement.setAttribute('lang', siteLang);
 
-    console.log("[Nezzer] Token not found!");
-    return null;
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
+    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
+    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
+    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
+    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
+    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
+    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
+    'zh_CN': { free_shipping: '免运费', no_products: '未找到产品。', loading_more: '正在加载更多...', sold: '已售' },
+    'zh_TW': { free_shipping: '免運費', no_products: '未找到產品。', loading_more: '正在載入更多...', sold: '已售' },
+    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
+    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
+    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
+    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
+    'sv': { free_shipping: 'Fri frakt', no_products: 'Inga produkter hittades.', loading_more: 'Laddar mer...', sold: 'sålda' },
+    'da': { free_shipping: 'Gratis fragt', no_products: 'Ingen produkter fundet.', loading_more: 'Indlæser mere...', sold: 'solgt' },
+    'fi': { free_shipping: 'Ilmainen toimitus', no_products: 'Tuotteita ei löytynyt.', loading_more: 'Ladataan lisää...', sold: 'myyty' },
+    'no': { free_shipping: 'Gratis frakt', no_products: 'Ingen produkter funnet.', loading_more: 'Laster mer...', sold: 'solgt' },
+    'cs': { free_shipping: 'Doprava zdarma', no_products: 'Nebyly nalezeny žádné produkty.', loading_more: 'Načítání dalších...', sold: 'prodáno' },
+    'ro': { free_shipping: 'Transport gratuit', no_products: 'Nu s-au găsit produse.', loading_more: 'Se încarcă mai multe...', sold: 'vândute' },
+    'hu': { free_shipping: 'Ingyenes szállítás', no_products: 'Nem található termék.', loading_more: 'Továbbiak betöltése...', sold: 'eladva' },
+    'el': { free_shipping: 'Δωρεάν αποστολή', no_products: 'Δεν βρέθηκαν προϊόντα.', loading_more: 'Φόρτωση περισσότερων...', sold: 'πωλήθηκαν' },
+    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' },
+    'ms': { free_shipping: 'Penghantaran Percuma', no_products: 'Tiada produk ditemui.', loading_more: 'Memuatkan lagi...', sold: 'terjual' },
+    'tl': { free_shipping: 'Libreng pagpapadala', no_products: 'Walang nahanap na produkto.', loading_more: 'Naglo-load ng higit pa...', sold: 'nabenta' },
+    'hi': { free_shipping: 'मुफ्त शिपिंग', no_products: 'कोई उत्पाद नहीं मिला।', loading_more: 'और लोड हो रहा है...', sold: 'बिक गया' },
+    'bg': { free_shipping: 'Безплатна доставка', no_products: 'Няма намерени продукти.', loading_more: 'Зареждане на още...', sold: 'продадени' }
+};
+
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key])
+        ? POPUP_TRANSLATIONS[siteLang][key]
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+if (loaderMore) {
+    loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
 }
 
-function collectPageData() {
-    const cnaMatch = document.cookie.match(/(?:^|;\s*)cna=([^;]+)/);
-    const cna = cnaMatch ? cnaMatch[1] : '';
-    
-    const xmanMatch = document.cookie.match(/(?:^|;\s*)xman_us_f=([^;]+)/);
-    const xman = xmanMatch ? decodeURIComponent(xmanMatch[1]) : '';
-    const acsRt = xman.split('acs_rt=')[1] || '';
-    
-    const pageIdElement = document.querySelector("a[st_page_id]");
-    const pageId = pageIdElement ? pageIdElement.getAttribute("st_page_id") : "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
-    
-    const ogImageElement = document.querySelector('meta[property="og:image"]');
-    const ogImage = ogImageElement ? ogImageElement.content : '';
+function showSkeletons() {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
 
-    return { cna, acsRt, pageId, ogImage, host: location.host };
+  grid.innerHTML = `
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+  `;
 }
 
-async function fetchSimilarProducts({ page = 1, streamId = null }) {
-    console.log("[Nezzer] fetchSimilarProducts started...");
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
-    
-    const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
 
-    const token = await getToken(tab.id);
-    if (!token) return { error: 'NO_TOKEN' };
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
 
-    let pageData;
-    try {
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            world: 'MAIN',
-            func: collectPageData
-        });
-        pageData = result?.result;
-    } catch (e) {
-        return { error: 'PAGE_DATA_FAILED' };
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
+}
+
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
+  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
+  if (match) {
+    let prefix = match[1] ? match[1].trim() : '';
+    let number = match[2] ? match[2].trim() : '';
+    let suffix = match[3] ? match[3].trim() : '';
+    let currency = suffix || prefix;
+    if (number && currency) {
+      return `${number} ${currency}`;
     }
+  }
+  return cleanStr;
+}
 
-    if (!pageData) return { error: 'PAGE_DATA_NULL' };
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+
+    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = false;
 
     try {
-        const timestamp = Date.now();
-        const appKey = "24815441";
-        const apiName = "mtop.relationrecommend.AliexpressRecommend.recommend";
-        
-        const y = {
-            DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: pageData.cna, currency: "RUB",
-            image: pageData.ogImage ? pageData.ogImage.split("_")[0] : "", isNewImageSearch: true, lang: "ru_RU", locale: "ru_RU",
-            osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
-            recommendInfo: JSON.stringify({ cna: pageData.cna, foreverRandomToken: pageData.acsRt, pageId: pageData.pageId }),
-            searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: "RU", shpt_co: "RU",
-            sortOrder: "default", sortType: "default", sversion: 10000, visitorId: pageData.cna,
-            "x-appKey": Number(appKey),
-            "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
-            _city: "", _currency: "RUB", _state: ""
-        };
-
-        if (streamId) { y.streamId = streamId; y.realReffer = ""; }
-
-        const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
-        const sign = md5(`${token}&${timestamp}&${appKey}&${dataString}`).toLowerCase();
-        
-        // استخدام النطاق العالمي مع تمرير إعدادات RU
-        const url = `https://recom-acs.aliexpress.com/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=${appKey}&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson`;
-
-        console.log("[Nezzer] Sending fetch request to:", url);
-
-        // إضافة مؤقت لإلغاء الطلب إذا تأخر السيرفر (تجنب التعليق)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 ثوانٍ كحد أقصى
-
-        const response = await fetch(url, {
-            method: "POST",
-            headers: { 
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://aliexpress.ru/"
-            },
-            body: `data=${encodeURIComponent(dataString)}`,
-            credentials: "include",
-            signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-        console.log("[Nezzer] Response received:", response.status);
-
-        const text = await response.text();
-        let json;
-        try {
-            json = JSON.parse(text);
-        } catch (e) {
-            const match = text.match(/^[^(]*\((.*)\)/s);
-            if (match) {
-                json = JSON.parse(match[1]);
-            } else {
-                console.log("[Nezzer] Invalid JSON:", text);
-                return { error: 'INVALID_RESPONSE_FORMAT: ' + text.substring(0, 50) };
+        // 1. فحص حقل الوصف اللوجستي المباشر
+        if (p?.logisticsDesc && typeof p.logisticsDesc === 'string') {
+            const desc = p.logisticsDesc.toLowerCase();
+            if (desc.includes('free') || desc.includes('gratis') || desc.includes('gratuit') || desc.includes('бесплат') || desc.includes('مجاني') || desc.includes('مجانا') || desc.includes('envío gratis')) {
+                isFreeShipping = true;
             }
         }
 
-        console.log("[Nezzer] API Response:", json);
-
-        if (json?.ret && json.ret[0] && json.ret[0].includes('RGV587_ERROR')) {
-            return { error: 'SECURITY_CHECK: يرجى تحديث الصفحة والمحاولة مرة أخرى.' };
+        // 2. فحص كائن الشحن
+        if (!isFreeShipping && p?.shipping) {
+            const fee = p.shipping.shippingFee;
+            const amount = p.shipping.freightAmount?.value || p.shipping.freightAmount;
+            if (p.shipping.freeShipping === true || fee === 0 || fee === '0' || fee === '0.00' || fee === 'Free' || amount === 0 || amount === '0' || amount === '0.00' || amount === 'Free') {
+                isFreeShipping = true;
+            }
         }
 
-        const products = json?.data?.mods?.itemList?.content ?? [];
-
-        if (products.length === 0) {
-            return { error: 'EMPTY_RESULT: لم يتم العثور على منتجات.' };
+        // 3. فحص حقول الشحن في الجذر
+        if (!isFreeShipping) {
+            const rootFee = p?.freightAmount?.value || p?.freightAmount || p?.shippingFee;
+            if (rootFee === 0 || rootFee === '0' || rootFee === '0.00' || rootFee === 'Free') {
+                isFreeShipping = true;
+            }
         }
 
-        return {
-            products: products,
-            streamId: json?.data?.pageInfo?.streamId,
-            ret: json?.ret?.[0],
-            host: pageData.host
-        };
+        // 4. فحص العلامات الترويجية والنقاط البيعية
+        if (!isFreeShipping) {
+            const pointsToCheck = [
+                ...(p?.sellingPoints || []),
+                ...(p?.marketingTags || []),
+                ...(p?.tags || [])
+            ];
 
-    } catch (error) {
-        console.log("[Nezzer] Fetch error:", error);
-        if (error.name === 'AbortError') {
-            return { error: 'TIMEOUT: استغرق السيرفر وقتاً طويلاً للرد. قد يكون هناك حماية.' };
+            for (let sp of pointsToCheck) {
+                let text = '';
+                if (typeof sp === 'string') text = sp;
+                else if (sp && typeof sp === 'object') text = sp.text || sp.name || sp.desc || sp.tag || JSON.stringify(sp);
+                if (typeof text !== 'string') continue;
+                
+                const s = text.toLowerCase();
+                if (s.includes('free shipping') || s.includes('livraison gratuite') || s.includes('envío gratis') || 
+                    s.includes('frete grátis') || s.includes('frete gratis') || s.includes('envio grátis') || s.includes('envio gratis') || 
+                    s.includes('spedizione gratuita') || s.includes('gratis verzending') || s.includes('darmowa dostawa') || 
+                    s.includes('ücretsiz kargo') || s.includes('送料無料') || s.includes('무료 배송') || 
+                    s.includes('免运费') || s.includes('免運費') || s.includes('ส่งฟรี') || s.includes('miễn phí vận chuyển') || 
+                    s.includes('gratis ongkir') || s.includes('משלוח חינם') || s.includes('fri frakt') || s.includes('gratis fragt') || 
+                    s.includes('ilmainen toimitus') || s.includes('gratis frakt') || s.includes('doprava zdarma') || s.includes('transport gratuit') || 
+                    s.includes('ingyenes szállítás') || s.includes('δωρεάν αποστολή') || s.includes('penghantaran percuma') || s.includes('libreng pagpapadala') || 
+                    s.includes('मुफ्त शिपिंग') || s.includes('безплатна доставка') || s.includes('безкоштовна доставка') || s.includes('бесплатная доставка') || s.includes('бесплатно') || 
+                    s.includes('شحن مجاني') || s.includes('مجاني')) {
+                    isFreeShipping = true;
+                    break;
+                }
+            }
         }
-        return { error: 'FETCH_FAILED: ' + error.message };
-    }
+    } catch (err) {}
+
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#008f00" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+
+    let shippingHtml = isFreeShipping
+      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
+      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
+
+    let metaHtml = (soldText || rating)
+      ? `<div class="meta-row">
+          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText && rating ? `<span class="divider">|</span>` : ''}
+          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+         </div>`
+      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${metaHtml}
+        <div class="price">${price}</div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
+  }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.action === 'FETCH_SIMILAR') {
-    fetchSimilarProducts({ page: msg.page || 1, streamId: msg.streamId || null })
-      .then(sendResponse)
-      .catch(err => sendResponse({ error: err.message }));
-    return true;
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
+    if (isLoading) return;
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
+    return;
+  }
+
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop();
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  showSkeletons();
+
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+
+  if (res.error) {
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
+    return;
+  }
+
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000));
+
+  isLoading = false;
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop();
+
+      if (!isLoading && globalProducts.length > 0) {
+        render(false);
+      }
+    }
   }
 });
+
+loadInitial();
