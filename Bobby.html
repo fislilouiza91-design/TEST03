@@ -1,209 +1,336 @@
-<!DOCTYPE html>
-<html lang="en" dir="ltr">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-    body {
-      width: 100%; height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #f8fafc !important; 
-      display: flex; flex-direction: column; overflow: hidden;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      overscroll-behavior: none;
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
+
+const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
+const isRtl = rtlLanguages.includes(siteLang);
+
+document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
+document.documentElement.setAttribute('lang', siteLang);
+
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
+    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
+    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
+    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
+    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
+    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
+    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
+    'zh_CN': { free_shipping: '免运费', no_products: '未找到产品。', loading_more: '正在加载更多...', sold: '已售' },
+    'zh_TW': { free_shipping: '免運費', no_products: '未找到產品。', loading_more: '正在載入更多...', sold: '已售' },
+    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
+    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
+    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
+    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
+    'sv': { free_shipping: 'Fri frakt', no_products: 'Inga produkter hittades.', loading_more: 'Laddar mer...', sold: 'sålda' },
+    'da': { free_shipping: 'Gratis fragt', no_products: 'Ingen produkter fundet.', loading_more: 'Indlæser mere...', sold: 'solgt' },
+    'fi': { free_shipping: 'Ilmainen toimitus', no_products: 'Tuotteita ei löytynyt.', loading_more: 'Ladataan lisää...', sold: 'myyty' },
+    'no': { free_shipping: 'Gratis frakt', no_products: 'Ingen produkter funnet.', loading_more: 'Laster mer...', sold: 'solgt' },
+    'cs': { free_shipping: 'Doprava zdarma', no_products: 'Nebyly nalezeny žádné produkty.', loading_more: 'Načítání dalších...', sold: 'prodáno' },
+    'ro': { free_shipping: 'Transport gratuit', no_products: 'Nu s-au găsit produse.', loading_more: 'Se încarcă mai multe...', sold: 'vândute' },
+    'hu': { free_shipping: 'Ingyenes szállítás', no_products: 'Nem található termék.', loading_more: 'Továbbiak betöltése...', sold: 'eladva' },
+    'el': { free_shipping: 'Δωρεάν αποστολή', no_products: 'Δεν βρέθηκαν προϊόντα.', loading_more: 'Φόρτωση περισσότερων...', sold: 'πωλήθηκαν' },
+    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' },
+    'ms': { free_shipping: 'Penghantaran Percuma', no_products: 'Tiada produk ditemui.', loading_more: 'Memuatkan lagi...', sold: 'terjual' },
+    'tl': { free_shipping: 'Libreng pagpapadala', no_products: 'Walang nahanap na produkto.', loading_more: 'Naglo-load ng higit pa...', sold: 'nabenta' },
+    'hi': { free_shipping: 'मुफ्त शिपिंग', no_products: 'कोई उत्पाद नहीं मिला।', loading_more: 'और लोड हो रहा है...', sold: 'बिक गया' },
+    'bg': { free_shipping: 'Безплатна доставка', no_products: 'Няма намерени продукти.', loading_more: 'Зареждане на още...', sold: 'продадени' }
+};
+
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key])
+        ? POPUP_TRANSLATIONS[siteLang][key]
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+if (loaderMore) {
+    loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
+}
+
+function showSkeletons() {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  grid.innerHTML = `
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+  `;
+}
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
+}
+
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
+  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
+  if (match) {
+    let prefix = match[1] ? match[1].trim() : '';
+    let number = match[2] ? match[2].trim() : '';
+    let suffix = match[3] ? match[3].trim() : '';
+    let currency = suffix || prefix;
+    if (number && currency) {
+      return `${number} ${currency}`;
+    }
+  }
+  return cleanStr;
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+// 💡 الماسح الشامل للشحن المجاني
+function checkFreeShipping(obj) {
+    try {
+        const str = JSON.stringify(obj).toLowerCase();
+        
+        const keywords = [
+            'free shipping', 'free delivery', 'frete grátis', 'frete gratis', 'envío gratis', 'envio gratis', 
+            'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 
+            'ücretsiz kargo', '送料無料', '무료 배송', '무료배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 
+            'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir', 'pengiriman gratis'
+        ];
+        if (keywords.some(kw => str.includes(kw))) return true;
+
+        if (str.includes('"shippingfee":0') || str.includes('"shippingfee":"0') || str.includes('"shippingfee":"0.00') || str.includes('"shippingfee":null')) return true;
+        if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":"0.00') || str.includes('"freightamount":0') || str.includes('"freightamount":"0') || str.includes('"freightamount":null')) return true;
+        
+        const checkObj = (o, depth = 0) => {
+            if (!o || typeof o !== 'object' || depth > 6) return false;
+            for (let key in o) {
+                const k = key.toLowerCase();
+                const v = o[key];
+                
+                if (k === 'freeshipping' && v === true) return true;
+                if (k.includes('servicecommitment') && String(v).toLowerCase().includes('free')) return true;
+                if (k.includes('deliveryinfo') && String(v).toLowerCase().includes('free')) return true;
+                
+                if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee')) {
+                    const vStr = String(v).toLowerCase();
+                    if (v === 0 || vStr === '0' || vStr === '0.00' || vStr === '0.0' || vStr === 'free' || vStr === 'gratis' || v === null) {
+                        return true;
+                    }
+                    if (typeof v === 'object' && v !== null) {
+                        if (v.value === 0 || String(v.value) === '0' || String(v.value) === '0.00' || v.value === null) return true;
+                    }
+                }
+                
+                if (typeof v === 'object' && v !== null) {
+                    if (checkObj(v, depth + 1)) return true;
+                }
+            }
+            return false;
+        };
+        return checkObj(obj);
+    } catch (e) {
+        return false;
+    }
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+
+    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = checkFreeShipping(p);
+
+    // 💡 استخراج الكوبون (إن وجد في بيانات الـ API)
+    let couponText = '';
+    if (p?.coupon && p.coupon.discount) {
+        couponText = p.coupon.discount; 
+    } else if (p?.promotionInfo && p.promotionInfo.couponText) {
+        couponText = p.promotionInfo.couponText;
     }
 
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-
-    #results {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 10px 12px; 
-      width: 100%;
-      scrollbar-gutter: stable both-edges;
-      overscroll-behavior-y: contain;
+    // ⚠️ للتجربة فقط: وضع كوبون تجريبي لنصف المنتجات لرؤية الشكل
+    if (!couponText && Math.random() > 0.5) {
+        couponText = '-3€';
     }
 
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px 10px; 
-      width: 100%;
-      align-items: stretch;
-    }
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
 
-    .product-card {
-      display: flex; flex-direction: column;
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: #ffffff !important;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px; 
-      width: 100%;
-      height: 100%;
-      min-width: 0;
-      transition: all 0.25s ease;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-    }
+    let shippingHtml = isFreeShipping
+      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
+      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
 
-    .product-card:hover { 
-      transform: translateY(-3px); 
-      box-shadow: 0 6px 12px rgba(0,0,0,0.08);
-      border-color: #cbd5e1;
-    }
+    // 💡 بناء سطر التقييم مع إضافة الكوبون
+    let metaHtml = (soldText || rating || couponText)
+      ? `<div class="meta-row">
+          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText && (rating || couponText) ? `<span class="divider">|</span>` : ''}
+          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+          ${(soldText || rating) && couponText ? `<span class="divider">|</span>` : ''}
+          ${couponText ? `<span class="coupon-tag">🎟️ ${couponText}</span>` : ''}
+         </div>`
+      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
 
-    .img-box {
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      background: #ffffff;
-      position: relative;
-      overflow: hidden;
-      border-radius: 6px;
-      margin-bottom: 6px; 
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
 
-    .img-box img {
-      width: 100%; height: 100%;
-      object-fit: cover;
-    }
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${metaHtml}
+        <div class="price">${price}</div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
+  }
+}
 
-    .info {
-      display: flex;
-      flex-direction: column;
-      width: 100%;
-      flex: 1;
-      padding: 0 2px;
-      min-width: 0;
-    }
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
 
-    .title {
-      font-size: 11px;
-      color: #1e293b;
-      font-weight: 500;
-      line-height: 1.25;
-      height: 28px;
-      overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      margin-bottom: 4px;
-      text-align: start;
-      word-break: break-word;
-      overflow-wrap: break-word;
-    }
+  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
+    if (isLoading) return;
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
+    return;
+  }
 
-    .meta-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #64748b;
-      height: 14px;
-      margin-bottom: 2px; 
-      justify-content: flex-start;
-    }
-    .divider { color: #cbd5e1; margin: 0 2px; font-size: 10px; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #475569; font-weight: 600; }
-    .star { color: #f59e0b; font-size: 11px; }
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
 
-    /* 💡 تنسيق الكوبون الجديد */
-    .coupon-tag {
-      display: inline-flex;
-      align-items: center;
-      background: #fff1f2;
-      color: #e11d48;
-      border: 1px dashed #fda4af;
-      padding: 1px 4px;
-      border-radius: 4px;
-      font-size: 9px;
-      font-weight: 800;
-      margin-left: 4px;
-      white-space: nowrap;
-    }
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop();
+  if(loaderMore) loaderMore.style.display = 'none';
 
-    .price {
-      font-size: 14px;
-      font-weight: 800;
-      color: #ef4444 !important; 
-      white-space: nowrap;
-      text-align: start;
-      height: 18px;
-      margin-bottom: 2px;
-      letter-spacing: -0.5px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+  showSkeletons();
 
-    .shipping-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #059669; 
-      font-weight: 600;
-      height: 14px;
-      margin-top: auto;
-      justify-content: flex-start;
-    }
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
 
-    .skeleton-shimmer {
-      background: #f1f5f9;
-      background-image: linear-gradient(to right, #f1f5f9 0%, #e2e8f0 20%, #f1f5f9 40%, #f1f5f9 100%);
-      background-repeat: no-repeat;
-      background-size: 800px 100%;
-      animation-duration: 1.5s;
-      animation-fill-mode: forwards;
-      animation-iteration-count: infinite;
-      animation-name: shimmer;
-      animation-timing-function: linear;
-      border-radius: 4px;
-    }
-    @keyframes shimmer {
-      0% { background-position: -468px 0; }
-      100% { background-position: 468px 0; }
-    }
+  if (res.error) {
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
+    return;
+  }
 
-    .skeleton-card { 
-      display: flex; flex-direction: column; 
-      background: #fff; 
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px;
-    }
-    .skeleton-img { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; margin-bottom: 6px; } 
-    .skeleton-title { width: 100%; height: 12px; margin-bottom: 4px; }
-    .skeleton-title.short { width: 70%; margin-bottom: 6px; }
-    .skeleton-meta { width: 50%; height: 10px; margin-bottom: 2px; }
-    .skeleton-price { width: 40%; height: 14px; margin-bottom: 2px; }
-    .skeleton-shipping { width: 60%; height: 10px; }
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
 
-    #loader-more { display: none; text-align: center; padding: 10px; color: #ef4444; font-weight: bold; font-size: 12px; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(239,68,68,0.3); border-top-color: #ef4444; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <!-- هياكل التحميل (Skeletons) -->
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-      <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span></div>
-  </div>
-  <script src="panel.js"></script>
-</body>
-</html>
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000));
+
+  isLoading = false;
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop();
+
+      if (!isLoading && globalProducts.length > 0) {
+        render(false);
+      }
+    }
+  }
+});
+
+loadInitial();
