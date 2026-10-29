@@ -1,235 +1,279 @@
-<!DOCTYPE html>
-<html lang="en" dir="ltr">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
 
-    body {
-      width: 100%; height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #f8fafc !important; 
-      display: flex; flex-direction: column; overflow: hidden;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      overscroll-behavior: none;
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени' }
+};
+
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
+            }
+        }
+
+        let lowerLang = String(lang).toLowerCase();
+        if (lowerLang.includes('zh-cn') || lowerLang.includes('zh_cn')) return 'zh_CN';
+        if (lowerLang.includes('zh-tw') || lowerLang.includes('zh_tw')) return 'zh_TW';
+
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
+
+        lang = lowerLang.split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function removeWidget() {
+    if (widgetWrapper) {
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
     }
+}
 
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-    #results {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 10px 12px; /* تقليل المساحة من الأعلى والأسفل */
-      width: 100%;
-      scrollbar-gutter: stable both-edges;
-      overscroll-behavior-y: contain;
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = 'popular';
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid #f1f5f9; border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 75px;
+            width: 620px; max-width: 90vw; height: 98vh;
+            background: #ffffff !important; border-radius: 16px;
+            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden;
+        `;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.style.cssText = `
+            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
+            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
+        `;
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
+        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                } else {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                }
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
+                font-weight: 700; font-size: 13px; color: #64748b;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
+            `;
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+
+            if (currentSide === 'left') {
+                btn.style.transform = 'rotate(180deg)';
+            }
+
+            btn.onmousedown = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
+            };
+            btn.onmouseup = btn.onmouseleave = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+            };
+
+            btn.onclick = () => {
+                const isCurrentlyActive = (activeSort === sortValue);
+                if (isCurrentlyActive && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = '#64748b'; b.style.boxShadow = 'none';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                    togglePanel(true);
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                }
+            };
+            return btn;
+        };
+
+        const btnRating = createSortBtn(t('rating'), 'rating');
+        const btnPopular = createSortBtn(t('popular'), 'popular');
+        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
+
+        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+        btnPopular.style.color = 'white';
+        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnRating);
+        pillContainer.appendChild(btnPopular);
+        pillContainer.appendChild(btnCheapest);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        function setSide(side) {
+            currentSide = side;
+
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') {
+                    btn.style.transform = 'rotate(180deg)';
+                } else {
+                    btn.style.transform = 'rotate(0deg)';
+                }
+            });
+
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
+                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
+                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', () => {
+            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) {
+                if (currentSide !== 'left') setSide('left');
+            } else {
+                if (currentSide !== 'right') setSide('right');
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+        });
+    } catch(err) {
+        console.error("Nezzer Error:", err);
     }
+}
 
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px 10px; /* تقليل المسافة بين الصفوف */
-      width: 100%;
-      align-items: stretch;
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
     }
-
-    .product-card {
-      display: flex; flex-direction: column;
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: #ffffff !important;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px; /* تقليل الحواف الداخلية */
-      width: 100%;
-      height: 100%;
-      min-width: 0;
-      transition: all 0.25s ease;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-    }
-
-    .product-card:hover { 
-      transform: translateY(-3px); 
-      box-shadow: 0 6px 12px rgba(0,0,0,0.08);
-      border-color: #cbd5e1;
-    }
-
-    .img-box {
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      background: #ffffff;
-      position: relative;
-      overflow: hidden;
-      border-radius: 6px;
-      margin-bottom: 6px; /* تقليل المسافة أسفل الصورة */
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .img-box img {
-      width: 100%; height: 100%;
-      object-fit: cover;
-    }
-
-    .info {
-      display: flex;
-      flex-direction: column;
-      width: 100%;
-      flex: 1;
-      padding: 0 2px;
-      min-width: 0;
-    }
-
-    .title {
-      font-size: 11px;
-      color: #1e293b;
-      font-weight: 500;
-      line-height: 1.25;
-      height: 28px;
-      overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      margin-bottom: 4px;
-      text-align: start;
-      word-break: break-word;
-      overflow-wrap: break-word;
-    }
-
-    .meta-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #64748b;
-      height: 14px;
-      margin-bottom: 2px; /* تقليل المسافة */
-      justify-content: flex-start;
-    }
-    .divider { color: #cbd5e1; margin: 0 2px; font-size: 10px; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #475569; font-weight: 600; }
-    .star { color: #f59e0b; font-size: 11px; }
-
-    .price {
-      font-size: 14px;
-      font-weight: 800;
-      color: #ef4444 !important; 
-      white-space: nowrap;
-      text-align: start;
-      height: 18px;
-      margin-bottom: 2px; /* تقليل المسافة */
-      letter-spacing: -0.5px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .shipping-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #059669; 
-      font-weight: 600;
-      height: 14px;
-      margin-top: auto;
-      justify-content: flex-start;
-    }
-
-    .skeleton-shimmer {
-      background: #f1f5f9;
-      background-image: linear-gradient(to right, #f1f5f9 0%, #e2e8f0 20%, #f1f5f9 40%, #f1f5f9 100%);
-      background-repeat: no-repeat;
-      background-size: 800px 100%;
-      animation-duration: 1.5s;
-      animation-fill-mode: forwards;
-      animation-iteration-count: infinite;
-      animation-name: shimmer;
-      animation-timing-function: linear;
-      border-radius: 4px;
-    }
-    @keyframes shimmer {
-      0% { background-position: -468px 0; }
-      100% { background-position: 468px 0; }
-    }
-
-    .skeleton-card { 
-      display: flex; flex-direction: column; 
-      background: #fff; 
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px;
-    }
-    .skeleton-img { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; margin-bottom: 6px; } 
-    .skeleton-title { width: 100%; height: 12px; margin-bottom: 4px; }
-    .skeleton-title.short { width: 70%; margin-bottom: 6px; }
-    .skeleton-meta { width: 50%; height: 10px; margin-bottom: 2px; }
-    .skeleton-price { width: 40%; height: 14px; margin-bottom: 2px; }
-    .skeleton-shipping { width: 60%; height: 10px; }
-
-    #loader-more { display: none; text-align: center; padding: 10px; color: #ef4444; font-weight: bold; font-size: 12px; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(239,68,68,0.3); border-top-color: #ef4444; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid">
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-      <div class="skeleton-card">
-        <div class="skeleton-shimmer skeleton-img"></div>
-        <div class="skeleton-shimmer skeleton-title"></div>
-        <div class="skeleton-shimmer skeleton-title short"></div>
-        <div class="skeleton-shimmer skeleton-meta"></div>
-        <div class="skeleton-shimmer skeleton-price"></div>
-        <div class="skeleton-shimmer skeleton-shipping"></div>
-      </div>
-    </div>
-    <div id="loader-more"><span class="spinner"></span></div>
-  </div>
-  <script src="panel.js"></script>
-</body>
-</html>
+}).observe(document, {subtree: true, childList: true});
