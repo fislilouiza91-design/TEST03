@@ -6,39 +6,71 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
     const url = new URL(request.url);
     const targetUrl = url.searchParams.get("url");
+    if (!targetUrl) return new Response(JSON.stringify({ success: false, error: "Missing url" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    if (!targetUrl) {
-      return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
-
-    // التحقق من أن الرابط لعلي إكسبريس
-    if (!targetUrl.includes("aliexpress.com") && !targetUrl.includes("aliexpress.ru")) {
-      return new Response(JSON.stringify({ success: false, error: "Invalid domain" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
-
+    // الحصول على المفاتيح من متغيرات البيئة
+    const appKey = env.ALI_APP_KEY;
+    const appSecret = env.ALI_APP_SECRET;
     const trackingId = env.ALI_TRACKING_ID || "default";
-    
-    // توليد رابط العمولة
-    const affiliateUrl = `https://s.click.aliexpress.com/deep_link.htm?aff_short_key=${trackingId}&dl_target_url=${encodeURIComponent(targetUrl)}`;
 
-    // إرجاع الرابط كبيانات JSON بدلاً من التحويل المباشر
-    return new Response(JSON.stringify({ 
-        success: true, 
-        affiliate_url: affiliateUrl 
-    }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
+    if (!appKey || !appSecret) {
+        return new Response(JSON.stringify({ success: false, error: "Missing API credentials" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // إعداد الطلب إلى API علي إكسبريس
+    const method = "aliexpress.affiliate.link.generate";
+    const timestamp = Date.now().toString();
+    const params = {
+        app_key: appKey,
+        method: method,
+        sign_method: "md5",
+        timestamp: timestamp,
+        format: "json",
+        v: "2.0",
+        tracking_id: trackingId,
+        source_values: targetUrl, // الرابط الأصلي
+        promotion_link_type: 0 // 0 يعني رابط عادي
+    };
+
+    // إنشاء التوقيع (Signature) - مطلوب من علي إكسبريس
+    const sortedKeys = Object.keys(params).sort();
+    let signString = appSecret;
+    for (const key of sortedKeys) {
+        signString += key + params[key];
+    }
+    signString += appSecret;
+
+    const msgBuffer = new TextEncoder().encode(signString);
+    const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+    // إرسال الطلب
+    const apiUrl = "https://api-sg.aliexpress.com/sync";
+    const body = new URLSearchParams({ ...params, sign: sign });
+
+    try {
+        const response = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body
+        });
+        const data = await response.json();
+
+        // استخراج رابط العمولة من استجابة API
+        const affiliateLink = data?.aliexpress_affiliate_link_generate_response?.result?.promotion_links?.[0]?.promotion_link;
+
+        if (affiliateLink) {
+            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        } else {
+            return new Response(JSON.stringify({ success: false, error: "API did not return a link", details: data }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+    } catch (error) {
+        return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
   },
 };
