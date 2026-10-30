@@ -56,21 +56,17 @@ export default {
         const response = await fetch(apiUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body });
         const data = await response.json();
 
-        // 💡 كود ذكي يقرأ الرابط مهما كان شكله (مصفوفة أو كائن)
+        // 💡 الحل الجذري: استخراج الرابط مباشرة كـ (Regex) لضمان عدم تأثره بشكل الاستجابة
+        const rawJsonString = JSON.stringify(data);
+        const match = rawJsonString.match(/"promotion_link":"([^"]+)"/);
+        
         let affiliateLink = null;
-        const resultObj = data?.aliexpress_affiliate_link_generate_response?.resp_result?.result;
-
-        if (resultObj && resultObj.promotion_links) {
-            if (Array.isArray(resultObj.promotion_links)) {
-                if (resultObj.promotion_links.length > 0) {
-                    affiliateLink = resultObj.promotion_links[0].promotion_link;
-                }
-            } else if (typeof resultObj.promotion_links === 'object') {
-                affiliateLink = resultObj.promotion_links.promotion_link;
-            }
+        if (match && match[1]) {
+            affiliateLink = match[1];
         }
 
         if (affiliateLink) {
+            // إرجاع الرابط النظيف فقط
             return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink }), { 
                 headers: { ...corsHeaders, "Content-Type": "application/json" } 
             });
