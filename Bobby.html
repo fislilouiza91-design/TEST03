@@ -1,349 +1,40 @@
-let widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
 
-const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
-    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
-    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
-    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
-    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
-    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
-    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld' },
-    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane' },
-    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
-    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
-    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高' },
-    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高' },
-    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất' },
-    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi' },
-    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด' },
-    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר' },
-    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg' },
-    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt' },
-    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu' },
-    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert' },
-    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené' },
-    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate' },
-    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt' },
-    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα' },
-    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг' },
-    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik' },
-    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating' },
-    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड' },
-    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени' }
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    const url = new URL(request.url);
+    const targetUrl = url.searchParams.get("url");
+
+    if (!targetUrl) {
+      return new Response(JSON.stringify({ error: "Missing 'url' parameter" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // التحقق من أن الرابط لعلي إكسبريس
+    if (!targetUrl.includes("aliexpress.com") && !targetUrl.includes("aliexpress.ru")) {
+      return new Response(JSON.stringify({ error: "Invalid domain" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // جلب كود العمولة من المتغيرات
+    const trackingId = env.ALI_TRACKING_ID;
+    
+    // تحويل الرابط العادي إلى رابط عمولة
+    const affiliateUrl = `https://s.click.aliexpress.com/deep_link.htm?aff_short_key=${trackingId}&dl_target_url=${encodeURIComponent(targetUrl)}`;
+
+    // توجيه المستخدم فوراً إلى رابط العمولة
+    return Response.redirect(affiliateUrl, 302);
+  },
 };
-
-function getSiteLang() {
-    try {
-        let lang = document.documentElement.lang || '';
-        if (!lang) {
-            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
-            if (match) {
-                const cookieStr = decodeURIComponent(match[1]);
-                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
-                if (localeMatch) lang = localeMatch[1];
-            }
-        }
-
-        let lowerLang = String(lang).toLowerCase();
-        if (lowerLang.includes('zh-cn') || lowerLang.includes('zh_cn')) return 'zh_CN';
-        if (lowerLang.includes('zh-tw') || lowerLang.includes('zh_tw')) return 'zh_TW';
-
-        if (!lang) {
-            if (location.href.includes('aliexpress.ru')) lang = 'ru';
-            else if (location.href.includes('aliexpress.us')) lang = 'en';
-            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
-            else lang = 'en';
-        }
-
-        lang = lowerLang.split('-')[0].split('_')[0];
-        return SITE_TRANSLATIONS[lang] ? lang : 'en';
-    } catch(e) { return 'en'; }
-}
-
-const t = (key) => {
-    try {
-        const lang = getSiteLang();
-        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
-    } catch(e) { return key; }
-};
-
-function removeWidget() {
-    if (widgetWrapper) {
-        widgetWrapper.remove();
-        widgetWrapper = null;
-        iframeContainer = null;
-        iframe = null;
-        sidebar = null;
-    }
-}
-
-function injectWidget() {
-    try {
-        if (widgetWrapper) return;
-        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
-
-        let isOpen = false;
-        let currentSide = 'left';
-        let activeSort = 'popular';
-
-        widgetWrapper = document.createElement('div');
-        widgetWrapper.id = 'nezzer-widget-wrapper';
-        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
-
-        sidebar = document.createElement('div');
-        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
-
-        const pillContainer = document.createElement('div');
-        pillContainer.style.cssText = `
-            background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
-            padding: 20px 10px; border-radius: 0 40px 40px 0;
-            box-shadow: 5px 0 20px rgba(0,0,0,0.1);
-            display: flex; flex-direction: column; align-items: center; gap: 15px;
-            pointer-events: auto; transition: all 0.3s ease;
-            border: 1px solid #f1f5f9; border-left: none;
-        `;
-
-        iframeContainer = document.createElement('div');
-        iframeContainer.style.cssText = `
-            position: absolute; top: 50%; left: 75px;
-            width: 620px; max-width: 90vw; height: 98vh;
-            background: #ffffff !important; border-radius: 16px;
-            box-shadow: 15px 0 50px rgba(0,0,0,0.25);
-            transform: translateY(-50%) translateX(-105%);
-            opacity: 0; pointer-events: none; visibility: hidden;
-            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
-            display: flex; overflow: hidden;
-        `;
-
-        const siteLang = getSiteLang();
-        iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
-        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: #ffffff;`;
-        iframeContainer.appendChild(iframe);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.style.cssText = `
-            cursor: grab; color: #cbd5e1; font-size: 24px; line-height: 10px;
-            padding: 10px 0; user-select: none; transition: color 0.2s; margin-bottom: 10px;
-        `;
-        dragHandle.innerHTML = '⋮⋮';
-        dragHandle.onmouseenter = () => dragHandle.style.color = '#94a3b8';
-        dragHandle.onmouseleave = () => dragHandle.style.color = '#cbd5e1';
-
-        function togglePanel(forceOpen = null) {
-            if (forceOpen === true) isOpen = true;
-            else if (forceOpen === false) isOpen = false;
-            else isOpen = !isOpen;
-
-            if (isOpen) {
-                iframeContainer.style.visibility = 'visible';
-                iframeContainer.style.opacity = '1';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-                iframeContainer.style.pointerEvents = 'auto';
-            } else {
-                iframeContainer.style.opacity = '0';
-                iframeContainer.style.pointerEvents = 'none';
-                if (currentSide === 'right') {
-                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                } else {
-                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                }
-                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
-            }
-        }
-
-        const createSortBtn = (text, sortValue) => {
-            const btn = document.createElement('div');
-            btn.style.cssText = `
-                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
-                background: transparent; border-radius: 20px; cursor: pointer;
-                font-weight: 700; font-size: 13px; color: #64748b;
-                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
-                border: 1px solid transparent;
-            `;
-            btn.innerText = text;
-            btn.setAttribute('data-sort', sortValue);
-
-            if (currentSide === 'left') {
-                btn.style.transform = 'rotate(180deg)';
-            }
-
-            // 💡 تأثير الاشتعال (بدون تكبير)
-            btn.onmouseenter = () => {
-                if (activeSort !== sortValue) {
-                    // زر غير نشط: إطار برتقالي وتوهج خفيف
-                    btn.style.border = '1px solid #ff6b35'; 
-                    btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)';
-                    btn.style.color = '#ff6b35';
-                } else {
-                    // زر نشط: توهج قوي جداً
-                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-                }
-            };
-
-            // 💡 إطفاء التوهج عند الخروج
-            btn.onmouseleave = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid transparent';
-                    btn.style.boxShadow = 'none';
-                    btn.style.color = '#64748b';
-                } else {
-                    // إعادة التوهج الافتراضي للزر النشط
-                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-                }
-            };
-
-            // تأثير الضغط (بدون تكبير)
-            btn.onmousedown = (e) => {
-                e.stopPropagation();
-                btn.style.opacity = '0.8';
-            };
-
-            btn.onmouseup = (e) => {
-                e.stopPropagation();
-                btn.style.opacity = '1';
-            };
-
-            btn.onclick = (e) => {
-                e.stopPropagation();
-
-                const isCurrentlyActive = (activeSort === sortValue);
-                if (isCurrentlyActive && isOpen) {
-                    togglePanel(false);
-                } else {
-                    activeSort = sortValue;
-                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; 
-                        b.style.color = '#64748b'; 
-                        b.style.boxShadow = 'none';
-                        b.style.border = '1px solid transparent';
-                        b.style.opacity = '1';
-                    });
-                    // تفعيل الزر الجديد
-                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                    btn.style.color = 'white';
-                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)'; // توهج قوي فور التفعيل
-                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
-                    
-                    togglePanel(true);
-                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                }
-            };
-            return btn;
-        };
-
-        const btnRating = createSortBtn(t('rating'), 'rating');
-        const btnPopular = createSortBtn(t('popular'), 'popular');
-        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
-
-        // تفعيل الزر الافتراضي
-        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-        btnPopular.style.color = 'white';
-        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-        btnPopular.style.border = '1px solid rgba(255,107,53,0.5)';
-
-        pillContainer.appendChild(dragHandle);
-        pillContainer.appendChild(btnRating);
-        pillContainer.appendChild(btnPopular);
-        pillContainer.appendChild(btnCheapest);
-
-        sidebar.appendChild(pillContainer);
-        widgetWrapper.appendChild(sidebar);
-        widgetWrapper.appendChild(iframeContainer);
-        document.body.appendChild(widgetWrapper);
-
-        window.addEventListener('mousedown', (e) => {
-            if (!isOpen) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
-            togglePanel(false);
-        });
-
-        let scrollAccumulated = 0;
-        let scrollResetTimer = null;
-        const SCROLL_THRESHOLD = 150;
-
-        window.addEventListener('wheel', (e) => {
-            if (!isOpen) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) {
-                scrollAccumulated = 0;
-                clearTimeout(scrollResetTimer);
-                return;
-            }
-            scrollAccumulated += Math.abs(e.deltaY);
-            clearTimeout(scrollResetTimer);
-            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
-
-            if (scrollAccumulated >= SCROLL_THRESHOLD) {
-                togglePanel(false);
-                scrollAccumulated = 0;
-                clearTimeout(scrollResetTimer);
-            }
-        }, { passive: true });
-
-        function setSide(side) {
-            currentSide = side;
-
-            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
-                if (side === 'left') {
-                    btn.style.transform = 'rotate(180deg)';
-                } else {
-                    btn.style.transform = 'rotate(0deg)';
-                }
-            });
-
-            if (side === 'right') {
-                sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '40px 0 0 40px';
-                pillContainer.style.boxShadow = '-5px 0 20px rgba(0,0,0,0.1)';
-                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid #f1f5f9';
-                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-            } else {
-                sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 40px 40px 0';
-                pillContainer.style.boxShadow = '5px 0 20px rgba(0,0,0,0.1)';
-                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid #f1f5f9';
-                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-            }
-        }
-
-        let isDragging = false;
-        dragHandle.addEventListener('mousedown', (e) => {
-            e.stopPropagation();
-            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            if (e.clientX < window.innerWidth / 2) {
-                if (currentSide !== 'left') setSide('left');
-            } else {
-                if (currentSide !== 'right') setSide('right');
-            }
-        });
-
-        window.addEventListener('mouseup', () => {
-            if (!isDragging) return;
-            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
-        });
-    } catch(err) {
-        console.error("Nezzer Error:", err);
-    }
-}
-
-injectWidget();
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
-    }
-}).observe(document, {subtree: true, childList: true});
