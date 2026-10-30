@@ -11,13 +11,25 @@ export default {
     }
 
     const url = new URL(request.url);
-    const targetUrl = url.searchParams.get("url");
+    let targetUrl = url.searchParams.get("url");
 
     if (!targetUrl) {
       return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
+    }
+
+    // 💡 السر هنا: تحويل أي رابط محلي إلى الرابط العالمي وإزالة أي إضافات
+    try {
+        let urlObj = new URL(targetUrl);
+        // إجبار النطاق على أن يكون www.aliexpress.com
+        urlObj.hostname = "www.aliexpress.com";
+        // مسح أي باراميترات إضافية (مثل spm) لتجنب رفض الطلب
+        urlObj.search = ""; 
+        targetUrl = urlObj.toString();
+    } catch (e) {
+        // إذا فشل التحويل، نكمل بالرابط الأصلي
     }
 
     const appKey = env.ALI_APP_KEY;
@@ -35,8 +47,8 @@ export default {
         format: "json",
         v: "2.0",
         tracking_id: trackingId,
-        source_values: targetUrl,
-        promotion_link_type: 0
+        source_values: targetUrl, // الرابط النظيف
+        promotion_link_type: 0 
     };
 
     const sortedKeys = Object.keys(params).sort();
@@ -62,7 +74,6 @@ export default {
         });
         const data = await response.json();
 
-        // 💡 محاولة استخراج الرابط بطريقة أكثر مرونة
         let affiliateLink = null;
         const apiResponse = data?.aliexpress_affiliate_link_generate_response;
         
@@ -80,7 +91,7 @@ export default {
         } else {
             return new Response(JSON.stringify({ 
                 success: false, 
-                error: "Could not find link in response", 
+                error: "API did not return a link", 
                 details: data 
             }), { 
                 status: 400, 
