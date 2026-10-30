@@ -1,29 +1,52 @@
 export default {
   async fetch(request, env, ctx) {
+    // إعدادات CORS للسماح للإضافة بالاتصال بالخادم
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+    // التعامل مع طلبات OPTIONS (Preflight)
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
 
     const url = new URL(request.url);
     const targetUrl = url.searchParams.get("url");
-    if (!targetUrl) return new Response(JSON.stringify({ success: false, error: "Missing url" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    // الحصول على المفاتيح من متغيرات البيئة
+    // التحقق من وجود الرابط
+    if (!targetUrl) {
+      return new Response(JSON.stringify({ success: false, error: "Missing url parameter" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // التحقق من أن الرابط ينتمي لعلي إكسبريس
+    if (!targetUrl.includes("aliexpress.com") && !targetUrl.includes("aliexpress.ru")) {
+      return new Response(JSON.stringify({ success: false, error: "Invalid domain. Only AliExpress links are allowed." }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // جلب المفاتيح من إعدادات Cloudflare (Variables)
     const appKey = env.ALI_APP_KEY;
     const appSecret = env.ALI_APP_SECRET;
     const trackingId = env.ALI_TRACKING_ID || "default";
 
     if (!appKey || !appSecret) {
-        return new Response(JSON.stringify({ success: false, error: "Missing API credentials" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ success: false, error: "Missing API credentials in Cloudflare settings" }), { 
+            status: 500, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
     }
 
-    // إعداد الطلب إلى API علي إكسبريس
+    // إعداد طلب توليد رابط العمولة
     const method = "aliexpress.affiliate.link.generate";
     const timestamp = Date.now().toString();
+    
     const params = {
         app_key: appKey,
         method: method,
@@ -32,11 +55,11 @@ export default {
         format: "json",
         v: "2.0",
         tracking_id: trackingId,
-        source_values: targetUrl, // الرابط الأصلي
-        promotion_link_type: 0 // 0 يعني رابط عادي
+        source_values: targetUrl,
+        promotion_link_type: 0 // 0 = رابط عادي
     };
 
-    // إنشاء التوقيع (Signature) - مطلوب من علي إكسبريس
+    // 💡 توليد التوقيع (Signature) المطلوب من علي إكسبريس
     const sortedKeys = Object.keys(params).sort();
     let signString = appSecret;
     for (const key of sortedKeys) {
@@ -44,33 +67,51 @@ export default {
     }
     signString += appSecret;
 
+    // تحويل النص إلى MD5 Hash
     const msgBuffer = new TextEncoder().encode(signString);
     const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
 
-    // إرسال الطلب
+    // رابط الـ API الرسمي لعلي إكسبريس
     const apiUrl = "https://api-sg.aliexpress.com/sync";
     const body = new URLSearchParams({ ...params, sign: sign });
 
     try {
+        // إرسال الطلب لعلي إكسبريس
         const response = await fetch(apiUrl, {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: body
         });
+        
         const data = await response.json();
 
-        // استخراج رابط العمولة من استجابة API
-        const affiliateLink = data?.aliexpress_affiliate_link_generate_response?.result?.promotion_links?.[0]?.promotion_link;
+        // 💡 استخراج الرابط من المسار الصحيح (تم إصلاح هذا الجزء)
+        const affiliateLink = data?.aliexpress_affiliate_link_generate_response?.resp_result?.result?.promotion_links?.[0]?.promotion_link;
 
         if (affiliateLink) {
-            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            // إرجاع الرابط بنجاح للإضافة
+            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink }), { 
+                headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            });
         } else {
-            return new Response(JSON.stringify({ success: false, error: "API did not return a link", details: data }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+            // في حال عدم إرجاع رابط (قد يكون بسبب وضع Test أو خطأ في المفاتيح)
+            return new Response(JSON.stringify({ 
+                success: false, 
+                error: "API did not return a link", 
+                details: data 
+            }), { 
+                status: 400, 
+                headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            });
         }
     } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        // في حال حدوث خطأ في الشبكة
+        return new Response(JSON.stringify({ success: false, error: error.message }), { 
+            status: 500, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
     }
   },
 };
