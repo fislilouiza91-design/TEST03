@@ -165,7 +165,7 @@ function injectWidget() {
                 background: transparent; border-radius: 20px; cursor: pointer;
                 font-weight: 700; font-size: 13px; color: #64748b;
                 transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
-                border: 1px solid transparent; /* إطار شفاف افتراضي */
+                border: 1px solid transparent;
             `;
             btn.innerText = text;
             btn.setAttribute('data-sort', sortValue);
@@ -174,26 +174,32 @@ function injectWidget() {
                 btn.style.transform = 'rotate(180deg)';
             }
 
-            // 💡 تأثير مرور الماوس بنفس لون الأزرار
+            // 💡 يشعل عند الدخول
             btn.onmouseenter = () => {
                 if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid #ff6b35'; /* إطار برتقالي */
-                    btn.style.background = '#fff4f0'; /* خلفية برتقالية فاتحة جداً */
-                    btn.style.color = '#ff6b35'; /* النص يصبح برتقالي */
-                }
-            };
-            btn.onmouseleave = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid transparent';
-                    btn.style.background = 'transparent';
-                    btn.style.color = '#64748b'; /* إعادة النص للرمادي */
+                    btn.style.border = '1px solid #ff6b35'; 
+                    btn.style.background = '#fff4f0'; 
+                    btn.style.color = '#ff6b35'; 
                 }
             };
 
-            btn.onmousedown = () => {
+            // 💡 ينطفئ عند الخروج
+            btn.onmouseleave = () => {
+                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid transparent';
+                    btn.style.background = 'transparent';
+                    btn.style.color = '#64748b';
+                }
+            };
+
+            btn.onmousedown = (e) => {
+                e.stopPropagation();
                 btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
             };
-            btn.onmouseup = btn.onmouseleave = () => {
+
+            btn.onmouseup = (e) => {
+                e.stopPropagation();
                 btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
             };
 
@@ -226,7 +232,6 @@ function injectWidget() {
         const btnPopular = createSortBtn(t('popular'), 'popular');
         const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
 
-        // تفعيل الزر الافتراضي
         btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
         btnPopular.style.color = 'white';
         btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
