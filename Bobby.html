@@ -174,29 +174,40 @@ function injectWidget() {
                 btn.style.transform = 'rotate(180deg)';
             }
 
-            // 💡 إظهار الإطار البرتقالي فقط عند الدخول
+            // 💡 تأثير الاشتعال (بدون تكبير)
             btn.onmouseenter = () => {
                 if (activeSort !== sortValue) {
+                    // زر غير نشط: إطار برتقالي وتوهج خفيف
                     btn.style.border = '1px solid #ff6b35'; 
+                    btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)';
+                    btn.style.color = '#ff6b35';
+                } else {
+                    // زر نشط: توهج قوي جداً
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
                 }
             };
 
-            // 💡 إخفاء الإطار فقط عند الخروج
+            // 💡 إطفاء التوهج عند الخروج
             btn.onmouseleave = () => {
-                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
                 if (activeSort !== sortValue) {
                     btn.style.border = '1px solid transparent';
+                    btn.style.boxShadow = 'none';
+                    btn.style.color = '#64748b';
+                } else {
+                    // إعادة التوهج الافتراضي للزر النشط
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
                 }
             };
 
+            // تأثير الضغط (بدون تكبير)
             btn.onmousedown = (e) => {
                 e.stopPropagation();
-                btn.style.transform = currentSide === 'left' ? 'rotate(180deg) scale(0.92)' : 'scale(0.92)';
+                btn.style.opacity = '0.8';
             };
 
             btn.onmouseup = (e) => {
                 e.stopPropagation();
-                btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
+                btn.style.opacity = '1';
             };
 
             btn.onclick = (e) => {
@@ -212,11 +223,14 @@ function injectWidget() {
                         b.style.color = '#64748b'; 
                         b.style.boxShadow = 'none';
                         b.style.border = '1px solid transparent';
+                        b.style.opacity = '1';
                     });
+                    // تفعيل الزر الجديد
                     btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
                     btn.style.color = 'white';
-                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)'; // توهج قوي فور التفعيل
                     btn.style.border = '1px solid rgba(255,107,53,0.5)';
+                    
                     togglePanel(true);
                     try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
                 }
@@ -228,6 +242,7 @@ function injectWidget() {
         const btnPopular = createSortBtn(t('popular'), 'popular');
         const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
 
+        // تفعيل الزر الافتراضي
         btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
         btnPopular.style.color = 'white';
         btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
