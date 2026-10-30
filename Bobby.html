@@ -20,17 +20,13 @@ export default {
       });
     }
 
-    // 💡 السر هنا: تحويل أي رابط محلي إلى الرابط العالمي وإزالة أي إضافات
+    // تنظيف الرابط
     try {
         let urlObj = new URL(targetUrl);
-        // إجبار النطاق على أن يكون www.aliexpress.com
         urlObj.hostname = "www.aliexpress.com";
-        // مسح أي باراميترات إضافية (مثل spm) لتجنب رفض الطلب
         urlObj.search = ""; 
         targetUrl = urlObj.toString();
-    } catch (e) {
-        // إذا فشل التحويل، نكمل بالرابط الأصلي
-    }
+    } catch (e) {}
 
     const appKey = env.ALI_APP_KEY;
     const appSecret = env.ALI_APP_SECRET;
@@ -47,7 +43,7 @@ export default {
         format: "json",
         v: "2.0",
         tracking_id: trackingId,
-        source_values: targetUrl, // الرابط النظيف
+        source_values: targetUrl,
         promotion_link_type: 0 
     };
 
@@ -74,26 +70,21 @@ export default {
         });
         const data = await response.json();
 
+        // 💡 طريقة القراءة المضمونة 100%
         let affiliateLink = null;
-        const apiResponse = data?.aliexpress_affiliate_link_generate_response;
-        
-        if (apiResponse && apiResponse.resp_result && apiResponse.resp_result.result) {
-            const links = apiResponse.resp_result.result.promotion_links;
-            if (links && links.length > 0) {
-                affiliateLink = links[0].promotion_link;
+        try {
+            const resultData = data.aliexpress_affiliate_link_generate_response.resp_result.result;
+            if (resultData && resultData.promotion_links && resultData.promotion_links.length > 0) {
+                affiliateLink = resultData.promotion_links[0].promotion_link;
             }
-        }
+        } catch (err) {}
 
         if (affiliateLink) {
             return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink }), { 
                 headers: { ...corsHeaders, "Content-Type": "application/json" } 
             });
         } else {
-            return new Response(JSON.stringify({ 
-                success: false, 
-                error: "API did not return a link", 
-                details: data 
-            }), { 
+            return new Response(JSON.stringify({ success: false, error: "لم يتم العثور على الرابط", details: data }), { 
                 status: 400, 
                 headers: { ...corsHeaders, "Content-Type": "application/json" } 
             });
