@@ -1,110 +1,428 @@
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
 
-    const url = new URL(request.url);
-    let targetUrl = url.searchParams.get("url");
+const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
+const isRtl = rtlLanguages.includes(siteLang);
 
-    if (!targetUrl) {
-      return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
+document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
+document.documentElement.setAttribute('lang', siteLang);
 
-    // تنظيف الرابط واستخراج رقم المنتج
-    let productId = targetUrl;
-    try {
-        let urlObj = new URL(targetUrl);
-        urlObj.hostname = "www.aliexpress.com";
-        urlObj.search = ""; 
-        targetUrl = urlObj.toString();
-        
-        const match = targetUrl.match(/\/item\/(\d+)\.html/);
-        if (match && match[1]) {
-            productId = match[1];
-        }
-    } catch (e) {}
-
-    // 💡 1. البحث في قاعدة البيانات
-    try {
-        const cachedLink = await env.COMPETITOR_CACHE.get(productId);
-        if (cachedLink) {
-            // وجده في القاعدة! يرجعه فوراً بدون سؤال علي إكسبريس
-            return new Response(JSON.stringify({ success: true, affiliate_url: cachedLink, source: "cache" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (err) {
-        console.error("KV Error:", err);
-    }
-
-    // 💡 2. إذا لم يجده (منتج جديد)، يطلبه من علي إكسبريس
-    const appKey = env.ALI_APP_KEY;
-    const appSecret = env.ALI_APP_SECRET;
-    const trackingId = env.ALI_TRACKING_ID || "default";
-
-    const method = "aliexpress.affiliate.link.generate";
-    const timestamp = Date.now().toString();
-    
-    const params = {
-        app_key: appKey, method: method, sign_method: "md5", timestamp: timestamp,
-        format: "json", v: "2.0", tracking_id: trackingId,
-        source_values: targetUrl, promotion_link_type: 0 
-    };
-
-    const sortedKeys = Object.keys(params).sort();
-    let signString = appSecret;
-    for (const key of sortedKeys) { signString += key + params[key]; }
-    signString += appSecret;
-
-    const msgBuffer = new TextEncoder().encode(signString);
-    const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-
-    const apiUrl = "https://api-sg.aliexpress.com/sync";
-    const body = new URLSearchParams({ ...params, sign: sign });
-
-    try {
-        const response = await fetch(apiUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body });
-        const data = await response.json();
-
-        const rawJsonString = JSON.stringify(data);
-        const match = rawJsonString.match(/"promotion_link":"([^"]+)"/);
-        
-        let affiliateLink = null;
-        if (match && match[1]) {
-            affiliateLink = match[1];
-        }
-
-        if (affiliateLink) {
-            // 💡 3. حفظ الرابط الجديد في القاعدة (بدون تاريخ انتهاء = دائم للأبد)
-            try {
-                await env.COMPETITOR_CACHE.put(productId, affiliateLink);
-            } catch (err) {
-                console.error("Failed to save to KV:", err);
-            }
-
-            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink, source: "api" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        } else {
-            return new Response(JSON.stringify({ success: false, error: "Could not find link", details: data }), { 
-                status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { 
-            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-        });
-    }
-  },
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
+    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
+    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
+    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
+    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
+    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
+    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
+    'zh_CN': { free_shipping: '免运费', no_products: '未找到产品。', loading_more: '正在加载更多...', sold: '已售' },
+    'zh_TW': { free_shipping: '免運費', no_products: '未找到產品。', loading_more: '正在載入更多...', sold: '已售' },
+    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
+    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
+    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
+    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
+    'sv': { free_shipping: 'Fri frakt', no_products: 'Inga produkter hittades.', loading_more: 'Laddar mer...', sold: 'sålda' },
+    'da': { free_shipping: 'Gratis fragt', no_products: 'Ingen produkter fundet.', loading_more: 'Indlæser mere...', sold: 'solgt' },
+    'fi': { free_shipping: 'Ilmainen toimitus', no_products: 'Tuotteita ei löytynyt.', loading_more: 'Ladataan lisää...', sold: 'myyty' },
+    'no': { free_shipping: 'Gratis frakt', no_products: 'Ingen produkter funnet.', loading_more: 'Laster mer...', sold: 'solgt' },
+    'cs': { free_shipping: 'Doprava zdarma', no_products: 'Nebyly nalezeny žádné produkty.', loading_more: 'Načítání dalších...', sold: 'prodáno' },
+    'ro': { free_shipping: 'Transport gratuit', no_products: 'Nu s-au găsit produse.', loading_more: 'Se încarcă mai multe...', sold: 'vândute' },
+    'hu': { free_shipping: 'Ingyenes szállítás', no_products: 'Nem található termék.', loading_more: 'Továbbiak betöltése...', sold: 'eladva' },
+    'el': { free_shipping: 'Δωρεάν αποστολή', no_products: 'Δεν βρέθηκαν προϊόντα.', loading_more: 'Φόρτωση περισσότερων...', sold: 'πωλήθηκαν' },
+    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' },
+    'ms': { free_shipping: 'Penghantaran Percuma', no_products: 'Tiada produk ditemui.', loading_more: 'Memuatkan lagi...', sold: 'terjual' },
+    'tl': { free_shipping: 'Libreng pagpapadala', no_products: 'Walang nahanap na produkto.', loading_more: 'Naglo-load ng higit pa...', sold: 'nabenta' },
+    'hi': { free_shipping: 'मुफ्त शिपिंग', no_products: 'कोई उत्पाद नहीं मिला।', loading_more: 'और लोड हो रहा है...', sold: 'बिक गया' },
+    'bg': { free_shipping: 'Безплатна доставка', no_products: 'Няма намерени продукти.', loading_more: 'Зареждане на още...', sold: 'продадени' }
 };
+
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key])
+        ? POPUP_TRANSLATIONS[siteLang][key]
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+if (loaderMore) {
+    loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
+}
+
+function showSkeletons() {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  grid.innerHTML = `
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+  `;
+}
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
+}
+
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
+  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
+  if (match) {
+    let prefix = match[1] ? match[1].trim() : '';
+    let number = match[2] ? match[2].trim() : '';
+    let suffix = match[3] ? match[3].trim() : '';
+    let currency = suffix || prefix;
+    if (number && currency) {
+      return `${number} ${currency}`;
+    }
+  }
+  return cleanStr;
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+// 💡 الماسح الشامل (Ultimate Deep Scanner) — يدعم كل اللغات وكل هياكل الأسعار
+function checkFreeShipping(obj) {
+    try {
+        const str = JSON.stringify(obj).toLowerCase();
+
+        // === 1) الكلمات المفتاحية لكل اللغات المدعومة ===
+        const keywords = [
+            // English
+            'free shipping', 'free delivery', 'free postage', 'shipping free',
+            // Portuguese
+            'frete grátis', 'frete gratis', 'envio grátis', 'envio gratis', 'entrega grátis',
+            // Spanish
+            'envío gratis', 'envio gratis', 'envío gratuito', 'entrega gratis', 'entrega gratuita',
+            // French
+            'livraison gratuite', 'livraison offerte', 'envoi gratuit', 'frais de port offerts',
+            // Italian
+            'spedizione gratuita', 'consegna gratuita', 'spedizione gratis', 'spedizione offerta',
+            // German
+            'kostenloser versand', 'kostenlose lieferung', 'kostenlos versand',
+            'gratisversand', 'versandkostenfrei', 'kostenfreie lieferung',
+            'kostenfreier versand', 'versand gratis', 'lieferung gratis',
+            // Dutch
+            'gratis verzending', 'gratis levering', 'gratis bezorging', 'gratis transport',
+            // Polish
+            'darmowa dostawa', 'darmowa wysyłka', 'bezpłatna dostawa', 'darmowa przesyłka',
+            // Turkish
+            'ücretsiz kargo', 'ücretsiz teslimat', 'bedava kargo', 'ücretsiz gönderim',
+            // Japanese
+            '送料無料', '無料配送', '送料込み', '配送無料',
+            // Korean
+            '무료 배송', '무료배송', '무료 배달', '배송비 무료',
+            // Chinese (Simplified + Traditional)
+            '免运费', '免運費', '包邮', '包郵', '免费送货', '免費送貨',
+            // Arabic
+            'شحن مجاني', 'شحن مجانى', 'توصيل مجاني', 'توصيل مجانى',
+            'الشحن مجانا', 'الشحن مجاناً', 'شحن مجانا', 'شحن مجاناً', 'توصيل مجانا',
+            // Russian
+            'бесплатная доставка', 'бесплатно', 'бесплатная пересылка', 'доставка бесплатно',
+            // Greek
+            'δωρεάν αποστολή', 'δωρεάν παράδοση', 'δωρεάν μεταφορικά',
+            // Indonesian
+            'gratis ongkir', 'pengiriman gratis', 'gratis pengiriman', 'ongkir gratis',
+            // Swedish
+            'fri frakt', 'gratis frakt', 'fri leverans', 'fraktfritt',
+            // Danish
+            'gratis fragt', 'gratis levering', 'fri fragt',
+            // Finnish
+            'ilmainen toimitus', 'ilmainen lähetys', 'ilman toimituskuluja',
+            // Norwegian
+            'gratis frakt', 'gratis levering', 'fri frakt',
+            // Czech
+            'doprava zdarma', 'poštovné zdarma', 'bezplatné doručení', 'zdarma doprava',
+            // Romanian
+            'transport gratuit', 'livrare gratuită', 'livrare gratis', 'transport gratis',
+            // Hungarian
+            'ingyenes szállítás', 'ingyenes kiszállítás', 'ingyenes postázás',
+            // Ukrainian
+            'безкоштовна доставка', 'безкоштовно', 'безоплатна доставка',
+            'безкоштовна пересилка',
+            // Malay
+            'penghantaran percuma', 'penghantaran gratis', 'percuma penghantaran',
+            'penghantaran bebas',
+            // Filipino/Tagalog
+            'libreng pagpapadala', 'libreng delivery', 'libreng padala',
+            // Hindi
+            'मुफ्त शिपिंग', 'मुफ़्त शिपिंग', 'नि:शुल्क शिपिंग', 'निःशुल्क शिपिंग',
+            'मुफ्त डिलीवरी', 'निःशुल्क डिलीवरी', 'मुफ्त डिलिवरी',
+            // Bulgarian
+            'безплатна доставка', 'безплатно', 'безплатна пратка',
+            // Hebrew
+            'משלוח חינם', 'משלוח בחינם',
+            // Vietnamese
+            'miễn phí vận chuyển', 'miễn phí giao hàng', 'miễn phí ship', 'miễn phí vận',
+            // Thai
+            'ส่งฟรี', 'จัดส่งฟรี', 'ฟรีค่าส่ง', 'ฟรีค่าจัดส่ง'
+        ];
+        if (keywords.some(kw => str.includes(kw))) return true;
+
+        // === 2) فحص نصي سريع للحقول الرقمية ===
+        const zeroPatterns = [
+            /"shippingfee"\s*:\s*(0|"0"|"0\.0+"|null)/i,
+            /"freightamount"\s*:\s*(0|"0"|"0\.0+"|null)/i,
+            /"deliveryfee"\s*:\s*(0|"0"|"0\.0+"|null)/i,
+            /"shippingcost"\s*:\s*(0|"0"|"0\.0+"|null)/i,
+            /"postage"\s*:\s*(0|"0"|"0\.0+"|null)/i,
+            /"freight"\s*:\s*(0|"0"|"0\.0+"|null)/i
+        ];
+        if (zeroPatterns.some(rx => rx.test(str))) return true;
+
+        // === 3) فحص عميق للبنية (يدعم كل الحقول والأشكال) ===
+        const zeroish = (v) => {
+            if (v === 0 || v === null || v === undefined) return true;
+            if (typeof v === 'string') {
+                const s = v.trim().toLowerCase();
+                return s === '0' || s === '0.0' || s === '0.00' ||
+                       s === 'free' || s === 'gratis' || s === 'kostenlos' ||
+                       s === 'gratuit' || s === 'gratuita' || s === 'gratuito';
+            }
+            if (typeof v === 'number') return v === 0;
+            return false;
+        };
+
+        const priceFields = [
+            'value', 'amount', 'price', 'fee', 'cost', 'total',
+            'min', 'max', 'minprice', 'maxprice', 'cent', 'cents', 'amountvalue'
+        ];
+        const shipKeyHints = [
+            'shipping', 'freight', 'delivery', 'postage', 'logistics', 'shipfee'
+        ];
+
+        const checkObj = (o, depth = 0) => {
+            if (!o || typeof o !== 'object' || depth > 8) return false;
+
+            // أعلام منطقية صريحة
+            if (o.freeShipping === true || o.isFreeShipping === true ||
+                o.hasFreeShipping === true || o.shippingFree === true) return true;
+
+            for (const key in o) {
+                const k = key.toLowerCase();
+                const v = o[key];
+
+                const isShipKey = shipKeyHints.some(h => k.includes(h));
+
+                if (isShipKey) {
+                    // قيمة مباشرة = 0 أو free
+                    if (zeroish(v)) return true;
+
+                    // كائن يحتوي على price/value/amount = 0
+                    if (typeof v === 'object' && v !== null) {
+                        for (const field of priceFields) {
+                            if (zeroish(v[field])) return true;
+                        }
+                    }
+
+                    // نص يشير إلى المجانية بأي لغة (احتياطي)
+                    if (typeof v === 'string') {
+                        const s = v.toLowerCase();
+                        if (s.includes('free') || s.includes('gratis') ||
+                            s.includes('gratuit') || s.includes('kostenlos') ||
+                            s.includes('مجان') || s.includes('бесплат')) return true;
+                    }
+                }
+
+                if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+                    if (checkObj(v, depth + 1)) return true;
+                }
+            }
+            return false;
+        };
+
+        return checkObj(obj);
+    } catch (e) {
+        return false;
+    }
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+
+    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    let isFreeShipping = checkFreeShipping(p);
+
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+
+    let shippingHtml = isFreeShipping
+      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
+      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
+
+    let metaHtml = (soldText || rating)
+      ? `<div class="meta-row">
+          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText && rating ? `<span class="divider">|</span>` : ''}
+          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+         </div>`
+      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+
+    const a = document.createElement('a');
+    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${metaHtml}
+        <div class="price">${price}</div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
+  }
+}
+
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
+    if (isLoading) return;
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
+    return;
+  }
+
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop();
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  showSkeletons();
+
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+
+  if (res.error) {
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
+    return;
+  }
+
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000));
+
+  isLoading = false;
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop();
+
+      if (!isLoading && globalProducts.length > 0) {
+        render(false);
+      }
+    }
+  }
+});
+
+loadInitial();
