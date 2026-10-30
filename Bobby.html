@@ -184,10 +184,12 @@ function createCard(p) {
     const trades = getTradeCount(p);
     const soldText = formatSold(trades);
 
-    // 💡 تم دمج رابط Cloudflare Worker الخاص بك هنا
-    const WORKER_URL = "https://smart-shopper.smailsuit11.workers.dev"; 
+    // 💡 الرابط الأصلي النظيف (الذي سيظهر في شريط الحالة أسفل المتصفح)
     const originalUrl = `https://${globalHost}/item/${p.productId}.html`;
-    const directUrl = `${WORKER_URL}/?url=${encodeURIComponent(originalUrl)}`;
+    
+    // 💡 رابط خادم العمولة الخاص بك
+    const WORKER_URL = "https://smart-shopper.smailsuit11.workers.dev";
+    const affiliateUrl = `${WORKER_URL}/?url=${encodeURIComponent(originalUrl)}`;
 
     let isFreeShipping = checkFreeShipping(p);
 
@@ -206,7 +208,17 @@ function createCard(p) {
       : `<div class="meta-row" style="visibility: hidden;">-</div>`;
 
     const a = document.createElement('a');
-    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+    
+    // 💡 وضع الرابط النظيف في الـ href
+    a.href = originalUrl; 
+    a.target = '_blank'; 
+    a.className = 'product-card';
+
+    // 💡 اعتراض النقر لفتح رابط العمولة
+    a.onclick = (e) => {
+        e.preventDefault(); 
+        window.open(affiliateUrl, '_blank'); 
+    };
 
     a.innerHTML = `
       <div class="img-box">
