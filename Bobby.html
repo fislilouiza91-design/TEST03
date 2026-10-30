@@ -174,22 +174,18 @@ function injectWidget() {
                 btn.style.transform = 'rotate(180deg)';
             }
 
-            // 💡 يشعل عند الدخول
+            // 💡 إظهار الإطار البرتقالي فقط عند الدخول
             btn.onmouseenter = () => {
                 if (activeSort !== sortValue) {
                     btn.style.border = '1px solid #ff6b35'; 
-                    btn.style.background = '#fff4f0'; 
-                    btn.style.color = '#ff6b35'; 
                 }
             };
 
-            // 💡 ينطفئ عند الخروج
+            // 💡 إخفاء الإطار فقط عند الخروج
             btn.onmouseleave = () => {
                 btn.style.transform = currentSide === 'left' ? 'rotate(180deg)' : 'scale(1)';
                 if (activeSort !== sortValue) {
                     btn.style.border = '1px solid transparent';
-                    btn.style.background = 'transparent';
-                    btn.style.color = '#64748b';
                 }
             };
 
