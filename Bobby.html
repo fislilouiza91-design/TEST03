@@ -317,10 +317,22 @@ function injectWidget() {
         widgetWrapper.appendChild(iframeContainer);
         document.body.appendChild(widgetWrapper);
 
+        if (sidebar) {
+            sidebar.animate(
+                [{ opacity: 0 }, { opacity: 1 }],
+                { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }
+            );
+        }
+
         window.addEventListener('mousedown', (e) => {
             if (!isOpen) return;
+            if (e.button !== 0) return;
             if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
             togglePanel(false);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && isOpen) togglePanel(false);
         });
 
         let scrollAccumulated = 0;
