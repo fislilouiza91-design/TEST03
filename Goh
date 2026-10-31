@@ -1,1 +1,110 @@
-GFGFGFR
+export default {
+  async fetch(request, env, ctx) {
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    const url = new URL(request.url);
+    let targetUrl = url.searchParams.get("url");
+
+    if (!targetUrl) {
+      return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // تنظيف الرابط واستخراج رقم المنتج
+    let productId = targetUrl;
+    try {
+        let urlObj = new URL(targetUrl);
+        urlObj.hostname = "www.aliexpress.com";
+        urlObj.search = ""; 
+        targetUrl = urlObj.toString();
+        
+        const match = targetUrl.match(/\/item\/(\d+)\.html/);
+        if (match && match[1]) {
+            productId = match[1];
+        }
+    } catch (e) {}
+
+    // 💡 1. البحث في قاعدة البيانات
+    try {
+        const cachedLink = await env.COMPETITOR_CACHE.get(productId);
+        if (cachedLink) {
+            // وجده في القاعدة! يرجعه فوراً بدون سؤال علي إكسبريس
+            return new Response(JSON.stringify({ success: true, affiliate_url: cachedLink, source: "cache" }), { 
+                headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            });
+        }
+    } catch (err) {
+        console.error("KV Error:", err);
+    }
+
+    // 💡 2. إذا لم يجده (منتج جديد)، يطلبه من علي إكسبريس
+    const appKey = env.ALI_APP_KEY;
+    const appSecret = env.ALI_APP_SECRET;
+    const trackingId = env.ALI_TRACKING_ID || "default";
+
+    const method = "aliexpress.affiliate.link.generate";
+    const timestamp = Date.now().toString();
+    
+    const params = {
+        app_key: appKey, method: method, sign_method: "md5", timestamp: timestamp,
+        format: "json", v: "2.0", tracking_id: trackingId,
+        source_values: targetUrl, promotion_link_type: 0 
+    };
+
+    const sortedKeys = Object.keys(params).sort();
+    let signString = appSecret;
+    for (const key of sortedKeys) { signString += key + params[key]; }
+    signString += appSecret;
+
+    const msgBuffer = new TextEncoder().encode(signString);
+    const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+    const apiUrl = "https://api-sg.aliexpress.com/sync";
+    const body = new URLSearchParams({ ...params, sign: sign });
+
+    try {
+        const response = await fetch(apiUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body });
+        const data = await response.json();
+
+        const rawJsonString = JSON.stringify(data);
+        const match = rawJsonString.match(/"promotion_link":"([^"]+)"/);
+        
+        let affiliateLink = null;
+        if (match && match[1]) {
+            affiliateLink = match[1];
+        }
+
+        if (affiliateLink) {
+            // 💡 3. حفظ الرابط الجديد في القاعدة (بدون تاريخ انتهاء = دائم للأبد)
+            try {
+                await env.COMPETITOR_CACHE.put(productId, affiliateLink);
+            } catch (err) {
+                console.error("Failed to save to KV:", err);
+            }
+
+            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink, source: "api" }), { 
+                headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            });
+        } else {
+            return new Response(JSON.stringify({ success: false, error: "Could not find link", details: data }), { 
+                status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            });
+        }
+    } catch (error) {
+        return new Response(JSON.stringify({ success: false, error: error.message }), { 
+            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
+    }
+  },
+};
