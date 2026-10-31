@@ -1,116 +1,688 @@
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+210
+211
+212
+213
+214
+215
+216
+217
+218
+219
+220
+221
+222
+223
+224
+225
+226
+227
+228
+229
+230
+231
+232
+233
+234
+235
+236
+237
+238
+239
+240
+241
+242
+243
+244
+245
+246
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+258
+259
+260
+261
+262
+263
+264
+265
+266
+267
+268
+269
+270
+271
+272
+273
+274
+275
+276
+277
+278
+279
+280
+281
+282
+283
+284
+285
+286
+287
+288
+289
+290
+291
+292
+293
+294
+295
+296
+297
+298
+299
+300
+301
+302
+303
+304
+305
+306
+307
+308
+309
+310
+311
+312
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+328
+329
+330
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
+343
+344
+const resultsEl = document.getElementById('results');
+const loaderMore = document.getElementById('loader-more');
+let globalProducts = [], globalHost = '', currentSort = 'popular';
+let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
+let lastRequestTime = 0, scrollDebounceTimer = null;
+const MIN_COOLDOWN_MS = 3000;
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+const urlParams = new URLSearchParams(window.location.search);
+const siteLang = urlParams.get('siteLang') || 'en';
 
-    const url = new URL(request.url);
-    let targetUrl = url.searchParams.get("url");
+const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
+const isRtl = rtlLanguages.includes(siteLang);
 
-    if (!targetUrl) {
-      return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
+document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
+document.documentElement.setAttribute('lang', siteLang);
 
-    // تنظيف الرابط واستخراج رقم المنتج
-    let productId = targetUrl;
-    try {
-        let urlObj = new URL(targetUrl);
-        urlObj.hostname = "www.aliexpress.com";
-        urlObj.search = ""; 
-        targetUrl = urlObj.toString();
-        
-        const match = targetUrl.match(/\/item\/(\d+)\.html/);
-        if (match && match[1]) {
-            productId = match[1];
-        }
-    } catch (e) {}
-
-    // 💡 1. البحث في قاعدة البيانات
-    try {
-        const cachedLink = await env.COMPETITOR_CACHE.get(productId);
-        if (cachedLink) {
-            return new Response(JSON.stringify({ success: true, affiliate_url: cachedLink, source: "cache" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (err) {
-        console.error("KV Error:", err);
-    }
-
-    // 💡 2. طلب الرابط من علي إكسبريس
-    const appKey = env.ALI_APP_KEY;
-    const appSecret = env.ALI_APP_SECRET;
-    const trackingId = env.ALI_TRACKING_ID || "default";
-
-    const method = "aliexpress.affiliate.link.generate";
-    const timestamp = Date.now().toString();
-    
-    const params = {
-        app_key: appKey, method: method, sign_method: "md5", timestamp: timestamp,
-        format: "json", v: "2.0", tracking_id: trackingId,
-        source_values: targetUrl, promotion_link_type: 0 
-    };
-
-    const sortedKeys = Object.keys(params).sort();
-    let signString = appSecret;
-    for (const key of sortedKeys) { signString += key + params[key]; }
-    signString += appSecret;
-
-    const msgBuffer = new TextEncoder().encode(signString);
-    const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-
-    const apiUrl = "https://api-sg.aliexpress.com/sync";
-    const body = new URLSearchParams({ ...params, sign: sign });
-
-    try {
-        const response = await fetch(apiUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body });
-        const data = await response.json();
-
-        const rawJsonString = JSON.stringify(data);
-        const match = rawJsonString.match(/"promotion_link":"([^"]+)"/);
-        
-        let affiliateLink = null;
-        if (match && match[1]) {
-            affiliateLink = match[1];
-            
-            // 💡 الفحص الجديد: إذا كان الرابط هو الصفحة الرئيسية، ارفضه
-            if (affiliateLink.includes('best.aliexpress.com') || affiliateLink === 'https://aliexpress.com/' || affiliateLink === 'https://www.aliexpress.com/') {
-                affiliateLink = null; 
-            }
-        }
-
-        if (affiliateLink) {
-            // الرابط سليم: احفظه وأرجعه
-            try {
-                await env.COMPETITOR_CACHE.put(productId, affiliateLink);
-            } catch (err) {
-                console.error("Failed to save to KV:", err);
-            }
-
-            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink, source: "api" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        } else {
-            // الرابط غير صالح (أو لم يرسله علي إكسبريس)
-            // نرجع فشل، لكي تفتح الإضافة الرابط الأصلي ولا يرى المستخدم صفحة بيضاء
-            return new Response(JSON.stringify({ success: false, error: "Invalid link generated", details: data }), { 
-                status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { 
-            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-        });
-    }
-  },
+const POPUP_TRANSLATIONS = {
+    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
+    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
+    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
+    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
+    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
+    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
+    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
+    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
+    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
+    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
+    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
+    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
+    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
+    'zh_CN': { free_shipping: '免运费', no_products: '未找到产品。', loading_more: '正在加载更多...', sold: '已售' },
+    'zh_TW': { free_shipping: '免運費', no_products: '未找到產品。', loading_more: '正在載入更多...', sold: '已售' },
+    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
+    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
+    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
+    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
+    'sv': { free_shipping: 'Fri frakt', no_products: 'Inga produkter hittades.', loading_more: 'Laddar mer...', sold: 'sålda' },
+    'da': { free_shipping: 'Gratis fragt', no_products: 'Ingen produkter fundet.', loading_more: 'Indlæser mere...', sold: 'solgt' },
+    'fi': { free_shipping: 'Ilmainen toimitus', no_products: 'Tuotteita ei löytynyt.', loading_more: 'Ladataan lisää...', sold: 'myyty' },
+    'no': { free_shipping: 'Gratis frakt', no_products: 'Ingen produkter funnet.', loading_more: 'Laster mer...', sold: 'solgt' },
+    'cs': { free_shipping: 'Doprava zdarma', no_products: 'Nebyly nalezeny žádné produkty.', loading_more: 'Načítání dalších...', sold: 'prodáno' },
+    'ro': { free_shipping: 'Transport gratuit', no_products: 'Nu s-au găsit produse.', loading_more: 'Se încarcă mai multe...', sold: 'vândute' },
+    'hu': { free_shipping: 'Ingyenes szállítás', no_products: 'Nem található termék.', loading_more: 'Továbbiak betöltése...', sold: 'eladva' },
+    'el': { free_shipping: 'Δωρεάν αποστολή', no_products: 'Δεν βρέθηκαν προϊόντα.', loading_more: 'Φόρτωση περισσότερων...', sold: 'πωλήθηκαν' },
+    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' },
+    'ms': { free_shipping: 'Penghantaran Percuma', no_products: 'Tiada produk ditemui.', loading_more: 'Memuatkan lagi...', sold: 'terjual' },
+    'tl': { free_shipping: 'Libreng pagpapadala', no_products: 'Walang nahanap na produkto.', loading_more: 'Naglo-load ng higit pa...', sold: 'nabenta' },
+    'hi': { free_shipping: 'मुफ्त शिपिंग', no_products: 'कोई उत्पाद नहीं मिला।', loading_more: 'और लोड हो रहा है...', sold: 'बिक गया' },
+    'bg': { free_shipping: 'Безплатна доставка', no_products: 'Няма намерени продукти.', loading_more: 'Зареждане на още...', sold: 'продадени' }
 };
+
+const t_popup = (key) => {
+    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key])
+        ? POPUP_TRANSLATIONS[siteLang][key]
+        : POPUP_TRANSLATIONS['en'][key];
+};
+
+const msgFreeShipping = t_popup('free_shipping');
+const msgNoProducts = t_popup('no_products');
+const msgLoadingMore = t_popup('loading_more');
+const msgSold = t_popup('sold');
+
+if (loaderMore) {
+    loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
+}
+
+function showSkeletons() {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  grid.innerHTML = `
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
+  `;
+}
+
+function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+
+async function fetchProducts(page, streamId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
+  });
+}
+
+function getRating(p) {
+  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
+}
+
+function getTradeCount(p) {
+  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
+}
+
+function formatSold(count) {
+  if (count === 0) return '';
+  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
+  return count + '+ ' + msgSold;
+}
+
+function formatPrice(priceStr) {
+  if (!priceStr) return '—';
+  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
+  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
+  if (match) {
+    let prefix = match[1] ? match[1].trim() : '';
+    let number = match[2] ? match[2].trim() : '';
+    let suffix = match[3] ? match[3].trim() : '';
+    let currency = suffix || prefix;
+    if (number && currency) {
+      return `${number} ${currency}`;
+    }
+  }
+  return cleanStr;
+}
+
+function sortProducts(mode) {
+  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
+  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
+  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
+}
+
+function checkFreeShipping(obj) {
+    try {
+        const str = JSON.stringify(obj).toLowerCase();
+        
+        const keywords = [
+            'free shipping', 'free delivery', 'frete grátis', 'frete gratis', 'envío gratis', 'envio gratis', 
+            'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 
+            'ücretsiz kargo', '送料無料', '무료 배송', '무료배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 
+            'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir', 'pengiriman gratis'
+        ];
+        if (keywords.some(kw => str.includes(kw))) return true;
+
+        if (str.includes('"shippingfee":0') || str.includes('"shippingfee":"0') || str.includes('"shippingfee":"0.00') || str.includes('"shippingfee":null')) return true;
+        if (str.includes('"freightamount":{"value":0') || str.includes('"freightamount":{"value":"0') || str.includes('"freightamount":{"value":"0.00') || str.includes('"freightamount":0') || str.includes('"freightamount":"0') || str.includes('"freightamount":null')) return true;
+        
+        const checkObj = (o, depth = 0) => {
+            if (!o || typeof o !== 'object' || depth > 6) return false;
+            for (let key in o) {
+                const k = key.toLowerCase();
+                const v = o[key];
+                
+                if (k === 'freeshipping' && v === true) return true;
+                if (k.includes('servicecommitment') && String(v).toLowerCase().includes('free')) return true;
+                if (k.includes('deliveryinfo') && String(v).toLowerCase().includes('free')) return true;
+                
+                if (k.includes('shippingfee') || k.includes('freightamount') || k.includes('shippingcost') || k.includes('deliveryfee')) {
+                    const vStr = String(v).toLowerCase();
+                    if (v === 0 || vStr === '0' || vStr === '0.00' || vStr === '0.0' || vStr === 'free' || vStr === 'gratis' || v === null) {
+                        return true;
+                    }
+                    if (typeof v === 'object' && v !== null) {
+                        if (v.value === 0 || String(v.value) === '0' || String(v.value) === '0.00' || v.value === null) return true;
+                    }
+                }
+                
+                if (typeof v === 'object' && v !== null) {
+                    if (checkObj(v, depth + 1)) return true;
+                }
+            }
+            return false;
+        };
+        return checkObj(obj);
+    } catch (e) {
+        return false;
+    }
+}
+
+function createCard(p) {
+  try {
+    let rawImg = p?.image?.imgUrl || '';
+    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
+    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+
+    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
+    const title = p?.title?.displayTitle || 'Product';
+    const rating = getRating(p);
+    const trades = getTradeCount(p);
+    const soldText = formatSold(trades);
+
+    const originalUrl = `https://${globalHost}/item/${p.productId}.html`;
+
+    const WORKER_API = "https://smart-shopper-proxy.fislilouiza91.workers.dev";
+
+    let isFreeShipping = checkFreeShipping(p);
+
+    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+
+    let shippingHtml = isFreeShipping
+      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
+      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
+
+    let metaHtml = (soldText || rating)
+      ? `<div class="meta-row">
+          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText && rating ? `<span class="divider">|</span>` : ''}
+          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
+         </div>`
+      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+
+    const a = document.createElement('a');
+    
+    a.href = originalUrl; 
+    a.target = '_blank'; 
+    a.className = 'product-card';
+
+    a.onclick = async (e) => {
+        e.preventDefault(); 
+        
+        const newTab = window.open('about:blank', '_blank'); 
+
+        try {
+            const response = await fetch(`${WORKER_API}/?url=${encodeURIComponent(originalUrl)}`);
+            const data = await response.json();
+            
+            if (data.success && data.affiliate_url) {
+                newTab.location.href = data.affiliate_url;
+            } else {
+                newTab.location.href = originalUrl;
+            }
+        } catch (error) {
+            newTab.location.href = originalUrl;
+        }
+    };
+
+    a.innerHTML = `
+      <div class="img-box">
+        <img src="${img}" onerror="this.style.display='none'">
+      </div>
+      <div class="info">
+        <div class="title" title="${title}">${title}</div>
+        ${metaHtml}
+        <div class="price">${price}</div>
+        ${shippingHtml}
+      </div>
+    `;
+    return a;
+  } catch (error) {
+    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
+  }
+}
+
+function render(appendOnly = false, newProducts = []) {
+  let grid = document.getElementById('main-grid');
+  if (!grid) {
+    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
+    grid = document.getElementById('main-grid');
+  }
+
+  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
+    if (isLoading) return;
+    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
+    return;
+  }
+
+  if (!appendOnly) {
+    sortProducts(currentSort);
+    grid.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  } else {
+    const fragment = document.createDocumentFragment();
+    newProducts.forEach(p => fragment.appendChild(createCard(p)));
+    grid.appendChild(fragment);
+  }
+}
+
+async function loadInitial() {
+  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
+  scrollToTop();
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  showSkeletons();
+
+  lastRequestTime = Date.now();
+  const res = await fetchProducts(1, null) || {};
+  isLoading = false;
+
+  if (res.error) {
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
+    return;
+  }
+
+  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
+  hasMore = globalProducts.length >= 20;
+
+  render(false); scrollToTop();
+}
+
+async function loadMore() {
+  if (isLoading || !hasMore || !currentStreamId) return;
+  const now = Date.now();
+  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+
+  isLoading = true; lastRequestTime = Date.now();
+  if(loaderMore) loaderMore.style.display = 'block';
+
+  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
+  await new Promise(r => setTimeout(r, 1000));
+
+  isLoading = false;
+  if(loaderMore) loaderMore.style.display = 'none';
+
+  if (res.error) return;
+
+  const newProducts = res.products || [];
+  if (newProducts.length > 0) {
+    globalProducts = [...globalProducts, ...newProducts];
+    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
+    hasMore = newProducts.length >= 20;
+    render(true, newProducts);
+  } else { hasMore = false; }
+}
+
+resultsEl.addEventListener('scroll', () => {
+  clearTimeout(scrollDebounceTimer);
+  scrollDebounceTimer = setTimeout(() => {
+    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
+  }, 300);
+});
+
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'SORT') {
+    const newSort = event.data.sort;
+
+    if (currentSort !== newSort) {
+      currentSort = newSort;
+      scrollToTop();
+
+      if (!isLoading && globalProducts.length > 0) {
+        render(false);
+      }
+    }
+  }
+});
+
+loadInitial();
