@@ -64,6 +64,20 @@ if (loaderMore) {
     loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
 }
 
+// 💡 دالة لحماية النصوص من ثغرات XSS
+function escapeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/[&<>'"]/g, function(tag) {
+        return {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            "'": '&#39;',
+            '"': '&quot;'
+        }[tag] || tag;
+    });
+}
+
 function showSkeletons() {
   let grid = document.getElementById('main-grid');
   if (!grid) {
@@ -185,7 +199,6 @@ function createCard(p) {
     const soldText = formatSold(trades);
 
     const originalUrl = `https://${globalHost}/item/${p.productId}.html`;
-
     const WORKER_API = "https://smart-shopper-proxy.fislilouiza91.workers.dev";
 
     let isFreeShipping = checkFreeShipping(p);
@@ -198,7 +211,7 @@ function createCard(p) {
 
     let metaHtml = (soldText || rating)
       ? `<div class="meta-row">
-          ${soldText ? `<span>${soldText}</span>` : ''}
+          ${soldText ? `<span>${escapeHTML(soldText)}</span>` : ''}
           ${soldText && rating ? `<span class="divider">|</span>` : ''}
           ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
          </div>`
@@ -231,15 +244,23 @@ function createCard(p) {
 
     a.innerHTML = `
       <div class="img-box">
-        <img src="${img}" onerror="this.style.display='none'">
+        <img src="${escapeHTML(img)}">
       </div>
       <div class="info">
-        <div class="title" title="${title}">${title}</div>
+        <div class="title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
         ${metaHtml}
-        <div class="price">${price}</div>
+        <div class="price">${escapeHTML(price)}</div>
         ${shippingHtml}
       </div>
     `;
+
+    const imgElement = a.querySelector('img');
+    if (imgElement) {
+        imgElement.onerror = function() {
+            this.style.display = 'none';
+        };
+    }
+
     return a;
   } catch (error) {
     const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
