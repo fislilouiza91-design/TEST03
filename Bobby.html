@@ -1,428 +1,408 @@
-const resultsEl = document.getElementById('results');
-const loaderMore = document.getElementById('loader-more');
-let globalProducts = [], globalHost = '', currentSort = 'popular';
-let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
-let lastRequestTime = 0, scrollDebounceTimer = null;
-const MIN_COOLDOWN_MS = 3000;
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+let darkModeQueryRef = null;
+let darkModeListenerRef = null;
 
-const urlParams = new URLSearchParams(window.location.search);
-const siteLang = urlParams.get('siteLang') || 'en';
-
-const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
-const isRtl = rtlLanguages.includes(siteLang);
-
-document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
-document.documentElement.setAttribute('lang', siteLang);
-
-const POPUP_TRANSLATIONS = {
-    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
-    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
-    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' },
-    'es': { free_shipping: 'Envío gratis', no_products: 'No se encontraron productos.', loading_more: 'Cargando más...', sold: 'vendidos' },
-    'pt': { free_shipping: 'Frete grátis', no_products: 'Nenhum produto encontrado.', loading_more: 'Carregando mais...', sold: 'vendidos' },
-    'ru': { free_shipping: 'Бесплатная доставка', no_products: 'Товары не найдены.', loading_more: 'Загрузка...', sold: 'продано' },
-    'de': { free_shipping: 'Kostenloser Versand', no_products: 'Keine Produkte gefunden.', loading_more: 'Mehr laden...', sold: 'verkauft' },
-    'it': { free_shipping: 'Spedizione gratuita', no_products: 'Nessun prodotto trovato.', loading_more: 'Caricamento...', sold: 'venduti' },
-    'tr': { free_shipping: 'Ücretsiz Kargo', no_products: 'Ürün bulunamadı.', loading_more: 'Daha fazla yükleniyor...', sold: 'satıldı' },
-    'nl': { free_shipping: 'Gratis verzending', no_products: 'Geen producten gevonden.', loading_more: 'Meer laden...', sold: 'verkocht' },
-    'pl': { free_shipping: 'Darmowa dostawa', no_products: 'Nie znaleziono produktów.', loading_more: 'Ładowanie...', sold: 'sprzedano' },
-    'ko': { free_shipping: '무료 배송', no_products: '상품을 찾을 수 없습니다.', loading_more: '더 불러오는 중...', sold: '판매됨' },
-    'ja': { free_shipping: '送料無料', no_products: '商品が見つかりません。', loading_more: 'さらに読み込む...', sold: '販売済み' },
-    'zh_CN': { free_shipping: '免运费', no_products: '未找到产品。', loading_more: '正在加载更多...', sold: '已售' },
-    'zh_TW': { free_shipping: '免運費', no_products: '未找到產品。', loading_more: '正在載入更多...', sold: '已售' },
-    'vi': { free_shipping: 'Miễn phí vận chuyển', no_products: 'Không tìm thấy sản phẩm.', loading_more: 'Đang tải thêm...', sold: 'đã bán' },
-    'id': { free_shipping: 'Gratis Ongkir', no_products: 'Produk tidak ditemukan.', loading_more: 'Memuat lebih banyak...', sold: 'terjual' },
-    'th': { free_shipping: 'ส่งฟรี', no_products: 'ไม่พบสินค้า', loading_more: 'กำลังโหลดเพิ่มเติม...', sold: 'ขายแล้ว' },
-    'he': { free_shipping: 'משלוח חינם', no_products: 'לא נמצאו מוצרים.', loading_more: 'טוען עוד...', sold: 'נמכרו' },
-    'sv': { free_shipping: 'Fri frakt', no_products: 'Inga produkter hittades.', loading_more: 'Laddar mer...', sold: 'sålda' },
-    'da': { free_shipping: 'Gratis fragt', no_products: 'Ingen produkter fundet.', loading_more: 'Indlæser mere...', sold: 'solgt' },
-    'fi': { free_shipping: 'Ilmainen toimitus', no_products: 'Tuotteita ei löytynyt.', loading_more: 'Ladataan lisää...', sold: 'myyty' },
-    'no': { free_shipping: 'Gratis frakt', no_products: 'Ingen produkter funnet.', loading_more: 'Laster mer...', sold: 'solgt' },
-    'cs': { free_shipping: 'Doprava zdarma', no_products: 'Nebyly nalezeny žádné produkty.', loading_more: 'Načítání dalších...', sold: 'prodáno' },
-    'ro': { free_shipping: 'Transport gratuit', no_products: 'Nu s-au găsit produse.', loading_more: 'Se încarcă mai multe...', sold: 'vândute' },
-    'hu': { free_shipping: 'Ingyenes szállítás', no_products: 'Nem található termék.', loading_more: 'Továbbiak betöltése...', sold: 'eladva' },
-    'el': { free_shipping: 'Δωρεάν αποστολή', no_products: 'Δεν βρέθηκαν προϊόντα.', loading_more: 'Φόρτωση περισσότερων...', sold: 'πωλήθηκαν' },
-    'uk': { free_shipping: 'Безкоштовна доставка', no_products: 'Товари не знайдено.', loading_more: 'Завантаження...', sold: 'продано' },
-    'ms': { free_shipping: 'Penghantaran Percuma', no_products: 'Tiada produk ditemui.', loading_more: 'Memuatkan lagi...', sold: 'terjual' },
-    'tl': { free_shipping: 'Libreng pagpapadala', no_products: 'Walang nahanap na produkto.', loading_more: 'Naglo-load ng higit pa...', sold: 'nabenta' },
-    'hi': { free_shipping: 'मुफ्त शिपिंग', no_products: 'कोई उत्पाद नहीं मिला।', loading_more: 'और लोड हो रहा है...', sold: 'बिक गया' },
-    'bg': { free_shipping: 'Безплатна доставка', no_products: 'Няма намерени продукти.', loading_more: 'Зареждане на още...', sold: 'продадени' }
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر طلباً', rating: 'الأكثر تقيماً' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени' }
 };
 
-const t_popup = (key) => {
-    return (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key])
-        ? POPUP_TRANSLATIONS[siteLang][key]
-        : POPUP_TRANSLATIONS['en'][key];
-};
-
-const msgFreeShipping = t_popup('free_shipping');
-const msgNoProducts = t_popup('no_products');
-const msgLoadingMore = t_popup('loading_more');
-const msgSold = t_popup('sold');
-
-if (loaderMore) {
-    loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
-}
-
-function showSkeletons() {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
-
-  grid.innerHTML = `
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-    <div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>
-  `;
-}
-
-function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
-
-async function fetchProducts(page, streamId) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve);
-  });
-}
-
-function getRating(p) {
-  return Number(p?.evaluation?.starRating) || Number(p?.evaluation?.ratingAvg) || Number(p?.starRating) || Number(p?.averageStar) || 0;
-}
-
-function getTradeCount(p) {
-  return Number(p?.trade?.realTradeCount) || Number(p?.trade?.tradeCount) || Number(p?.trade?.soldCount) || Number(p?.tradeCount) || 0;
-}
-
-function formatSold(count) {
-  if (count === 0) return '';
-  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
-  return count + '+ ' + msgSold;
-}
-
-function formatPrice(priceStr) {
-  if (!priceStr) return '—';
-  let cleanStr = priceStr.replace(/^US\s*/, '').trim();
-  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
-  if (match) {
-    let prefix = match[1] ? match[1].trim() : '';
-    let number = match[2] ? match[2].trim() : '';
-    let suffix = match[3] ? match[3].trim() : '';
-    let currency = suffix || prefix;
-    if (number && currency) {
-      return `${number} ${currency}`;
-    }
-  }
-  return cleanStr;
-}
-
-function sortProducts(mode) {
-  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
-  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
-  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
-}
-
-// 💡 الماسح الشامل (Ultimate Deep Scanner) — يدعم كل اللغات وكل هياكل الأسعار
-function checkFreeShipping(obj) {
+function getSiteLang() {
     try {
-        const str = JSON.stringify(obj).toLowerCase();
-
-        // === 1) الكلمات المفتاحية لكل اللغات المدعومة ===
-        const keywords = [
-            // English
-            'free shipping', 'free delivery', 'free postage', 'shipping free',
-            // Portuguese
-            'frete grátis', 'frete gratis', 'envio grátis', 'envio gratis', 'entrega grátis',
-            // Spanish
-            'envío gratis', 'envio gratis', 'envío gratuito', 'entrega gratis', 'entrega gratuita',
-            // French
-            'livraison gratuite', 'livraison offerte', 'envoi gratuit', 'frais de port offerts',
-            // Italian
-            'spedizione gratuita', 'consegna gratuita', 'spedizione gratis', 'spedizione offerta',
-            // German
-            'kostenloser versand', 'kostenlose lieferung', 'kostenlos versand',
-            'gratisversand', 'versandkostenfrei', 'kostenfreie lieferung',
-            'kostenfreier versand', 'versand gratis', 'lieferung gratis',
-            // Dutch
-            'gratis verzending', 'gratis levering', 'gratis bezorging', 'gratis transport',
-            // Polish
-            'darmowa dostawa', 'darmowa wysyłka', 'bezpłatna dostawa', 'darmowa przesyłka',
-            // Turkish
-            'ücretsiz kargo', 'ücretsiz teslimat', 'bedava kargo', 'ücretsiz gönderim',
-            // Japanese
-            '送料無料', '無料配送', '送料込み', '配送無料',
-            // Korean
-            '무료 배송', '무료배송', '무료 배달', '배송비 무료',
-            // Chinese (Simplified + Traditional)
-            '免运费', '免運費', '包邮', '包郵', '免费送货', '免費送貨',
-            // Arabic
-            'شحن مجاني', 'شحن مجانى', 'توصيل مجاني', 'توصيل مجانى',
-            'الشحن مجانا', 'الشحن مجاناً', 'شحن مجانا', 'شحن مجاناً', 'توصيل مجانا',
-            // Russian
-            'бесплатная доставка', 'бесплатно', 'бесплатная пересылка', 'доставка бесплатно',
-            // Greek
-            'δωρεάν αποστολή', 'δωρεάν παράδοση', 'δωρεάν μεταφορικά',
-            // Indonesian
-            'gratis ongkir', 'pengiriman gratis', 'gratis pengiriman', 'ongkir gratis',
-            // Swedish
-            'fri frakt', 'gratis frakt', 'fri leverans', 'fraktfritt',
-            // Danish
-            'gratis fragt', 'gratis levering', 'fri fragt',
-            // Finnish
-            'ilmainen toimitus', 'ilmainen lähetys', 'ilman toimituskuluja',
-            // Norwegian
-            'gratis frakt', 'gratis levering', 'fri frakt',
-            // Czech
-            'doprava zdarma', 'poštovné zdarma', 'bezplatné doručení', 'zdarma doprava',
-            // Romanian
-            'transport gratuit', 'livrare gratuită', 'livrare gratis', 'transport gratis',
-            // Hungarian
-            'ingyenes szállítás', 'ingyenes kiszállítás', 'ingyenes postázás',
-            // Ukrainian
-            'безкоштовна доставка', 'безкоштовно', 'безоплатна доставка',
-            'безкоштовна пересилка',
-            // Malay
-            'penghantaran percuma', 'penghantaran gratis', 'percuma penghantaran',
-            'penghantaran bebas',
-            // Filipino/Tagalog
-            'libreng pagpapadala', 'libreng delivery', 'libreng padala',
-            // Hindi
-            'मुफ्त शिपिंग', 'मुफ़्त शिपिंग', 'नि:शुल्क शिपिंग', 'निःशुल्क शिपिंग',
-            'मुफ्त डिलीवरी', 'निःशुल्क डिलीवरी', 'मुफ्त डिलिवरी',
-            // Bulgarian
-            'безплатна доставка', 'безплатно', 'безплатна пратка',
-            // Hebrew
-            'משלוח חינם', 'משלוח בחינם',
-            // Vietnamese
-            'miễn phí vận chuyển', 'miễn phí giao hàng', 'miễn phí ship', 'miễn phí vận',
-            // Thai
-            'ส่งฟรี', 'จัดส่งฟรี', 'ฟรีค่าส่ง', 'ฟรีค่าจัดส่ง'
-        ];
-        if (keywords.some(kw => str.includes(kw))) return true;
-
-        // === 2) فحص نصي سريع للحقول الرقمية ===
-        const zeroPatterns = [
-            /"shippingfee"\s*:\s*(0|"0"|"0\.0+"|null)/i,
-            /"freightamount"\s*:\s*(0|"0"|"0\.0+"|null)/i,
-            /"deliveryfee"\s*:\s*(0|"0"|"0\.0+"|null)/i,
-            /"shippingcost"\s*:\s*(0|"0"|"0\.0+"|null)/i,
-            /"postage"\s*:\s*(0|"0"|"0\.0+"|null)/i,
-            /"freight"\s*:\s*(0|"0"|"0\.0+"|null)/i
-        ];
-        if (zeroPatterns.some(rx => rx.test(str))) return true;
-
-        // === 3) فحص عميق للبنية (يدعم كل الحقول والأشكال) ===
-        const zeroish = (v) => {
-            if (v === 0 || v === null || v === undefined) return true;
-            if (typeof v === 'string') {
-                const s = v.trim().toLowerCase();
-                return s === '0' || s === '0.0' || s === '0.00' ||
-                       s === 'free' || s === 'gratis' || s === 'kostenlos' ||
-                       s === 'gratuit' || s === 'gratuita' || s === 'gratuito';
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
             }
-            if (typeof v === 'number') return v === 0;
-            return false;
-        };
+        }
 
-        const priceFields = [
-            'value', 'amount', 'price', 'fee', 'cost', 'total',
-            'min', 'max', 'minprice', 'maxprice', 'cent', 'cents', 'amountvalue'
-        ];
-        const shipKeyHints = [
-            'shipping', 'freight', 'delivery', 'postage', 'logistics', 'shipfee'
-        ];
+        let lowerLang = String(lang).toLowerCase();
+        if (lowerLang.includes('zh-cn') || lowerLang.includes('zh_cn')) return 'zh_CN';
+        if (lowerLang.includes('zh-tw') || lowerLang.includes('zh_tw')) return 'zh_TW';
 
-        const checkObj = (o, depth = 0) => {
-            if (!o || typeof o !== 'object' || depth > 8) return false;
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
 
-            // أعلام منطقية صريحة
-            if (o.freeShipping === true || o.isFreeShipping === true ||
-                o.hasFreeShipping === true || o.shippingFree === true) return true;
+        lang = lowerLang.split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
 
-            for (const key in o) {
-                const k = key.toLowerCase();
-                const v = o[key];
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
 
-                const isShipKey = shipKeyHints.some(h => k.includes(h));
-
-                if (isShipKey) {
-                    // قيمة مباشرة = 0 أو free
-                    if (zeroish(v)) return true;
-
-                    // كائن يحتوي على price/value/amount = 0
-                    if (typeof v === 'object' && v !== null) {
-                        for (const field of priceFields) {
-                            if (zeroish(v[field])) return true;
-                        }
-                    }
-
-                    // نص يشير إلى المجانية بأي لغة (احتياطي)
-                    if (typeof v === 'string') {
-                        const s = v.toLowerCase();
-                        if (s.includes('free') || s.includes('gratis') ||
-                            s.includes('gratuit') || s.includes('kostenlos') ||
-                            s.includes('مجان') || s.includes('бесплат')) return true;
-                    }
-                }
-
-                if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-                    if (checkObj(v, depth + 1)) return true;
-                }
-            }
-            return false;
-        };
-
-        return checkObj(obj);
-    } catch (e) {
-        return false;
+function removeWidget() {
+    if (widgetWrapper) {
+        if (darkModeQueryRef && darkModeListenerRef) {
+            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
+            else darkModeQueryRef.removeListener(darkModeListenerRef);
+        }
+        darkModeQueryRef = null;
+        darkModeListenerRef = null;
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
     }
 }
 
-function createCard(p) {
-  try {
-    let rawImg = p?.image?.imgUrl || '';
-    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-    const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        if (!window.location.href.match(/\/item\/(\d+)\.htm/)) { removeWidget(); return; }
 
-    const price = formatPrice(p?.prices?.salePrice?.formattedPrice);
-    const title = p?.title?.displayTitle || 'Product';
-    const rating = getRating(p);
-    const trades = getTradeCount(p);
-    const soldText = formatSold(trades);
-    const directUrl = `https://${globalHost}/item/${p.productId}.html`;
+        const nezzerStyleId = 'nezzer-theme-styles';
+        if (!document.getElementById(nezzerStyleId)) {
+            const styleEl = document.createElement('style');
+            styleEl.id = nezzerStyleId;
+            styleEl.textContent = `
+                #nezzer-widget-wrapper {
+                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
+                    --nezzer-pill-border: #f1f5f9;
+                    --nezzer-btn-color: #64748b;
+                    --nezzer-drag-color: #64748b;
+                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
+                    --nezzer-drag-color-hover: #475569;
+                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
+                    --nezzer-iframe-bg: #ffffff;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
+                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
+                }
+                #nezzer-widget-wrapper.nezzer-dark {
+                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
+                    --nezzer-pill-border: #2a2a33;
+                    --nezzer-btn-color: #94a3b8;
+                    --nezzer-drag-color: #94a3b8;
+                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
+                    --nezzer-drag-color-hover: #cbd5e1;
+                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
+                    --nezzer-iframe-bg: #16161c;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
+                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
+                }
+                #nezzer-widget-wrapper .nezzer-sort-btn {
+                    color: var(--nezzer-btn-color);
+                }
+                #nezzer-widget-wrapper #nezzer-drag-handle {
+                    color: var(--nezzer-drag-color);
+                    background: var(--nezzer-drag-bg);
+                }
+                #nezzer-widget-wrapper #nezzer-drag-handle:hover {
+                    color: var(--nezzer-drag-color-hover);
+                    background: var(--nezzer-drag-bg-hover);
+                }
+            `;
+            document.head.appendChild(styleEl);
+        }
 
-    let isFreeShipping = checkFreeShipping(p);
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = 'popular';
 
-    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
 
-    let shippingHtml = isFreeShipping
-      ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>`
-      : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
+        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
+        darkModeListenerRef = () => {
+            if (!widgetWrapper) return;
+            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+        };
+        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
+        else darkModeQueryRef.addListener(darkModeListenerRef);
+        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
 
-    let metaHtml = (soldText || rating)
-      ? `<div class="meta-row">
-          ${soldText ? `<span>${soldText}</span>` : ''}
-          ${soldText && rating ? `<span class="divider">|</span>` : ''}
-          ${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}
-         </div>`
-      : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none;`;
 
-    const a = document.createElement('a');
-    a.href = directUrl; a.target = '_blank'; a.className = 'product-card';
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
+            padding: 20px 10px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid var(--nezzer-pill-border); border-left: none;
+        `;
 
-    a.innerHTML = `
-      <div class="img-box">
-        <img src="${img}" onerror="this.style.display='none'">
-      </div>
-      <div class="info">
-        <div class="title" title="${title}">${title}</div>
-        ${metaHtml}
-        <div class="price">${price}</div>
-        ${shippingHtml}
-      </div>
-    `;
-    return a;
-  } catch (error) {
-    const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback;
-  }
-}
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 75px;
+            width: 620px; max-width: 90vw; height: 98vh;
+            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
+            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden;
+        `;
 
-function render(appendOnly = false, newProducts = []) {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px; background:#fff;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        iframeContainer.appendChild(iframe);
 
-  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
-    if (isLoading) return;
-    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
-    return;
-  }
+        const dragHandle = document.createElement('div');
+        dragHandle.id = 'nezzer-drag-handle';
+        dragHandle.style.cssText = `
+            cursor: grab; font-size: 22px; line-height: 10px;
+            padding: 12px 14px; user-select: none; transition: all 0.2s ease;
+            margin-bottom: 10px; border-radius: 10px;
+        `;
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.title = 'Drag to move';
+        dragHandle.setAttribute('aria-label', 'Drag to move');
 
-  if (!appendOnly) {
-    sortProducts(currentSort);
-    grid.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    globalProducts.forEach(p => fragment.appendChild(createCard(p)));
-    grid.appendChild(fragment);
-  } else {
-    const fragment = document.createDocumentFragment();
-    newProducts.forEach(p => fragment.appendChild(createCard(p)));
-    grid.appendChild(fragment);
-  }
-}
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
 
-async function loadInitial() {
-  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
-  scrollToTop();
-  if(loaderMore) loaderMore.style.display = 'none';
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                } else {
+                    iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                }
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
 
-  showSkeletons();
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `
+                writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 8px;
+                background: transparent; border-radius: 20px; cursor: pointer;
+                font-weight: 700; font-size: 13px;
+                transition: all 0.2s ease; user-select: none; letter-spacing: 1px;
+                border: 1px solid transparent;
+            `;
+            btn.className = 'nezzer-sort-btn';
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            btn.setAttribute('role', 'button');
+            btn.setAttribute('aria-label', text);
+            btn.setAttribute('tabindex', '0');
 
-  lastRequestTime = Date.now();
-  const res = await fetchProducts(1, null) || {};
-  isLoading = false;
+            if (currentSide === 'left') {
+                btn.style.transform = 'rotate(180deg)';
+            }
 
-  if (res.error) {
-    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
-    return;
-  }
+            btn.onmouseenter = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid #ff6b35'; 
+                    btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)';
+                    btn.style.color = '#ff6b35';
+                } else {
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+                }
+            };
 
-  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
-  hasMore = globalProducts.length >= 20;
+            btn.onmouseleave = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid transparent';
+                    btn.style.boxShadow = 'none';
+                    btn.style.color = '';
+                } else {
+                    btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+                }
+            };
 
-  render(false); scrollToTop();
-}
+            btn.onmousedown = (e) => {
+                e.stopPropagation();
+                btn.style.opacity = '0.8';
+            };
 
-async function loadMore() {
-  if (isLoading || !hasMore || !currentStreamId) return;
-  const now = Date.now();
-  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
+            btn.onmouseup = (e) => {
+                e.stopPropagation();
+                btn.style.opacity = '1';
+            };
 
-  isLoading = true; lastRequestTime = Date.now();
-  if(loaderMore) loaderMore.style.display = 'block';
+            btn.onclick = (e) => {
+                e.stopPropagation();
 
-  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
-  await new Promise(r => setTimeout(r, 1000));
+                const isCurrentlyActive = (activeSort === sortValue);
+                if (isCurrentlyActive && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; 
+                        b.style.color = ''; 
+                        b.style.boxShadow = 'none';
+                        b.style.border = '1px solid transparent';
+                        b.style.opacity = '1';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
+                    
+                    togglePanel(true);
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                }
+            };
+            return btn;
+        };
 
-  isLoading = false;
-  if(loaderMore) loaderMore.style.display = 'none';
+        const btnRating = createSortBtn(t('rating'), 'rating');
+        const btnPopular = createSortBtn(t('popular'), 'popular');
+        const btnCheapest = createSortBtn(t('cheapest'), 'cheapest');
 
-  if (res.error) return;
+        btnPopular.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+        btnPopular.style.color = 'white';
+        btnPopular.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+        btnPopular.style.border = '1px solid rgba(255,107,53,0.5)';
 
-  const newProducts = res.products || [];
-  if (newProducts.length > 0) {
-    globalProducts = [...globalProducts, ...newProducts];
-    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
-    hasMore = newProducts.length >= 20;
-    render(true, newProducts);
-  } else { hasMore = false; }
-}
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnRating);
+        pillContainer.appendChild(btnPopular);
+        pillContainer.appendChild(btnCheapest);
 
-resultsEl.addEventListener('scroll', () => {
-  clearTimeout(scrollDebounceTimer);
-  scrollDebounceTimer = setTimeout(() => {
-    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
-  }, 300);
-});
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
 
-window.addEventListener('message', (event) => {
-  if (event.data && event.data.action === 'SORT') {
-    const newSort = event.data.sort;
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            togglePanel(false);
+        });
 
-    if (currentSort !== newSort) {
-      currentSort = newSort;
-      scrollToTop();
+        let scrollAccumulated = 0;
+        let scrollResetTimer = null;
+        const SCROLL_THRESHOLD = 150;
 
-      if (!isLoading && globalProducts.length > 0) {
-        render(false);
-      }
+        window.addEventListener('wheel', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) {
+                scrollAccumulated = 0;
+                clearTimeout(scrollResetTimer);
+                return;
+            }
+            scrollAccumulated += Math.abs(e.deltaY);
+            clearTimeout(scrollResetTimer);
+            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
+
+            if (scrollAccumulated >= SCROLL_THRESHOLD) {
+                togglePanel(false);
+                scrollAccumulated = 0;
+                clearTimeout(scrollResetTimer);
+            }
+        }, { passive: true });
+
+        function setSide(side) {
+            currentSide = side;
+
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') {
+                    btn.style.transform = 'rotate(180deg)';
+                } else {
+                    btn.style.transform = 'rotate(0deg)';
+                }
+            });
+
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.right = '75px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.left = '75px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none';
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) {
+                if (currentSide !== 'left') setSide('left');
+            } else {
+                if (currentSide !== 'right') setSide('right');
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto';
+        });
+    } catch(err) {
+        console.error("Nezzer Error:", err);
     }
-  }
-});
+}
 
-loadInitial();
+injectWidget();
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
