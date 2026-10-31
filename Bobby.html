@@ -19,13 +19,7 @@ export default {
       });
     }
 
-    if (!targetUrl.includes("aliexpress.com") && !targetUrl.includes("aliexpress.ru")) {
-      return new Response(JSON.stringify({ success: false, error: "Invalid domain" }), {
-        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
-
-    // تنظيف الرابط واستخراج معرف المنتج
+    // تنظيف الرابط واستخراج رقم المنتج
     let productId = targetUrl;
     try {
         let urlObj = new URL(targetUrl);
@@ -39,7 +33,7 @@ export default {
         }
     } catch (e) {}
 
-    // 1. البحث في قاعدة البيانات (KV Cache)
+    // 💡 1. البحث في قاعدة البيانات
     try {
         const cachedLink = await env.COMPETITOR_CACHE.get(productId);
         if (cachedLink) {
@@ -51,7 +45,7 @@ export default {
         console.error("KV Error:", err);
     }
 
-    // 2. إذا لم يوجد في الكاش، نطلبه من علي إكسبريس
+    // 💡 2. طلب الرابط من علي إكسبريس
     const appKey = env.ALI_APP_KEY;
     const appSecret = env.ALI_APP_SECRET;
     const trackingId = env.ALI_TRACKING_ID || "default";
@@ -89,16 +83,14 @@ export default {
         if (match && match[1]) {
             affiliateLink = match[1];
             
-            // 💡 فلترة الروابط الفاسدة (إذا كان الرابط هو الصفحة الرئيسية)
-            if (affiliateLink.includes('best.aliexpress.com') || 
-                affiliateLink === 'https://aliexpress.com/' || 
-                affiliateLink === 'https://www.aliexpress.com/') {
+            // 💡 الفحص الجديد: إذا كان الرابط هو الصفحة الرئيسية، ارفضه
+            if (affiliateLink.includes('best.aliexpress.com') || affiliateLink === 'https://aliexpress.com/' || affiliateLink === 'https://www.aliexpress.com/') {
                 affiliateLink = null; 
             }
         }
 
         if (affiliateLink) {
-            // الرابط سليم، نقوم بحفظه وإعادته
+            // الرابط سليم: احفظه وأرجعه
             try {
                 await env.COMPETITOR_CACHE.put(productId, affiliateLink);
             } catch (err) {
@@ -109,22 +101,15 @@ export default {
                 headers: { ...corsHeaders, "Content-Type": "application/json" } 
             });
         } else {
-            // 💡 في حال رفض علي إكسبريس توليد رابط (مثلاً بسبب الحظر المؤقت أو المنتج غير متاح)
-            // نرجع success: false لكي تفتح الإضافة الرابط الأصلي للمستخدم
-            return new Response(JSON.stringify({ 
-                success: false, 
-                error: "Invalid link generated or API limit reached", 
-                details: data 
-            }), { 
-                status: 200, 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            // الرابط غير صالح (أو لم يرسله علي إكسبريس)
+            // نرجع فشل، لكي تفتح الإضافة الرابط الأصلي ولا يرى المستخدم صفحة بيضاء
+            return new Response(JSON.stringify({ success: false, error: "Invalid link generated", details: data }), { 
+                status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } 
             });
         }
     } catch (error) {
-        // في حال انقطاع الاتصال بالسيرفر
         return new Response(JSON.stringify({ success: false, error: error.message }), { 
-            status: 200, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" } 
+            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
         });
     }
   },
