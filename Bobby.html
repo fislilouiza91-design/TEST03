@@ -365,7 +365,9 @@ function injectWidget() {
                 btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
                 btn.onclick = (ev) => {
                     ev.stopPropagation();
-                    chrome.storage.local.set({ nezzer_disclaimer_accepted: true });
+                    try {
+                        chrome.storage.local.set({ nezzer_disclaimer_accepted: true });
+                    } catch(e) {}
                     hideDisclaimer();
                 };
             }
@@ -444,13 +446,20 @@ function injectWidget() {
                     togglePanel(true);
                     try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
 
-                    chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                        if (!result || !result.nezzer_disclaimer_accepted) {
-                            setTimeout(() => {
-                                if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer();
-                            }, 450);
+                    try {
+                        if (chrome.runtime && chrome.runtime.id) {
+                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                                if (chrome.runtime.lastError) return;
+                                if (!result || !result.nezzer_disclaimer_accepted) {
+                                    setTimeout(() => {
+                                        if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer();
+                                    }, 450);
+                                }
+                            });
                         }
-                    });
+                    } catch (err) {
+                        console.warn("Nezzer: Please refresh the page to reconnect the extension.");
+                    }
                 }
             };
             return btn;
