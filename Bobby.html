@@ -81,7 +81,6 @@ function saveProductToHistory() {
     const img = document.querySelector('meta[property="og:image"]')?.content || '';
     const url = window.location.href.split('?')[0];
 
-    // قراءة أقوى للسعر (لضمان ظهوره في السجل)
     let price = '—';
     const priceEl = document.querySelector('.product-price-value') || 
                     document.querySelector('.price--current') || 
@@ -120,6 +119,9 @@ function saveProductToHistory() {
     });
 }
 
+// ==========================================
+// دالة المسح الضوئي المحسنة (Ultimate Scraper)
+// ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
     
@@ -133,62 +135,61 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. جلب صورة المنتج الحقيقية وتجاهل البانرات (مثل Choice)
+        // 1. استخراج صورة المنتج الحقيقية
         let img = '';
         const imgEls = link.querySelectorAll('img');
-        for (let imgEl of imgEls) {
-            let src = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.getAttribute('srcset') || '';
+        for (let el of imgEls) {
+            let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
             if (src.startsWith('//')) src = 'https:' + src;
             
-            // صور المنتجات دائماً تحتوي على أبعاد في الرابط مثل _220x220 أو _640x640
-            // أو تأتي من سيرفرات محددة للمنتجات
-            if (src && (src.match(/_\d+x\d+\.(jpg|png|webp)/) || src.includes('ae-pic') || src.includes('kf/S'))) {
-                img = src.split(',')[0].trim().split(' ')[0]; // معالجة srcset
+            // نتحقق أن الرابط هو صورة منتج حقيقية (تتجاهل choice والبانرات)
+            if (src && !src.includes('data:image') && !src.includes('choice') && !src.includes('banner') && (src.includes('alicdn') || src.includes('aliexpress-media') || src.match(/\.(jpg|png|webp)/))) {
+                img = src.split(' ')[0].split(',')[0]; // نأخذ أول رابط إذا كان srcset
                 break;
             }
         }
-        
-        // إذا لم نجد الصورة القياسية، نأخذ أول صورة ليست شعار إعلاني
+
+        // إذا فشلنا، نبحث في الخلفية (background-image)
         if (!img) {
-            for (let imgEl of imgEls) {
-                let src = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
-                if (src) {
-                    if (src.startsWith('//')) src = 'https:' + src;
-                    if (!src.includes('choice') && !src.includes('11.11') && !src.includes('banner') && !src.includes('data:image')) {
-                        img = src;
+            const divs = link.querySelectorAll('div');
+            for (let div of divs) {
+                const bg = window.getComputedStyle(div).backgroundImage;
+                if (bg && bg !== 'none' && bg.includes('url(')) {
+                    const urlMatch = bg.match(/url\(['"]?(.*?)['"]?\)/);
+                    if (urlMatch && urlMatch[1] && !urlMatch[1].includes('choice') && urlMatch[1].includes('alicdn')) {
+                        img = urlMatch[1];
+                        if (img.startsWith('//')) img = 'https:' + img;
                         break;
                     }
                 }
             }
         }
-        if (!img) continue;
 
-        // 2. العنوان
+        if (!img) continue; // إذا لم نجد صورة منتج، نتجاهل البطاقة
+
+        // 2. استخراج العنوان
         let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || link.innerText.split('\n')[0];
         if (!title || title.length < 5) continue;
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
         let text = link.innerText;
 
-        // 3. السعر (تجاهل أسعار الكوبونات السالبة)
+        // 3. استخراج السعر (Regex قوي جداً يدعم جميع العملات ونتجاهل الكوبونات)
         let price = '—';
-        const priceEl = link.querySelector('[class*="price"]');
-        if (priceEl && (priceEl.innerText.includes('€') || priceEl.innerText.includes('$') || /\d/.test(priceEl.innerText))) {
-            price = priceEl.innerText.trim().split('\n')[0];
-        } else {
-            const priceMatches = text.match(/(?:€|\$|£|руб|R\$)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|руб|R\$)/g);
-            if (priceMatches) {
-                const validPrice = priceMatches.find(p => !p.includes('-'));
-                price = validPrice || priceMatches[0];
-            }
+        const priceRegex = /(?:€|\$|£|د\.ج|ر\.س|ج\.م|درهم|SAR|AED|EGP|R\$|₽)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|د\.ج|ر\.س|ج\.م|درهم|SAR|AED|EGP|R\$|₽)/gi;
+        const priceMatches = text.match(priceRegex);
+        if (priceMatches) {
+            // نختار السعر الذي لا يحتوي على إشارة سالب (ليس كوبون)
+            const validPrice = priceMatches.find(p => !p.includes('-') && !p.includes('٪'));
+            price = validPrice || priceMatches[0];
         }
 
-        // 4. التقييم
+        // 4. استخراج التقييم
         let rating = 0;
         const ratingMatch = text.match(/([0-5][.,]\d)/);
         if (ratingMatch) rating = parseFloat(ratingMatch[1].replace(',', '.'));
 
-        // 5. المبيعات
+        // 5. استخراج المبيعات
         let soldCount = 0;
         const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i);
         if (soldMatch) {
