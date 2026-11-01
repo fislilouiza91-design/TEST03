@@ -73,6 +73,7 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
+// دالة حفظ المنتج في السجل (محسنة لالتقاط السعر)
 function saveProductToHistory() {
     const urlParams = window.location.href.match(/\/item\/(\d+)\.htm/);
     if (!urlParams) return;
@@ -84,13 +85,19 @@ function saveProductToHistory() {
     let price = '—';
     const priceEl = document.querySelector('.product-price-value') || 
                     document.querySelector('.price--current') || 
-                    document.querySelector('[class*="price--current"]') ||
-                    document.querySelector('[class*="product-price"]');
+                    document.querySelector('[class*="product-price"]') ||
+                    document.querySelector('[class*="Price"]');
     
     if (priceEl) price = priceEl.innerText.trim().split('\n')[0];
-    else {
+    
+    if (price === '—' || !price.match(/\d/)) {
         const metaPrice = document.querySelector('meta[property="product:price:amount"]');
         if (metaPrice) price = metaPrice.content;
+        else {
+            const match = document.body.innerText.match(/(\d+(?:[.,]\d+)?)\s*(د\.ج|DA|DZD|€|\$|£|SAR|AED|руб)/i) || 
+                          document.body.innerText.match(/(د\.ج|DA|DZD|€|\$|£|SAR|AED|руб)\s*(\d+(?:[.,]\d+)?)/i);
+            if (match) price = match[0];
+        }
     }
 
     let rating = 0, soldCount = 0, isFreeShipping = false;
@@ -118,14 +125,13 @@ function saveProductToHistory() {
 }
 
 // ==========================================
-// الماسح الضوئي (Scraper) - النسخة النهائية
+// الماسح الضوئي (Scraper) - النسخة المرنة
 // ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
     
     let products = [];
     const seen = new Set();
-    // نبحث عن كل الروابط التي تشير لمنتج
     const links = document.querySelectorAll('a[href*="/item/"]');
 
     for (const link of links) {
@@ -134,21 +140,21 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. فلترة الصورة: صور المنتجات الحقيقية تحتوي دائماً على أبعاد (مثل _220x220)
+        // 1. فلترة الصورة (مرنة جداً)
         let img = '';
         const imgEls = link.querySelectorAll('img');
         for (let el of imgEls) {
-            let src = el.src || el.getAttribute('data-src') || '';
+            let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
             if (src.startsWith('//')) src = 'https:' + src;
             
-            // هذا الشرط يضمن أننا نأخذ صورة المنتج فقط، ويتجاهل البانرات
-            if (src && (src.match(/_\d+x\d+\.(jpg|png|webp)/) || src.includes('ae01.alicdn.com/kf/'))) {
-                img = src;
+            // نتجاهل فقط الإعلانات الواضحة والصور المؤقتة
+            if (src && !src.includes('data:image') && !src.includes('choice') && !src.includes('banner') && !src.includes('logo')) {
+                img = src.split(' ')[0].split(',')[0]; // نأخذ أول رابط
                 break;
             }
         }
         
-        // إذا لم نجد صورة بالمواصفات، نتجاهل هذا الرابط (غالباً يكون إعلان)
+        // إذا لم يجد صورة، يتخطى البطاقة
         if (!img) continue; 
 
         // 2. العنوان
@@ -158,15 +164,14 @@ function scanPageForProducts(sortByPopular = false) {
 
         let text = link.innerText;
 
-        // 3. السعر (يدعم العملات العربية والأجنبية)
+        // 3. السعر (بحث شامل يدعم العربية)
         let price = '—';
         const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
         if (priceEl && priceEl.innerText.match(/\d/)) {
             price = priceEl.innerText.trim().split('\n')[0];
         } else {
-            // بحث يدعم (د.ج) و (DA) و (SAR) والعملات الأخرى
-            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£)/i) || 
-                               text.match(/(د\.ج|DA|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£)\s*(\d+[.,]?\d*)/i);
+            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i) || 
+                               text.match(/(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)\s*(\d+[.,]?\d*)/i);
             if (matchRegex) price = matchRegex[0];
         }
 
