@@ -61,11 +61,6 @@ function saveProductToHistory() {
                         document.querySelector('[class*="Price"]');
         if (priceEl) price = priceEl.innerText.trim().split('\n')[0];
     }
-    
-    if (price === '—' || !price.match(/\d/)) {
-        const match = document.body.innerText.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i);
-        if (match) price = match[0];
-    }
 
     let rating = 0, soldCount = 0, isFreeShipping = false;
     let pageText = document.body.innerText;
@@ -92,7 +87,7 @@ function saveProductToHistory() {
 }
 
 // ==========================================
-// الماسح الضوئي (Scraper) - فلترة صور المنتجات الحقيقية
+// الماسح الضوئي (Scraper) - نسخة شرسة وسريعة
 // ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
@@ -102,58 +97,43 @@ function scanPageForProducts(sortByPopular = false) {
     const links = document.querySelectorAll('a[href*="/item/"]');
 
     for (const link of links) {
+        // التوقف عند جمع 30 منتجاً لتسريع العملية
+        if (products.length >= 30) break; 
+
         const match = link.href.match(/\/item\/(\d+)\.html/);
         if (!match) continue;
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. فلترة الصورة: نبحث عن الصور التي تحتوي على أبعاد (مثل _220x220.jpg)
+        // 1. جلب الصورة (أي صورة متاحة، وإذا لم توجد نضع رابطاً فارغاً)
         let img = '';
-        const imgEls = link.querySelectorAll('img');
-        
-        // المحاولة الأولى: البحث عن الصورة الحقيقية بأبعادها
-        for (let el of imgEls) {
-            let src = el.getAttribute('data-src') || el.getAttribute('src') || el.getAttribute('srcset') || '';
+        const imgEl = link.querySelector('img');
+        if (imgEl) {
+            let src = imgEl.getAttribute('data-src') || imgEl.getAttribute('src') || imgEl.getAttribute('srcset') || '';
+            if (src.includes(',')) src = src.split(',')[0].trim().split(' ')[0];
             if (src.startsWith('//')) src = 'https:' + src;
-            if (src.includes(',')) src = src.split(',')[0].trim().split(' ')[0]; 
-
-            // هذا الشرط هو السر: يبحث عن كلمة _220x220 أو _320x320 أو غيرها
-            if (src && src.match(/_\d+x\d+\.(jpg|png|webp)/i) && !src.includes('choice') && !src.includes('banner')) {
-                img = src;
-                break; 
-            }
-        }
-        
-        // المحاولة الثانية: إذا لم نجد، نأخذ أي صورة من alicdn ليست إعلاناً
-        if (!img) {
-            for (let el of imgEls) {
-                let src = el.getAttribute('data-src') || el.getAttribute('src') || el.getAttribute('srcset') || '';
-                if (src.startsWith('//')) src = 'https:' + src;
-                if (src.includes(',')) src = src.split(',')[0].trim().split(' ')[0];
-                if (src && src.includes('alicdn.com') && !src.includes('choice') && !src.includes('11.11') && !src.includes('tps')) {
-                    img = src;
-                    break;
-                }
-            }
+            img = src;
         }
 
-        if (!img) continue; 
-
-        // 2. جلب العنوان
-        let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || link.innerText.split('\n')[0];
-        if (!title || title.length < 5) title = 'Product ' + pid; 
+        // 2. جلب العنوان (من أي مكان محتمل)
+        let title = link.getAttribute('title') || 
+                    link.querySelector('h3')?.innerText || 
+                    link.querySelector('[class*="title"]')?.innerText || 
+                    (imgEl ? imgEl.alt : '') || 
+                    link.innerText.split('\n')[0];
+                    
+        if (!title || title.length < 5) title = 'AliExpress Product ' + pid; 
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
         let text = link.innerText;
 
-        // 3. جلب السعر
+        // 3. جلب السعر (بحث شامل)
         let price = '—';
         const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
         if (priceEl && priceEl.innerText.match(/\d/)) {
             price = priceEl.innerText.trim().split('\n')[0];
         } else {
-            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i) || 
-                               text.match(/(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)\s*(\d+[.,]?\d*)/i);
+            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i);
             if (matchRegex) price = matchRegex[0];
         }
 
@@ -171,7 +151,7 @@ function scanPageForProducts(sortByPopular = false) {
             else soldCount = parseFloat(numStr.replace(',', '.'));
         }
 
-        // 6. جلب الشحن المجاني
+        // 6. الشحن المجاني
         let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand/i.test(text);
 
         seen.add(pid);
@@ -188,8 +168,10 @@ function scanPageForProducts(sortByPopular = false) {
         });
     }
 
+    console.log(`Nezzer: Scraped ${products.length} products from this page.`);
+
     if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
-    return products.slice(0, 20);
+    return products;
 }
 
 function removeWidget() {
