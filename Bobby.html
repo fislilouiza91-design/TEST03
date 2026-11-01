@@ -8,7 +8,36 @@ let darkModeListenerRef = null;
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', history: '🕒 History', thisPage: '🛍️ This Page' },
     'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', history: '🕒 السجل', thisPage: '🛍️ هذه الصفحة' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', history: '🕒 Historique', thisPage: '🛍️ Cette page' }
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', history: '🕒 Historique', thisPage: '🛍️ Cette page' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado', history: '🕒 Historial', thisPage: '🛍️ Esta página' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado', history: '🕒 Histórico', thisPage: '🛍️ Esta página' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг', history: '🕒 История', thisPage: '🛍️ Эта страница' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet', history: '🕒 Verlauf', thisPage: '🛍️ Diese Seite' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato', history: '🕒 Cronologia', thisPage: '🛍️ Questa pagina' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan', history: '🕒 Geçmiş', thisPage: '🛍️ Bu Sayfa' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld', history: '🕒 Geschiedenis', thisPage: '🛍️ Deze pagina' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane', history: '🕒 Historia', thisPage: '🛍️ Ta strona' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점', history: '🕒 기록', thisPage: '🛍️ 이 페이지' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価', history: '🕒 履歴', thisPage: '🛍️ このページ' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高', history: '🕒 历史记录', thisPage: '🛍️ 本页' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高', history: '🕒 歷史記錄', thisPage: '🛍️ 本頁' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất', history: '🕒 Lịch sử', thisPage: '🛍️ Trang này' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi', history: '🕒 Riwayat', thisPage: '🛍️ Halaman Ini' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด', history: '🕒 ประวัติ', thisPage: '🛍️ หน้านี้' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר', history: '🕒 היסטוריה', thisPage: '🛍️ דף זה' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg', history: '🕒 Historik', thisPage: '🛍️ Denna sida' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt', history: '🕒 Historik', thisPage: '🛍️ Denne side' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu', history: '🕒 Historia', thisPage: '🛍️ Tämä sivu' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert', history: '🕒 Historikk', thisPage: '🛍️ Denne siden' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené', history: '🕒 Historie', thisPage: '🛍️ Tato stránka' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate', history: '🕒 Istoric', thisPage: '🛍️ Această pagină' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt', history: '🕒 Előzmények', thisPage: '🛍️ Ez az oldal' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα', history: '🕒 Ιστορικό', thisPage: '🛍️ Αυτή η σελίδα' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг', history: '🕒 Історія', thisPage: '🛍️ Ця сторінка' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik', history: '🕒 Sejarah', thisPage: '🛍️ Halaman Ini' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating', history: '🕒 Kasaysayan', thisPage: '🛍️ Pahinang Ito' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड', history: '🕒 इतिहास', thisPage: '🛍️ यह पृष्ठ' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени', history: '🕒 История', thisPage: '🛍️ Тази страница' }
 };
 
 function getSiteLang() {
@@ -42,6 +71,7 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
+// حفظ المنتج في السجل (جلب السعر بقوة)
 function saveProductToHistory() {
     const urlParams = window.location.href.match(/\/item\/(\d+)\.htm/);
     if (!urlParams) return;
@@ -51,20 +81,23 @@ function saveProductToHistory() {
     const url = window.location.href.split('?')[0];
 
     let price = '—';
-    const priceEl = document.querySelector('.product-price-value') || 
-                    document.querySelector('.price--current') || 
-                    document.querySelector('[class*="product-price"]');
+    // محاولة 1: عبر الميتا
+    const metaPrice = document.querySelector('meta[property="product:price:amount"]');
+    if (metaPrice) price = metaPrice.content;
     
-    if (priceEl) price = priceEl.innerText.trim().split('\n')[0];
-    
+    // محاولة 2: عبر الكلاسات
     if (price === '—' || !price.match(/\d/)) {
-        const metaPrice = document.querySelector('meta[property="product:price:amount"]');
-        if (metaPrice) price = metaPrice.content;
-        else {
-            const match = document.body.innerText.match(/(\d+(?:[.,]\d+)?)\s*(د\.ج|DA|DZD|€|\$|£|SAR|AED|руб)/i) || 
-                          document.body.innerText.match(/(د\.ج|DA|DZD|€|\$|£|SAR|AED|руб)\s*(\d+(?:[.,]\d+)?)/i);
-            if (match) price = match[0];
-        }
+        const priceEl = document.querySelector('.product-price-value') || 
+                        document.querySelector('.price--current') || 
+                        document.querySelector('[class*="product-price"]') ||
+                        document.querySelector('[class*="Price"]');
+        if (priceEl) price = priceEl.innerText.trim().split('\n')[0];
+    }
+    
+    // محاولة 3: Regex شامل جداً
+    if (price === '—' || !price.match(/\d/)) {
+        const match = document.body.innerText.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i);
+        if (match) price = match[0];
     }
 
     let rating = 0, soldCount = 0, isFreeShipping = false;
@@ -91,6 +124,9 @@ function saveProductToHistory() {
     });
 }
 
+// ==========================================
+// دالة المسح الضوئي (تجبر جلب الصورة الحقيقية)
+// ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
     
@@ -104,40 +140,58 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
+        // 1. جلب الصورة الحقيقية (عن طريق فلترة سيرفرات علي إكسبريس)
         let img = '';
         const imgEls = link.querySelectorAll('img');
         for (let el of imgEls) {
             let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
             if (src.startsWith('//')) src = 'https:' + src;
             
-            if (src && !src.includes('data:image') && !src.includes('choice') && !src.includes('banner') && !src.includes('logo')) {
-                img = src.split(' ')[0].split(',')[0]; 
-                break;
+            // الصور الحقيقية تأتي من ae01.alicdn.com أو تحتوي على امتداد .jpg
+            if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
+                // التأكد من تجاهل البانرات
+                if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
+                    img = src.split(' ')[0].split(',')[0]; // تنظيف الرابط
+                    break;
+                }
             }
         }
         
+        // إذا لم يجد صورة حقيقية، نأخذ أول صورة (حتى لو كانت Choice)
+        if (!img) {
+            const firstImg = link.querySelector('img');
+            if (firstImg) {
+                img = firstImg.src || firstImg.getAttribute('data-src') || '';
+                if (img.startsWith('//')) img = 'https:' + img;
+            }
+        }
         if (!img) continue; 
 
+        // 2. العنوان
         let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || link.innerText.split('\n')[0];
         if (!title || title.length < 5) continue;
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
         let text = link.innerText;
 
+        // 3. السعر
         let price = '—';
         const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
         if (priceEl && priceEl.innerText.match(/\d/)) {
             price = priceEl.innerText.trim().split('\n')[0];
         } else {
+            // بحث شامل يدعم الدينار الجزائري
             const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i) || 
                                text.match(/(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)\s*(\d+[.,]?\d*)/i);
             if (matchRegex) price = matchRegex[0];
         }
 
+        // 4. التقييم
         let rating = 0;
         const ratingMatch = text.match(/([0-5][.,]\d)/);
         if (ratingMatch) rating = parseFloat(ratingMatch[1].replace(',', '.'));
 
+        // 5. المبيعات
         let soldCount = 0;
         const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i);
         if (soldMatch) {
@@ -146,6 +200,7 @@ function scanPageForProducts(sortByPopular = false) {
             else soldCount = parseFloat(numStr.replace(',', '.'));
         }
 
+        // 6. الشحن المجاني
         let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand/i.test(text);
 
         seen.add(pid);
