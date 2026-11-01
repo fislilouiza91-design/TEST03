@@ -87,7 +87,7 @@ function saveProductToHistory() {
 }
 
 // ==========================================
-// الماسح الضوئي (Scraper) - نسخة شرسة وسريعة
+// الماسح الضوئي (Scraper) - النسخة النهائية الشرسة
 // ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
@@ -97,7 +97,6 @@ function scanPageForProducts(sortByPopular = false) {
     const links = document.querySelectorAll('a[href*="/item/"]');
 
     for (const link of links) {
-        // التوقف عند جمع 30 منتجاً لتسريع العملية
         if (products.length >= 30) break; 
 
         const match = link.href.match(/\/item\/(\d+)\.html/);
@@ -105,35 +104,74 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. جلب الصورة (أي صورة متاحة، وإذا لم توجد نضع رابطاً فارغاً)
+        // 1. استخراج الصورة بشراسة (نبحث في كل مكان)
         let img = '';
-        const imgEl = link.querySelector('img');
-        if (imgEl) {
-            let src = imgEl.getAttribute('data-src') || imgEl.getAttribute('src') || imgEl.getAttribute('srcset') || '';
-            if (src.includes(',')) src = src.split(',')[0].trim().split(' ')[0];
-            if (src.startsWith('//')) src = 'https:' + src;
-            img = src;
+        
+        // أ. البحث في وسوم img
+        const imgEls = link.querySelectorAll('img');
+        for (let el of imgEls) {
+            let srcs = [el.getAttribute('data-src'), el.getAttribute('src'), el.getAttribute('srcset')].filter(Boolean);
+            for (let src of srcs) {
+                if (src.includes(',')) src = src.split(',')[0].trim().split(' ')[0]; 
+                if (src.startsWith('//')) src = 'https:' + src;
+                
+                // فلترة: يجب أن تكون من alicdn ولا تحتوي على كلمات الإعلانات
+                if (src && src.includes('alicdn.com') && 
+                    !src.includes('data:image') && 
+                    !src.includes('choice') && 
+                    !src.includes('11.11') && 
+                    !src.includes('banner') && 
+                    !src.includes('logo') &&
+                    !src.includes('tps') &&
+                    !src.includes('star')) {
+                    
+                    if (src.match(/_\d+x\d+\.(jpg|png|webp)/i)) {
+                        img = src;
+                        break;
+                    }
+                    if (!img) img = src; // كخيار احتياطي
+                }
+            }
+            if (img && img.match(/_\d+x\d+\.(jpg|png|webp)/i)) break;
         }
 
-        // 2. جلب العنوان (من أي مكان محتمل)
-        let title = link.getAttribute('title') || 
-                    link.querySelector('h3')?.innerText || 
-                    link.querySelector('[class*="title"]')?.innerText || 
-                    (imgEl ? imgEl.alt : '') || 
-                    link.innerText.split('\n')[0];
-                    
-        if (!title || title.length < 5) title = 'AliExpress Product ' + pid; 
+        // ب. إذا فشلنا، نبحث في خلفية العناصر (background-image)
+        if (!img) {
+            const divs = link.querySelectorAll('div');
+            for (let div of divs) {
+                const bg = window.getComputedStyle(div).backgroundImage;
+                if (bg && bg !== 'none' && bg.includes('url(')) {
+                    const urlMatch = bg.match(/url\(['"]?(.*?)['"]?\)/);
+                    if (urlMatch && urlMatch[1]) {
+                        let bgImg = urlMatch[1];
+                        if (bgImg.startsWith('//')) bgImg = 'https:' + bgImg;
+                        if (bgImg.includes('alicdn') && !bgImg.includes('choice') && !bgImg.includes('11.11')) {
+                            img = bgImg;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ج. إذا لم نجد صورة، نضع صورة افتراضية (لن نتجاهل المنتج)
+        if (!img) img = 'https://ae01.alicdn.com/kf/Sd5e13990c11e4e5d9e3d3e3d3e3d3e3d.jpg'; 
+
+        // 2. جلب العنوان
+        let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0];
+        if (!title || title.length < 5) title = 'Product ' + pid; 
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
         let text = link.innerText;
 
-        // 3. جلب السعر (بحث شامل)
+        // 3. جلب السعر
         let price = '—';
         const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
         if (priceEl && priceEl.innerText.match(/\d/)) {
             price = priceEl.innerText.trim().split('\n')[0];
         } else {
-            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i);
+            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)/i) || 
+                               text.match(/(د\.ج|DA|DZD|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£|руб)\s*(\d+[.,]?\d*)/i);
             if (matchRegex) price = matchRegex[0];
         }
 
