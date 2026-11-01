@@ -85,12 +85,10 @@ function saveProductToHistory() {
     const priceEl = document.querySelector('.product-price-value') || 
                     document.querySelector('.price--current') || 
                     document.querySelector('[class*="price--current"]') ||
-                    document.querySelector('[class*="product-price"]') ||
-                    document.querySelector('.product-price');
+                    document.querySelector('[class*="product-price"]');
     
-    if (priceEl) {
-        price = priceEl.innerText.trim().split('\n')[0];
-    } else {
+    if (priceEl) price = priceEl.innerText.trim().split('\n')[0];
+    else {
         const metaPrice = document.querySelector('meta[property="product:price:amount"]');
         if (metaPrice) price = metaPrice.content;
     }
@@ -120,13 +118,14 @@ function saveProductToHistory() {
 }
 
 // ==========================================
-// دالة المسح الضوئي المحسنة (Ultimate Scraper)
+// الماسح الضوئي (Scraper) - النسخة النهائية
 // ==========================================
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
     
     let products = [];
     const seen = new Set();
+    // نبحث عن كل الروابط التي تشير لمنتج
     const links = document.querySelectorAll('a[href*="/item/"]');
 
     for (const link of links) {
@@ -135,61 +134,48 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. استخراج صورة المنتج الحقيقية
+        // 1. فلترة الصورة: صور المنتجات الحقيقية تحتوي دائماً على أبعاد (مثل _220x220)
         let img = '';
         const imgEls = link.querySelectorAll('img');
         for (let el of imgEls) {
-            let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
+            let src = el.src || el.getAttribute('data-src') || '';
             if (src.startsWith('//')) src = 'https:' + src;
             
-            // نتحقق أن الرابط هو صورة منتج حقيقية (تتجاهل choice والبانرات)
-            if (src && !src.includes('data:image') && !src.includes('choice') && !src.includes('banner') && (src.includes('alicdn') || src.includes('aliexpress-media') || src.match(/\.(jpg|png|webp)/))) {
-                img = src.split(' ')[0].split(',')[0]; // نأخذ أول رابط إذا كان srcset
+            // هذا الشرط يضمن أننا نأخذ صورة المنتج فقط، ويتجاهل البانرات
+            if (src && (src.match(/_\d+x\d+\.(jpg|png|webp)/) || src.includes('ae01.alicdn.com/kf/'))) {
+                img = src;
                 break;
             }
         }
+        
+        // إذا لم نجد صورة بالمواصفات، نتجاهل هذا الرابط (غالباً يكون إعلان)
+        if (!img) continue; 
 
-        // إذا فشلنا، نبحث في الخلفية (background-image)
-        if (!img) {
-            const divs = link.querySelectorAll('div');
-            for (let div of divs) {
-                const bg = window.getComputedStyle(div).backgroundImage;
-                if (bg && bg !== 'none' && bg.includes('url(')) {
-                    const urlMatch = bg.match(/url\(['"]?(.*?)['"]?\)/);
-                    if (urlMatch && urlMatch[1] && !urlMatch[1].includes('choice') && urlMatch[1].includes('alicdn')) {
-                        img = urlMatch[1];
-                        if (img.startsWith('//')) img = 'https:' + img;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (!img) continue; // إذا لم نجد صورة منتج، نتجاهل البطاقة
-
-        // 2. استخراج العنوان
+        // 2. العنوان
         let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || link.innerText.split('\n')[0];
         if (!title || title.length < 5) continue;
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
         let text = link.innerText;
 
-        // 3. استخراج السعر (Regex قوي جداً يدعم جميع العملات ونتجاهل الكوبونات)
+        // 3. السعر (يدعم العملات العربية والأجنبية)
         let price = '—';
-        const priceRegex = /(?:€|\$|£|د\.ج|ر\.س|ج\.م|درهم|SAR|AED|EGP|R\$|₽)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|د\.ج|ر\.س|ج\.م|درهم|SAR|AED|EGP|R\$|₽)/gi;
-        const priceMatches = text.match(priceRegex);
-        if (priceMatches) {
-            // نختار السعر الذي لا يحتوي على إشارة سالب (ليس كوبون)
-            const validPrice = priceMatches.find(p => !p.includes('-') && !p.includes('٪'));
-            price = validPrice || priceMatches[0];
+        const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
+        if (priceEl && priceEl.innerText.match(/\d/)) {
+            price = priceEl.innerText.trim().split('\n')[0];
+        } else {
+            // بحث يدعم (د.ج) و (DA) و (SAR) والعملات الأخرى
+            const matchRegex = text.match(/(\d+[.,]?\d*)\s*(د\.ج|DA|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£)/i) || 
+                               text.match(/(د\.ج|DA|دينار|درهم|ر\.س|ج\.م|SAR|AED|€|\$|£)\s*(\d+[.,]?\d*)/i);
+            if (matchRegex) price = matchRegex[0];
         }
 
-        // 4. استخراج التقييم
+        // 4. التقييم
         let rating = 0;
         const ratingMatch = text.match(/([0-5][.,]\d)/);
         if (ratingMatch) rating = parseFloat(ratingMatch[1].replace(',', '.'));
 
-        // 5. استخراج المبيعات
+        // 5. المبيعات
         let soldCount = 0;
         const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i);
         if (soldMatch) {
