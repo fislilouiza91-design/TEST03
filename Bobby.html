@@ -1,35 +1,503 @@
-{
-  "manifest_version": 3,
-  "name": "__MSG_appName__",
-  "description": "__MSG_appDesc__",
-  "default_locale": "en",
-  "version": "1.0.3",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.aliexpress.com/*",
-    "*://*.aliexpress.us/*",
-    "*://*.aliexpress.ru/*"
-  ],
-  "background": {
-    "service_worker": "background/engine.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"],
-      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["panel/panel.html", "panel/panel.js", "popup/popup.html"],
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "assets/icons/icon128.png" }
-  },
-  "icons": { "128": "assets/icons/icon128.png" }
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+let darkModeQueryRef = null;
+let darkModeListenerRef = null;
+
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', history: '🕒 History', thisPage: '🛍️ This Page' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', history: '🕒 السجل', thisPage: '🛍️ هذه الصفحة' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', history: '🕒 Historique', thisPage: '🛍️ Cette page' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado', history: '🕒 Historial', thisPage: '🛍️ Esta página' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado', history: '🕒 Histórico', thisPage: '🛍️ Esta página' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг', history: '🕒 История', thisPage: '🛍️ Эта страница' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet', history: '🕒 Verlauf', thisPage: '🛍️ Diese Seite' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato', history: '🕒 Cronologia', thisPage: '🛍️ Questa pagina' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan', history: '🕒 Geçmiş', thisPage: '🛍️ Bu Sayfa' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld', history: '🕒 Geschiedenis', thisPage: '🛍️ Deze pagina' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane', history: '🕒 Historia', thisPage: '🛍️ Ta strona' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점', history: '🕒 기록', thisPage: '🛍️ 이 페이지' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価', history: '🕒 履歴', thisPage: '🛍️ このページ' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高', history: '🕒 历史记录', thisPage: '🛍️ 本页' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高', history: '🕒 歷史記錄', thisPage: '🛍️ 本頁' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất', history: '🕒 Lịch sử', thisPage: '🛍️ Trang này' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi', history: '🕒 Riwayat', thisPage: '🛍️ Halaman Ini' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด', history: '🕒 ประวัติ', thisPage: '🛍️ หน้านี้' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר', history: '🕒 היסטוריה', thisPage: '🛍️ דף זה' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg', history: '🕒 Historik', thisPage: '🛍️ Denna sida' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt', history: '🕒 Historik', thisPage: '🛍️ Denne side' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu', history: '🕒 Historia', thisPage: '🛍️ Tämä sivu' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert', history: '🕒 Historikk', thisPage: '🛍️ Denne siden' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené', history: '🕒 Historie', thisPage: '🛍️ Tato stránka' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate', history: '🕒 Istoric', thisPage: '🛍️ Această pagină' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt', history: '🕒 Előzmények', thisPage: '🛍️ Ez az oldal' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα', history: '🕒 Ιστορικό', thisPage: '🛍️ Αυτή η σελίδα' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг', history: '🕒 Історія', thisPage: '🛍️ Ця сторінка' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik', history: '🕒 Sejarah', thisPage: '🛍️ Halaman Ini' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating', history: '🕒 Kasaysayan', thisPage: '🛍️ Pahinang Ito' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड', history: '🕒 इतिहास', thisPage: '🛍️ यह पृष्ठ' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени', history: '🕒 История', thisPage: '🛍️ Тази страница' }
+};
+
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
+            }
+        }
+        let lowerLang = String(lang).toLowerCase();
+        if (lowerLang.includes('zh-cn') || lowerLang.includes('zh_cn')) return 'zh_CN';
+        if (lowerLang.includes('zh-tw') || lowerLang.includes('zh_tw')) return 'zh_TW';
+
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
+        lang = lowerLang.split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
 }
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+// حفظ المنتج في السجل
+function saveProductToHistory() {
+    const urlParams = window.location.href.match(/\/item\/(\d+)\.htm/);
+    if (!urlParams) return;
+    const productId = urlParams[1];
+    const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+    const img = document.querySelector('meta[property="og:image"]')?.content || '';
+    const url = window.location.href.split('?')[0];
+    let price = '—';
+    const priceEl = document.querySelector('.product-price-value') || document.querySelector('.price--current');
+    if (priceEl) price = priceEl.innerText.trim();
+
+    chrome.storage.local.get(['nezzer_history'], (res) => {
+        let history = res.nezzer_history || [];
+        history = history.filter(item => item.productId !== productId);
+        history.unshift({ productId, title, img, url, price });
+        if (history.length > 20) history.pop();
+        chrome.storage.local.set({ nezzer_history: history });
+    });
+}
+
+// مسح الصفحة
+function scanPageForProducts(sortByPopular = false) {
+    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
+    let products = [];
+    const seen = new Set();
+    const links = document.querySelectorAll('a[href*="/item/"]');
+    
+    for (const link of links) {
+        const match = link.href.match(/\/item\/(\d+)\.html/);
+        if (!match) continue;
+        const pid = match[1];
+        if (seen.has(pid)) continue;
+        
+        const imgEl = link.querySelector('img');
+        let img = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
+        if (img && img.startsWith('//')) img = 'https:' + img;
+        let title = link.getAttribute('title') || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0];
+        if (!title || title.trim() === '') continue;
+        title = title.replace(/\n/g, ' ').substring(0, 60);
+
+        let price = '—';
+        let text = link.innerText;
+        const priceMatch = text.match(/(?:€|\$|£|руб|R\$)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|руб|R\$)/);
+        if (priceMatch) price = priceMatch[0];
+
+        let soldCount = 0;
+        if (sortByPopular) {
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti)/i);
+            if (soldMatch) {
+                let numStr = soldMatch[1].toLowerCase();
+                if (numStr.includes('k')) soldCount = parseFloat(numStr) * 1000;
+                else soldCount = parseFloat(numStr.replace(',', '.'));
+            }
+        }
+        seen.add(pid);
+        products.push({ productId: pid, title, img, url: link.href, price, soldCount });
+    }
+    if (sortByPopular) products.sort((a, b) => b.soldCount - a.soldCount);
+    
+    // تحويل البيانات لتناسب createCard في panel.js
+    return products.slice(0, 20).map(item => ({
+        productId: item.productId,
+        title: { displayTitle: item.title },
+        image: { imgUrl: item.img },
+        prices: { salePrice: { formattedPrice: item.price } },
+        _isLocal: true,
+        url: item.url
+    }));
+}
+
+function removeWidget() {
+    if (widgetWrapper) {
+        if (darkModeQueryRef && darkModeListenerRef) {
+            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
+            else darkModeQueryRef.removeListener(darkModeListenerRef);
+        }
+        darkModeQueryRef = null;
+        darkModeListenerRef = null;
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
+    }
+}
+
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+
+        const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
+        
+        if (isProductPage) {
+            saveProductToHistory();
+        }
+
+        const nezzerStyleId = 'nezzer-theme-styles';
+        if (!document.getElementById(nezzerStyleId)) {
+            const styleEl = document.createElement('style');
+            styleEl.id = nezzerStyleId;
+            styleEl.textContent = `
+                #nezzer-widget-wrapper {
+                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
+                    --nezzer-pill-border: #f1f5f9;
+                    --nezzer-btn-color: #64748b;
+                    --nezzer-drag-color: #64748b;
+                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
+                    --nezzer-drag-color-hover: #475569;
+                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
+                    --nezzer-iframe-bg: #ffffff;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
+                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
+                }
+                #nezzer-widget-wrapper.nezzer-dark {
+                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
+                    --nezzer-pill-border: #2a2a33;
+                    --nezzer-btn-color: #94a3b8;
+                    --nezzer-drag-color: #94a3b8;
+                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
+                    --nezzer-drag-color-hover: #cbd5e1;
+                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
+                    --nezzer-iframe-bg: #16161c;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
+                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
+                }
+                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
+                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
+                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
+            `;
+            document.head.appendChild(styleEl);
+        }
+
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = isProductPage ? 'popular' : 'thisPage';
+        let disclaimerEl = null;
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
+        darkModeListenerRef = () => {
+            if (!widgetWrapper) return;
+            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+        };
+        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
+        else darkModeQueryRef.addListener(darkModeListenerRef);
+        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
+            padding: 20px 6px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid var(--nezzer-pill-border); border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 60px;
+            width: 620px; max-width: 90vw; height: 98vh;
+            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
+            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden; z-index: 5;
+        `;
+
+        const siteLang = getSiteLang();
+
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.id = 'nezzer-drag-handle';
+        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
+        dragHandle.innerHTML = '⋮⋮';
+
+        function hideDisclaimer() {
+            if (!disclaimerEl) return;
+            const el = disclaimerEl;
+            el.style.opacity = '0';
+            setTimeout(() => {
+                if (el && el.parentNode) el.remove();
+                if (disclaimerEl === el) disclaimerEl = null;
+            }, 300);
+        }
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+                hideDisclaimer();
+            }
+        }
+
+        function showDisclaimer() {
+            if (disclaimerEl || !widgetWrapper) return;
+            const lang = getSiteLang();
+            const translations = window.NEZZER_DISCLAIMER_TRANSLATIONS || { 'en': { title: 'Nezzer is completely free!', body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links...', button: 'Got it, thanks' } };
+            const dis = translations[lang] || translations['en'];
+            const rtlLangs = ['ar', 'he', 'fa', 'ur'];
+            const isRtlLang = rtlLangs.includes(lang);
+            const isLeft = currentSide === 'left';
+
+            disclaimerEl = document.createElement('div');
+            disclaimerEl.id = 'nezzer-disclaimer';
+            disclaimerEl.setAttribute('dir', isRtlLang ? 'rtl' : 'ltr');
+            disclaimerEl.style.cssText = `position: absolute; top: 50%; ${isLeft ? 'left: 60px;' : 'right: 60px;'} width: 620px; max-width: 90vw; height: 98vh; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); border-radius: 16px; overflow: hidden; opacity: 0; transition: opacity 0.4s ease-out; pointer-events: auto; z-index: 20; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;`;
+            const card = document.createElement('div');
+            card.style.cssText = `width: 100%; max-width: 360px; background: var(--nezzer-pill-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); border: 1px solid var(--nezzer-pill-border); padding: 26px 22px; transform: scale(0.92); transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);`;
+            card.innerHTML = `
+                <div style="display: flex; justify-content: center; margin-bottom: 16px;">
+                    <div style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 8px 20px rgba(255,107,53,0.45);">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </div>
+                </div>
+                <div style="font-size: 16px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 10px; text-align: center; line-height: 1.3;">${dis.title}</div>
+                <div style="font-size: 13px; line-height: 1.6; color: var(--nezzer-btn-color); margin-bottom: 22px; text-align: center;">${dis.body}</div>
+                <button id="nezzer-disclaimer-btn" style="width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #ff6b35, #ff4747); color: white; border: none; border-radius: 12px; font-weight: 700; font-size: 13px; letter-spacing: 0.3px; cursor: pointer; transition: opacity 0.15s ease, transform 0.15s ease; font-family: inherit; box-shadow: 0 6px 16px rgba(255,107,53,0.35);">${dis.button}</button>
+            `;
+            disclaimerEl.appendChild(card);
+            widgetWrapper.appendChild(disclaimerEl);
+
+            requestAnimationFrame(() => { if (disclaimerEl) { disclaimerEl.style.opacity = '1'; card.style.transform = 'scale(1)'; } });
+            const btn = card.querySelector('#nezzer-disclaimer-btn');
+            if (btn) {
+                btn.onmouseenter = () => { btn.style.opacity = '0.92'; btn.style.transform = 'translateY(-1px)'; };
+                btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
+                btn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    try { chrome.storage.local.set({ nezzer_disclaimer_accepted: true }); } catch(e) {}
+                    hideDisclaimer();
+                };
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
+            btn.className = 'nezzer-sort-btn';
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+
+            btn.onmouseenter = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid #ff6b35'; btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)'; btn.style.color = '#ff6b35';
+                } else btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+            };
+            btn.onmouseleave = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid transparent'; btn.style.boxShadow = 'none'; btn.style.color = '';
+                } else btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+            };
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                if (activeSort === sortValue && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
+
+                    togglePanel(true);
+
+                    // إرسال الأوامر للنافذة
+                    if (sortValue === 'history') {
+                        chrome.storage.local.get(['nezzer_history'], (res) => {
+                            const history = res.nezzer_history || [];
+                            const mapped = history.map(item => ({
+                                productId: item.productId, title: { displayTitle: item.title }, image: { imgUrl: item.img },
+                                prices: { salePrice: { formattedPrice: item.price } }, _isLocal: true, url: item.url
+                            }));
+                            try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: mapped }, '*'); } catch(e) {}
+                        });
+                    } else if (sortValue === 'thisPage' || sortValue === 'popularLocal') {
+                        const scraped = scanPageForProducts(sortValue === 'popularLocal');
+                        if (scraped === 'CAPTCHA') {
+                            try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                        } else {
+                            try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
+                        }
+                    } else {
+                        // أزرار API القديمة
+                        try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                    }
+
+                    try {
+                        if (chrome.runtime && chrome.runtime.id) {
+                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                                if (chrome.runtime.lastError) return;
+                                if (!result || !result.nezzer_disclaimer_accepted) {
+                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                                }
+                            });
+                        }
+                    } catch (err) {}
+                }
+            };
+            return btn;
+        };
+
+        let btnTop, btnMiddle, btnBottom;
+        if (isProductPage) {
+            btnTop = createSortBtn(t('rating'), 'rating');
+            btnMiddle = createSortBtn(t('popular'), 'popular');
+            btnBottom = createSortBtn(t('cheapest'), 'cheapest');
+            activeSort = 'popular'; // الافتراضي
+            btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
+        } else {
+            btnTop = createSortBtn(t('history'), 'history');
+            btnMiddle = createSortBtn(t('thisPage'), 'thisPage');
+            btnBottom = createSortBtn(t('popular'), 'popularLocal');
+            activeSort = 'thisPage'; // الافتراضي
+            btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
+        }
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnTop);
+        pillContainer.appendChild(btnMiddle);
+        pillContainer.appendChild(btnBottom);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            if (e.button !== 0) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            if (disclaimerEl && disclaimerEl.contains(e.target)) return;
+            togglePanel(false);
+        });
+
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen) togglePanel(false); });
+
+        let scrollAccumulated = 0;
+        let scrollResetTimer = null;
+        window.addEventListener('wheel', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
+            if (disclaimerEl && disclaimerEl.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
+            scrollAccumulated += Math.abs(e.deltaY);
+            clearTimeout(scrollResetTimer);
+            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
+            if (scrollAccumulated >= 150) { togglePanel(false); scrollAccumulated = 0; clearTimeout(scrollResetTimer); }
+        }, { passive: true });
+
+        function setSide(side) {
+            currentSide = side;
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') btn.style.transform = 'rotate(180deg)';
+                else btn.style.transform = 'rotate(0deg)';
+            });
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                if (disclaimerEl) { disclaimerEl.style.left = 'auto'; disclaimerEl.style.right = '60px'; }
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                if (disclaimerEl) { disclaimerEl.style.right = 'auto'; disclaimerEl.style.left = '60px'; }
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); }
+            else { if (currentSide !== 'right') setSide('right'); }
+        });
+        window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
+
+    } catch(err) {
+        console.error("Nezzer Error:", err);
+    }
+}
+
+injectWidget();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
