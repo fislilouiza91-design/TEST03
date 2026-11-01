@@ -1,35 +1,3 @@
-{
-  "manifest_version": 3,
-  "name": "__MSG_appName__",
-  "description": "__MSG_appDesc__",
-  "default_locale": "en",
-  "version": "1.0.1",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.aliexpress.com/*",
-    "*://*.aliexpress.us/*",
-    "*://*.aliexpress.ru/*"
-  ],
-  "background": {
-    "service_worker": "engine.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.aliexpress.com/item/*", "*://*.aliexpress.us/item/*", "*://*.aliexpress.ru/item/*"],
-      "js": ["disclaimer-i18n.js", "injector.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["panel/panel.html", "panel/panel.js", "popup.html"],
-      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup.html",
-    "default_icon": { "128": "assets/icons/icon128.png" }
-  },
-  "icons": { "128": "assets/icons/icon128.png" }
-}
+Object.defineProperty(navigator, 'languages', { get: () => ['fr-FR'] });
+Object.defineProperty(navigator, 'language', { get: () => 'fr-FR' });
+location.reload(); // إعادة تحميل النافذة لتطبيق التغيير
