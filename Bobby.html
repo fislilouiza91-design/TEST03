@@ -1,27 +1,21 @@
-const grid = document.getElementById('grid');
-
-chrome.storage.local.get(['test_history'], (res) => {
-    const history = res.test_history || [];
-    
-    if (history.length === 0) {
-        grid.innerHTML = '<div class="empty">No products viewed yet.<br>Go open some products on AliExpress!</div>';
-        return;
-    }
-
-    history.forEach(item => {
-        const card = document.createElement('a');
-        card.href = item.url;
-        card.target = '_blank';
-        card.className = 'card';
-        
-        let img = item.img.startsWith('//') ? 'https:' + item.img : item.img;
-        if (!img) img = 'https://via.placeholder.com/100?text=No+Image';
-
-        card.innerHTML = `
-            <div class="img-box"><img src="${img}"></div>
-            <div class="title">${item.title}</div>
-            <div class="price">${item.price}</div>
-        `;
-        grid.appendChild(card);
-    });
-});
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #f8fafc; padding: 15px; height: 100vh; overflow-y: auto; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; text-decoration: none; color: inherit; display: flex; flex-direction: column; }
+    .img-box { width: 100%; aspect-ratio: 1/1; border-radius: 4px; overflow: hidden; margin-bottom: 5px; }
+    .img-box img { width: 100%; height: 100%; object-fit: cover; }
+    .title { font-size: 11px; font-weight: bold; height: 28px; overflow: hidden; margin-bottom: 5px; }
+    .price { font-size: 13px; color: #ef4444; font-weight: bold; }
+    .empty { text-align: center; color: #64748b; margin-top: 50px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="grid" id="grid"></div>
+  <script src="panel-history.js"></script>
+</body>
+</html>
