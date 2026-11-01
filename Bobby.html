@@ -99,7 +99,7 @@ function formatPrice(priceStr) {
 }
 
 function sortProducts(mode) {
-  if (currentMode === 'local') return; // نترك الترتيب للـ injector
+  if (currentMode === 'local') return; // نترك الترتيب للـ injector لأنه رتبها مسبقاً
   if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
   else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
   else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
@@ -146,6 +146,7 @@ function createCard(p) {
     const originalUrl = p._isLocal ? p.url : `https://${globalHost}/item/${p.productId}.html`;
     const WORKER_API = "https://smart-shopper-proxy.fislilouiza91.workers.dev";
 
+    // في الوضع المحلي، قد لا نجد بيانات الشحن، فنخفيها
     let isFreeShipping = p._isLocal ? false : checkFreeShipping(p); 
     const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
 
@@ -257,6 +258,7 @@ resultsEl.addEventListener('scroll', () => {
 });
 
 window.addEventListener('message', (event) => {
+  // 1. استقبال أمر الفرز من الـ API (صفحة المنتج)
   if (event.data && event.data.action === 'SORT') {
     currentMode = 'api';
     const newSort = event.data.sort;
@@ -270,6 +272,7 @@ window.addEventListener('message', (event) => {
     }
   }
 
+  // 2. استقبال أمر عرض المنتجات المحلية (السجل، الصفحة الحالية، الأكثر مبيعاً)
   if (event.data && event.data.action === 'RENDER_LOCAL') {
     currentMode = 'local';
     globalProducts = event.data.products || [];
@@ -278,14 +281,15 @@ window.addEventListener('message', (event) => {
     render(false);
   }
 
+  // 3. استقبال إشعار الكابتشا
   if (event.data && event.data.action === 'CAPTCHA_FOUND') {
     currentMode = 'local';
     hasMore = false;
-    document.getElementById('main-grid').innerHTML = '<p style="text-align: center; color: #ef4444; padding: 20px; grid-column: 1/-1;">⚠️ AliExpress requires CAPTCHA verification.<br>Please solve it on the page first.</p>';
+    document.getElementById('main-grid').innerHTML = '<p style="text-align: center; color: #ef4444; padding: 20px; grid-column: 1/-1; font-weight: bold;">⚠️ AliExpress requires CAPTCHA verification.<br>Please solve it on the page first, then try again.</p>';
   }
 });
 
-// التحميل الأولي بناءً على طلب الأب (لأننا لا نعرف هل سنستخدم api أم لا)
+// تهيئة أولية للنافذة عند فتحها
 window.addEventListener('message', (event) => {
     if (event.data && event.data.action === 'INIT') {
         if (event.data.mode === 'api') loadInitial();
