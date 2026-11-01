@@ -1,11 +1,32 @@
-// دالة المسح التي تعمل فقط عند الطلب
+function saveProductToHistory() {
+    const urlParams = window.location.href.match(/\/item\/(\d+)\.htm/);
+    if (!urlParams) return;
+    const productId = urlParams[1];
+
+    const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+    const img = document.querySelector('meta[property="og:image"]')?.content || '';
+    const url = window.location.href.split('?')[0];
+    
+    let price = '—';
+    const priceEl = document.querySelector('.product-price-value') || document.querySelector('.price--current');
+    if (priceEl) price = priceEl.innerText.trim();
+
+    chrome.storage.local.get(['test_history'], (res) => {
+        let history = res.test_history || [];
+        history = history.filter(item => item.productId !== productId);
+        history.unshift({ productId, title, img, url, price });
+        if (history.length > 20) history.pop();
+        chrome.storage.local.set({ test_history: history });
+    });
+}
+
 function scanPageForProducts() {
-    // 🛑 فحص ما إذا كانت الصفحة الحالية هي صفحة كابتشا أو حظر
     const pageTitle = document.title.toLowerCase();
     const pageText = document.body.innerText.toLowerCase();
-    if (pageTitle.includes('security') || pageTitle.includes('robot') || pageTitle.includes('captcha') || 
-        pageText.includes('slide to verify') || pageText.includes('unusual traffic')) {
-        return 'CAPTCHA'; // إشارة خاصة
+    
+    if (pageTitle.includes('security') || pageTitle.includes('robot') || pageTitle.includes('captcha') || pageTitle.includes('verify') ||
+        pageText.includes('slide to verify') || pageText.includes('unusual traffic') || pageText.includes('security check')) {
+        return 'CAPTCHA';
     }
 
     const products = [];
@@ -13,7 +34,119 @@ function scanPageForProducts() {
     const links = document.querySelectorAll('a[href*="/item/"]');
     
     for (const link of links) {
-       // ... (باقي كود المسح كما هو) ...
+        const match = link.href.match(/\/item\/(\d+)\.html/);
+        if (!match) continue;
+        const pid = match[1];
+        if (seen.has(pid)) continue;
+        
+        const imgEl = link.querySelector('img');
+        let img = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
+        if (img && img.startsWith('//')) img = 'https:' + img;
+        
+        let title = link.getAttribute('title') || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0];
+        if (!title || title.trim() === '') continue;
+        
+        title = title.replace(/\n/g, ' ').substring(0, 60);
+
+        let price = '—';
+        const text = link.innerText;
+        const priceMatch = text.match(/(?:€|\$|£|руб|R\$)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|руб|R\$)/);
+        if (priceMatch) price = priceMatch[0];
+
+        seen.add(pid);
+        products.push({ productId: pid, title: title, img, url: link.href, price });
     }
     return products.slice(0, 20);
 }
+
+let wrapper = null;
+function injectSidebar() {
+    if (wrapper || document.getElementById('nezzer-test-wrapper')) return;
+
+    wrapper = document.createElement('div');
+    wrapper.id = 'nezzer-test-wrapper';
+    wrapper.style.cssText = `position: fixed; top: 50%; left: 0; transform: translateY(-50%); z-index: 999999; pointer-events: none; display: flex; align-items: center;`;
+
+    const iframeContainer = document.createElement('div');
+    iframeContainer.style.cssText = `position: absolute; left: 60px; width: 600px; height: 80vh; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); display: none; pointer-events: auto; overflow: hidden;`;
+
+    const iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('panel-history.html');
+    iframe.style.cssText = `width: 100%; height: 100%; border: none;`;
+    iframeContainer.appendChild(iframe);
+
+    const btn = document.createElement('div');
+    btn.style.cssText = `
+        background: linear-gradient(135deg, #ff6b35, #ff4747); color: white;
+        padding: 20px 10px; border-radius: 0 20px 20px 0; cursor: pointer;
+        font-weight: bold; writing-mode: vertical-rl; transform: rotate(180deg);
+        pointer-events: auto; box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+    `;
+    btn.innerText = 'History Test';
+    
+    const sendProductsToIframe = () => {
+        const scraped = scanPageForProducts();
+        if (iframe.contentWindow) {
+            if (scraped === 'CAPTCHA') {
+                iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*');
+            } else {
+                iframe.contentWindow.postMessage({ action: 'HOMEPAGE_PRODUCTS', products: scraped }, '*');
+            }
+        }
+    };
+
+    btn.onclick = () => {
+        if (iframeContainer.style.display === 'none') {
+            iframeContainer.style.display = 'block';
+            sendProductsToIframe();
+        } else {
+            iframeContainer.style.display = 'none';
+        }
+    };
+
+    wrapper.appendChild(btn);
+    wrapper.appendChild(iframeContainer);
+    document.body.appendChild(wrapper);
+}
+
+window.addEventListener('message', (event) => {
+    if (event.data && event.data.action === 'REQUEST_PRODUCTS') {
+        const iframe = document.querySelector('#nezzer-test-wrapper iframe');
+        if (iframe && iframe.contentWindow) {
+            const scraped = scanPageForProducts();
+            if (scraped === 'CAPTCHA') {
+                iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*');
+            } else {
+                iframe.contentWindow.postMessage({ action: 'HOMEPAGE_PRODUCTS', products: scraped }, '*');
+            }
+        }
+    }
+});
+
+function removeSidebar() {
+    if (wrapper) {
+        wrapper.remove();
+        wrapper = null;
+    }
+}
+
+function checkPageAndRun() {
+    const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
+    if (isProductPage) {
+        saveProductToHistory();
+        removeSidebar();
+    } else {
+        injectSidebar();
+    }
+}
+
+checkPageAndRun();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeSidebar();
+        setTimeout(checkPageAndRun, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
