@@ -179,7 +179,6 @@ function injectWidget() {
         let currentSide = 'left';
         let activeSort = 'popular';
         let disclaimerEl = null;
-        let pendingAcceptCallback = null;
 
         widgetWrapper = document.createElement('div');
         widgetWrapper.id = 'nezzer-widget-wrapper';
@@ -237,6 +236,16 @@ function injectWidget() {
         dragHandle.title = 'Drag to move';
         dragHandle.setAttribute('aria-label', 'Drag to move');
 
+        function hideDisclaimer() {
+            if (!disclaimerEl) return;
+            const el = disclaimerEl;
+            el.style.opacity = '0';
+            setTimeout(() => {
+                if (el && el.parentNode) el.remove();
+                if (disclaimerEl === el) disclaimerEl = null;
+            }, 300);
+        }
+
         function togglePanel(forceOpen = null) {
             if (forceOpen === true) isOpen = true;
             else if (forceOpen === false) isOpen = false;
@@ -256,20 +265,18 @@ function injectWidget() {
                     iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
                 }
                 setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+                hideDisclaimer();
             }
         }
 
-        function showDisclaimer(onAccepted) {
-            if (disclaimerEl || !widgetWrapper) {
-                if (onAccepted) pendingAcceptCallback = onAccepted;
-                return;
-            }
+        function showDisclaimer() {
+            if (disclaimerEl || !widgetWrapper) return;
 
             const lang = getSiteLang();
             const dis = DISCLAIMER_TRANSLATIONS[lang] || DISCLAIMER_TRANSLATIONS['en'];
             const rtlLangs = ['ar', 'he', 'fa', 'ur'];
             const isRtlLang = rtlLangs.includes(lang);
-            const startX = currentSide === 'left' ? -20 : 20;
+            const isLeft = currentSide === 'left';
 
             disclaimerEl = document.createElement('div');
             disclaimerEl.id = 'nezzer-disclaimer';
@@ -277,98 +284,91 @@ function injectWidget() {
             disclaimerEl.style.cssText = `
                 position: absolute;
                 top: 50%;
-                left: ${currentSide === 'left' ? '70px' : 'auto'};
-                right: ${currentSide === 'right' ? '70px' : 'auto'};
-                transform: translateY(-50%) translateX(${startX}px);
-                width: 300px;
-                max-width: calc(100vw - 100px);
-                background: var(--nezzer-pill-bg);
-                backdrop-filter: blur(10px);
-                -webkit-backdrop-filter: blur(10px);
+                ${isLeft ? 'left: 60px;' : 'right: 60px;'}
+                width: 620px;
+                max-width: 90vw;
+                height: 98vh;
+                transform: translateY(-50%);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+                background: rgba(15, 23, 42, 0.55);
+                backdrop-filter: blur(3px);
+                -webkit-backdrop-filter: blur(3px);
                 border-radius: 16px;
-                box-shadow: 0 10px 40px var(--nezzer-panel-shadow);
-                border: 1px solid var(--nezzer-pill-border);
-                padding: 18px;
-                pointer-events: auto;
+                overflow: hidden;
                 opacity: 0;
-                transition: opacity 0.5s ease-out, transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+                transition: opacity 0.4s ease-out;
+                pointer-events: auto;
+                z-index: 20;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-                z-index: 1;
             `;
 
-            disclaimerEl.innerHTML = `
-                <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px;">
-                    <div style="flex-shrink: 0; width: 34px; height: 34px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white;">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            const card = document.createElement('div');
+            card.style.cssText = `
+                width: 100%;
+                max-width: 360px;
+                background: var(--nezzer-pill-bg);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+                border: 1px solid var(--nezzer-pill-border);
+                padding: 26px 22px;
+                transform: scale(0.92);
+                transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+            `;
+
+            card.innerHTML = `
+                <div style="display: flex; justify-content: center; margin-bottom: 16px;">
+                    <div style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 8px 20px rgba(255,107,53,0.45);">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="12" cy="12" r="10"></circle>
                             <line x1="12" y1="16" x2="12" y2="12"></line>
                             <line x1="12" y1="8" x2="12.01" y2="8"></line>
                         </svg>
                     </div>
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-size: 13px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 6px; line-height: 1.3;">${dis.title}</div>
-                        <div style="font-size: 12px; line-height: 1.55; color: var(--nezzer-btn-color);">${dis.body}</div>
-                    </div>
                 </div>
+                <div style="font-size: 16px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 10px; text-align: center; line-height: 1.3;">${dis.title}</div>
+                <div style="font-size: 13px; line-height: 1.6; color: var(--nezzer-btn-color); margin-bottom: 22px; text-align: center;">${dis.body}</div>
                 <button id="nezzer-disclaimer-btn" style="
                     width: 100%;
-                    padding: 10px 14px;
+                    padding: 12px 16px;
                     background: linear-gradient(135deg, #ff6b35, #ff4747);
                     color: white;
                     border: none;
-                    border-radius: 10px;
+                    border-radius: 12px;
                     font-weight: 700;
-                    font-size: 12px;
+                    font-size: 13px;
                     letter-spacing: 0.3px;
                     cursor: pointer;
-                    transition: opacity 0.15s ease;
+                    transition: opacity 0.15s ease, transform 0.15s ease;
                     font-family: inherit;
+                    box-shadow: 0 6px 16px rgba(255,107,53,0.35);
                 ">${dis.button}</button>
             `;
 
+            disclaimerEl.appendChild(card);
             widgetWrapper.appendChild(disclaimerEl);
 
             requestAnimationFrame(() => {
                 if (disclaimerEl) {
                     disclaimerEl.style.opacity = '1';
-                    disclaimerEl.style.transform = 'translateY(-50%) translateX(0)';
+                    card.style.transform = 'scale(1)';
                 }
             });
 
-            const btn = disclaimerEl.querySelector('#nezzer-disclaimer-btn');
+            const btn = card.querySelector('#nezzer-disclaimer-btn');
             if (btn) {
-                btn.onmouseenter = () => { btn.style.opacity = '0.9'; };
-                btn.onmouseleave = () => { btn.style.opacity = '1'; };
-                btn.onclick = () => {
+                btn.onmouseenter = () => { btn.style.opacity = '0.92'; btn.style.transform = 'translateY(-1px)'; };
+                btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
+                btn.onclick = (ev) => {
+                    ev.stopPropagation();
                     chrome.storage.local.set({ nezzer_disclaimer_accepted: true });
-                    const cb = pendingAcceptCallback;
-                    pendingAcceptCallback = null;
-                    if (disclaimerEl) {
-                        const el = disclaimerEl;
-                        const exitX = currentSide === 'left' ? -20 : 20;
-                        el.style.opacity = '0';
-                        el.style.transform = `translateY(-50%) translateX(${exitX}px)`;
-                        setTimeout(() => {
-                            if (el && el.parentNode) el.remove();
-                            if (disclaimerEl === el) disclaimerEl = null;
-                        }, 500);
-                    }
-                    if (typeof cb === 'function') {
-                        setTimeout(cb, 250);
-                    }
+                    hideDisclaimer();
                 };
             }
-        }
-
-        function maybeShowDisclaimer(onAccepted) {
-            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                if (result && result.nezzer_disclaimer_accepted) {
-                    if (typeof onAccepted === 'function') onAccepted();
-                } else {
-                    pendingAcceptCallback = onAccepted;
-                    showDisclaimer(onAccepted);
-                }
-            });
         }
 
         const createSortBtn = (text, sortValue) => {
@@ -441,9 +441,15 @@ function injectWidget() {
                     btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
                     btn.style.border = '1px solid rgba(255,107,53,0.5)';
 
-                    maybeShowDisclaimer(() => {
-                        togglePanel(true);
-                        try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                    togglePanel(true);
+                    try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+
+                    chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                        if (!result || !result.nezzer_disclaimer_accepted) {
+                            setTimeout(() => {
+                                if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer();
+                            }, 450);
+                        }
                     });
                 }
             };
@@ -499,6 +505,11 @@ function injectWidget() {
                 clearTimeout(scrollResetTimer);
                 return;
             }
+            if (disclaimerEl && disclaimerEl.contains(e.target)) {
+                scrollAccumulated = 0;
+                clearTimeout(scrollResetTimer);
+                return;
+            }
             scrollAccumulated += Math.abs(e.deltaY);
             clearTimeout(scrollResetTimer);
             scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
@@ -530,7 +541,7 @@ function injectWidget() {
                 if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
                 if (disclaimerEl) {
                     disclaimerEl.style.left = 'auto';
-                    disclaimerEl.style.right = '70px';
+                    disclaimerEl.style.right = '60px';
                 }
             } else {
                 sidebar.style.left = '0'; sidebar.style.right = 'auto';
@@ -541,7 +552,7 @@ function injectWidget() {
                 if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
                 if (disclaimerEl) {
                     disclaimerEl.style.right = 'auto';
-                    disclaimerEl.style.left = '70px';
+                    disclaimerEl.style.left = '60px';
                 }
             }
         }
