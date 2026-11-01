@@ -1,48 +1,137 @@
-const grid = document.getElementById('grid');
-let hasHistory = false;
+function saveProductToHistory() {
+    const urlParams = window.location.href.match(/\/item\/(\d+)\.htm/);
+    if (!urlParams) return;
+    const productId = urlParams[1];
 
-function renderCards(products) {
-    grid.innerHTML = '';
-    products.forEach(item => {
-        const card = document.createElement('a');
-        card.href = item.url;
-        card.target = '_blank';
-        card.className = 'card';
-        
-        let img = item.img;
-        if (img && img.startsWith('//')) img = 'https:' + img;
-        if (!img) img = 'https://via.placeholder.com/100?text=No+Image';
+    const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
+    const img = document.querySelector('meta[property="og:image"]')?.content || '';
+    const url = window.location.href.split('?')[0];
+    
+    let price = '—';
+    const priceEl = document.querySelector('.product-price-value') || document.querySelector('.price--current');
+    if (priceEl) price = priceEl.innerText.trim();
 
-        card.innerHTML = `
-            <div class="img-box"><img src="${img}"></div>
-            <div class="title">${item.title}</div>
-            <div class="price">${item.price}</div>
-        `;
-        grid.appendChild(card);
+    chrome.storage.local.get(['test_history'], (res) => {
+        let history = res.test_history || [];
+        history = history.filter(item => item.productId !== productId);
+        history.unshift({ productId, title, img, url, price });
+        if (history.length > 20) history.pop();
+        chrome.storage.local.set({ test_history: history });
     });
 }
 
-// 1. نحاول جلب السجل أولاً
-chrome.storage.local.get(['test_history'], (res) => {
-    const history = res.test_history || [];
+// دالة محسنة لقراءة المنتجات من الصفحة
+function scrapeHomepageProducts() {
+    const products = [];
+    const seen = new Set();
+    const links = document.querySelectorAll('a[href*="/item/"]');
     
-    if (history.length > 0) {
-        hasHistory = true;
-        renderCards(history);
-    } else {
-        // إذا لم يكن هناك سجل، نطلب من الصفحة إرسال منتجاتها
-        grid.innerHTML = '<div class="empty">Loading products from page...</div>';
-        window.parent.postMessage({ action: 'REQUEST_PRODUCTS' }, '*');
-    }
-});
+    for (const link of links) {
+        const match = link.href.match(/\/item\/(\d+)\.html/);
+        if (!match) continue;
+        const pid = match[1];
+        if (seen.has(pid)) continue;
+        seen.add(pid);
 
-// 2. نستمع للرد القادم من content.js
-window.addEventListener('message', (event) => {
-    if (event.data && event.data.action === 'HOMEPAGE_PRODUCTS' && !hasHistory) {
-        if (event.data.products && event.data.products.length > 0) {
-            renderCards(event.data.products);
+        // تحسين قراءة الصورة (بعض الصور لا تحمل فوراً)
+        const imgEl = link.querySelector('img');
+        let img = imgEl ? (imgEl.src || imgEl.getAttribute('data-src') || '') : '';
+        if (img && img.startsWith('//')) img = 'https:' + img;
+
+        // تحسين قراءة العنوان
+        let title = link.getAttribute('title') || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0] || 'AliExpress Product';
+        title = title.replace(/\n/g, ' ').substring(0, 60);
+
+        // محاولة قراءة السعر
+        let price = '—';
+        const text = link.innerText;
+        const priceMatch = text.match(/(?:€|\$|£|руб|R\$)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|руб|R\$)/);
+        if (priceMatch) price = priceMatch[0];
+
+        if (img || title !== 'AliExpress Product') {
+            products.push({ productId: pid, title: title, img, url: link.href, price });
+        }
+    }
+    return products.slice(0, 20);
+}
+
+let wrapper = null;
+function injectSidebar() {
+    if (wrapper || document.getElementById('nezzer-test-wrapper')) return;
+
+    wrapper = document.createElement('div');
+    wrapper.id = 'nezzer-test-wrapper';
+    wrapper.style.cssText = `position: fixed; top: 50%; left: 0; transform: translateY(-50%); z-index: 999999; pointer-events: none; display: flex; align-items: center;`;
+
+    const iframeContainer = document.createElement('div');
+    iframeContainer.style.cssText = `position: absolute; left: 60px; width: 600px; height: 80vh; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); display: none; pointer-events: auto; overflow: hidden;`;
+
+    const iframe = document.createElement('iframe');
+    iframe.src = chrome.runtime.getURL('panel-history.html');
+    iframe.style.cssText = `width: 100%; height: 100%; border: none;`;
+
+    iframeContainer.appendChild(iframe);
+
+    const btn = document.createElement('div');
+    btn.style.cssText = `
+        background: linear-gradient(135deg, #ff6b35, #ff4747); color: white;
+        padding: 20px 10px; border-radius: 0 20px 20px 0; cursor: pointer;
+        font-weight: bold; writing-mode: vertical-rl; transform: rotate(180deg);
+        pointer-events: auto; box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+    `;
+    btn.innerText = 'History Test';
+    
+    btn.onclick = () => {
+        if (iframeContainer.style.display === 'none') {
+            iframeContainer.style.display = 'block';
         } else {
-            grid.innerHTML = '<div class="empty">No products found.<br>Try scrolling down a bit then click the button again.</div>';
+            iframeContainer.style.display = 'none';
+        }
+    };
+
+    wrapper.appendChild(btn);
+    wrapper.appendChild(iframeContainer);
+    document.body.appendChild(wrapper);
+}
+
+// الاستجابة لطلب المنتجات القادم من النافذة
+window.addEventListener('message', (event) => {
+    if (event.data && event.data.action === 'REQUEST_PRODUCTS') {
+        const scraped = scrapeHomepageProducts();
+        console.log("Nezzer Scraper found:", scraped.length, "products on this page.");
+        
+        // إرسال المنتجات للنافذة
+        const iframe = document.querySelector('#nezzer-test-wrapper iframe');
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ action: 'HOMEPAGE_PRODUCTS', products: scraped }, '*');
         }
     }
 });
+
+function removeSidebar() {
+    if (wrapper) {
+        wrapper.remove();
+        wrapper = null;
+    }
+}
+
+function checkPageAndRun() {
+    const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
+    if (isProductPage) {
+        saveProductToHistory();
+        removeSidebar();
+    } else {
+        injectSidebar();
+    }
+}
+
+checkPageAndRun();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeSidebar();
+        setTimeout(checkPageAndRun, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
