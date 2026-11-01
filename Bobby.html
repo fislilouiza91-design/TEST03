@@ -64,7 +64,6 @@ if (loaderMore) {
     loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
 }
 
-// 💡 دالة لحماية النصوص من ثغرات XSS
 function escapeHTML(str) {
     if (!str) return '';
     return String(str).replace(/[&<>'"]/g, function(tag) {
@@ -305,7 +304,7 @@ async function loadInitial() {
   isLoading = false;
 
   if (res.error) {
-    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${res.error}</p>`;
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${escapeHTML(res.error)}</p>`;
     return;
   }
 
