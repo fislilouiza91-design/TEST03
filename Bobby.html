@@ -1,7 +1,7 @@
-/* Nezzer History Test — content script (optimized with MD5 cache + Image Fix) */
+/* Nezzer History Test — content script (Background Stealth Scroll + MD5 Cache) */
 
 /* ============================================================
- *  MD5 (optimized, no deps)
+ *  MD5 (optimized)
  * ============================================================ */
 const MD5_S = new Uint8Array([
   7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
@@ -53,8 +53,7 @@ function md5(str) {
 /* ============================================================
  *  Cache layer
  * ============================================================ */
-// تم تغيير الإصدار إلى v2 لمسح الكاش القديم الذي يحتوي على صور خاطئة
-const CACHE_PREFIX = 'nz_cache_v2_'; 
+const CACHE_PREFIX = 'nz_cache_v3_'; 
 const CACHE_TTL = 5 * 60 * 1000;
 const MEM_TTL = 30 * 1000;
 
@@ -135,33 +134,43 @@ function saveProductToHistory() {
 }
 
 /* ============================================================
- *  Scraping & Image Extraction Fix
+ *  Scraping & Image Extraction
  * ============================================================ */
 function extractImageUrl(link) {
   const imgs = link.querySelectorAll('img');
-  for (const imgEl of imgs) {
-    // 1. الأولوية القصوى لـ data-src (الصورة الحقيقية)
-    let src = imgEl.getAttribute('data-src');
-    if (src && !src.includes('base64') && !src.includes('.gif') && !src.includes('11.11') && !src.includes('aliexpress.com')) {
-      return src.startsWith('//') ? 'https:' + src : src;
-    }
+  for (const img of imgs) {
+    let src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original') || img.getAttribute('src');
+    if (src && src.startsWith('//')) src = 'https:' + src;
 
-    // 2. فحص srcset (غالباً يحتوي على الصور عالية الجودة)
-    const srcset = imgEl.getAttribute('srcset');
+    // التحقق من أن الصورة حقيقية وليست مؤقتة
+    if (src && !src.startsWith('data:image') && !src.includes('11.11') && !src.includes('choice') && !src.includes('placeholder') && !src.includes('.gif')) {
+      return src;
+    }
+    
+    // فحص srcset
+    const srcset = img.getAttribute('srcset');
     if (srcset) {
       const parts = srcset.split(',');
-      if (parts.length > 0) {
-        const candidate = parts[0].trim().split(' ')[0];
-        if (candidate && !candidate.includes('base64') && !candidate.includes('.gif') && !candidate.includes('11.11')) {
-          return candidate.startsWith('//') ? 'https:' + candidate : candidate;
+      for (let part of parts) {
+        let candidate = part.trim().split(' ')[0];
+        if (candidate && candidate.startsWith('//')) candidate = 'https:' + candidate;
+        if (candidate && !candidate.startsWith('data:image') && !candidate.includes('11.11') && !candidate.includes('choice')) {
+          return candidate;
         }
       }
     }
+  }
 
-    // 3. فحص src العادي (نتجاهل الصور المؤقتة)
-    src = imgEl.getAttribute('src');
-    if (src && !src.includes('base64') && !src.endsWith('.gif') && !src.includes('11.11') && !src.includes('choice')) {
-      return src.startsWith('//') ? 'https:' + src : src;
+  // فحص خلفية العناصر
+  const elementsWithBg = [link, ...link.querySelectorAll('div, span')];
+  for (const el of elementsWithBg) {
+    const bg = el.style.backgroundImage;
+    if (bg && bg.includes('url(')) {
+      let url = bg.slice(5, -2).replace(/['"]/g, '');
+      if (url.startsWith('//')) url = 'https:' + url;
+      if (url && !url.includes('11.11') && !url.includes('choice')) {
+        return url;
+      }
     }
   }
   return '';
@@ -182,7 +191,6 @@ function scanPageForProducts(sortByPopular = false) {
     if (seen.has(pid)) continue;
 
     let img = extractImageUrl(link);
-
     let title = link.getAttribute('title') || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0];
     if (!title || title.trim() === '') continue;
     title = title.replace(/\n/g, ' ').substring(0, 60);
@@ -197,9 +205,7 @@ function scanPageForProducts(sortByPopular = false) {
       const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti)/i);
       if (soldMatch) {
         let numStr = soldMatch[1].toLowerCase();
-        soldCount = numStr.includes('k')
-          ? parseFloat(numStr) * 1000
-          : parseFloat(numStr.replace(',', '.'));
+        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr.replace(',', '.'));
       }
     }
 
@@ -209,6 +215,69 @@ function scanPageForProducts(sortByPopular = false) {
 
   if (sortByPopular) products.sort((a, b) => b.soldCount - a.soldCount);
   return products.slice(0, 20);
+}
+
+/* ============================================================
+ *  Stealth Background Scroll & Scan
+ * ============================================================ */
+async function triggerLazyLoadAndScan(sortByPopular = false) {
+    // 1. المحاولة الأولى لقراءة البيانات
+    let products = scanPageForProducts(sortByPopular);
+    if (products === 'CAPTCHA') return 'CAPTCHA';
+
+    // 2. إذا كانت معظم الصور مفقودة، نقوم بالتمرير الخفي
+    const missingImages = products.filter(p => !p.img).length;
+    if (products.length > 0 && missingImages === 0) {
+        return products; // كل شيء جاهز
+    }
+
+    // 3. إنشاء طبقة التمويه (Overlay)
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; 
+        background: rgba(22, 22, 28, 0.85); backdrop-filter: blur(5px); 
+        z-index: 2147483647; display: flex; flex-direction: column; 
+        align-items: center; justify-content: center; font-family: sans-serif; 
+        font-weight: bold; color: white; opacity: 0; transition: opacity 0.3s;
+        pointer-events: none;
+    `;
+    overlay.innerHTML = `
+        <div style="width:40px; height:40px; border:4px solid #ff6b35; border-top-color:transparent; border-radius:50%; animation:nz-spin 1s linear infinite; margin-bottom:20px;"></div>
+        <div>Loading Images...</div>
+        <style>@keyframes nz-spin { 100% { transform: rotate(360deg); } }</style>
+    `;
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => { overlay.style.opacity = '1'; });
+
+    const originalScroll = window.scrollY;
+    
+    // 4. التمرير التدريجي لأسفل (محاكاة الإنسان)
+    return new Promise(resolve => {
+        const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+        let currentScroll = 0;
+        
+        const scrollInterval = setInterval(() => {
+            // خطوات عشوائية لتبدو طبيعية
+            currentScroll += (500 + Math.random() * 300); 
+            window.scrollTo(0, currentScroll);
+            
+            if (currentScroll >= maxScroll) {
+                clearInterval(scrollInterval);
+                
+                // 5. الانتظار حتى تقوم الشبكة بتحميل الصور
+                setTimeout(() => {
+                    window.scrollTo(0, originalScroll); // العودة لمكان المستخدم
+                    
+                    overlay.style.opacity = '0';
+                    setTimeout(() => {
+                        overlay.remove();
+                        // التقاط البيانات مرة أخرى بعد التحميل
+                        resolve(scanPageForProducts(sortByPopular));
+                    }, 300);
+                }, 1500); // الانتظار ثانية ونصف في أسفل الصفحة
+            }
+        }, 50 + Math.random() * 50); // سرعة عشوائية
+    });
 }
 
 /* ============================================================
@@ -391,22 +460,23 @@ function injectWidget() {
         _memCache = { sortValue, products: stored.products, ts: Date.now() };
       }
 
-      setTimeout(() => {
-        const scraped = scanPageForProducts(sortValue === 'popular');
-        if (scraped === 'CAPTCHA') {
-          postToIframe({ action: 'CAPTCHA_FOUND' });
-          return;
-        }
-        const newFp = fingerprintProducts(scraped);
-        const changed = !stored || stored.fingerprint !== newFp;
+      // استخدام دالة التمرير الخفي لضمان جلب الصور
+      const scraped = await triggerLazyLoadAndScan(sortValue === 'popular');
+      
+      if (scraped === 'CAPTCHA') {
+        postToIframe({ action: 'CAPTCHA_FOUND' });
+        return;
+      }
+      
+      const newFp = fingerprintProducts(scraped);
+      const changed = !stored || stored.fingerprint !== newFp;
 
-        _memCache = { sortValue, products: scraped, ts: Date.now() };
-        setStoredCache(sortValue, scraped);
+      _memCache = { sortValue, products: scraped, ts: Date.now() };
+      setStoredCache(sortValue, scraped);
 
-        if (changed || !stored) {
-          postToIframe({ action: 'RENDER_DATA', products: scraped });
-        }
-      }, 0);
+      if (changed || !stored) {
+        postToIframe({ action: 'RENDER_DATA', products: scraped });
+      }
     };
     return btn;
   };
