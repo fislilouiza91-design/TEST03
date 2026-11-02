@@ -146,10 +146,9 @@ function scanPageForProducts(sortByPopular = false) {
             if (priceMatch) price = priceMatch[0];
         }
 
-        // 4. التقييم (نظام بحث متعدد المستويات للنجوم)
+        // 4. التقييم (نظام بحث متعدد المستويات)
         let rating = 0;
         
-        // المستوى 1: البحث في العناصر المخصصة للتقييم
         const ratingEl = link.querySelector('[class*="evaluation"], [class*="star"], [class*="rating"]');
         if (ratingEl) {
             const aria = ratingEl.getAttribute('aria-label') || link.querySelector('[aria-label*="star"]')?.getAttribute('aria-label');
@@ -169,7 +168,6 @@ function scanPageForProducts(sortByPopular = false) {
             }
         }
 
-        // المستوى 2: البحث عن صور النجوم داخل البطاقة
         if (rating === 0) {
             const starImgs = link.querySelectorAll('img');
             for (const img of starImgs) {
@@ -183,22 +181,24 @@ function scanPageForProducts(sortByPopular = false) {
             }
         }
 
-        // المستوى 3: استخراج التقييم من النص الكامل بذكاء (استبعاد الأسعار)
         if (rating === 0) {
             rating = extractValidRating(link.innerText);
         }
 
-        // المستوى 4: إذا كان هناك نجوم مرسومة (SVG) بدون رقم، نقوم بعدّها
         if (rating === 0) {
             const starSvgs = link.querySelectorAll('svg[class*="star"], [class*="star"] svg');
             let filled = 0;
             for (const s of starSvgs) {
-                if (s.className.includes('full') || s.className.includes('filled') || s.innerHTML.includes('fill')) filled++;
+                // إصلاح: استخدام getAttribute بدلاً من className لأنها عناصر SVG
+                const sClass = s.getAttribute('class') || '';
+                if (sClass.includes('full') || sClass.includes('filled')) {
+                    filled++;
+                }
             }
             if (filled > 0 && filled <= 5) rating = filled;
         }
 
-        // 5. المبيعات (التقاط صيغة الأقواس مثل (1000+) أو (500-))
+        // 5. المبيعات
         let soldCount = 0;
         const soldMatch = link.innerText.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
         if (soldMatch) {
@@ -454,18 +454,19 @@ function injectWidget() {
 
                     togglePanel(true);
 
-                    if (sortValue === 'thisPage' || sortValue === 'popularLocal') {
-                        const scraped = scanPageForProducts(sortValue === 'popularLocal');
-                        if (scraped === 'CAPTCHA') {
-                            try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                        } else {
-                            try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
-                        }
-                    } else {
-                        try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                    }
-
+                    // تم وضع الكود داخل Try-Catch لمنع انهيار النافذة
                     try {
+                        if (sortValue === 'thisPage' || sortValue === 'popularLocal') {
+                            const scraped = scanPageForProducts(sortValue === 'popularLocal');
+                            if (scraped === 'CAPTCHA') {
+                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                            } else {
+                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
+                            }
+                        } else {
+                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                        }
+
                         if (chrome.runtime && chrome.runtime.id) {
                             chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
                                 if (chrome.runtime.lastError) return;
@@ -474,7 +475,9 @@ function injectWidget() {
                                 }
                             });
                         }
-                    } catch (err) {}
+                    } catch(err) {
+                        console.error("Nezzer Scan Error:", err);
+                    }
                 }
             };
             return btn;
