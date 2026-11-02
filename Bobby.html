@@ -71,58 +71,6 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
-// دالة استخراج التقييم الذكية (تتخلص من الأسعار والمبيعات أولاً)
-function extractRating(link) {
-    const text = link.innerText || '';
-    
-    // 1. البحث في خصائص aria-label
-    const ariaEls = link.querySelectorAll('[aria-label]');
-    for (const el of ariaEls) {
-        const aria = el.getAttribute('aria-label');
-        if (aria) {
-            const lowerAria = aria.toLowerCase();
-            if (lowerAria.includes('star') || lowerAria.includes('rating') || aria.includes('تقييم') || aria.includes('نجوم')) {
-                const m = aria.match(/([0-5](?:[.,]\d)?)/);
-                if (m) return parseFloat(m[1].replace(',', '.'));
-            }
-        }
-    }
-
-    // 2. البحث في الكلاسات المخصصة
-    const ratingEls = link.querySelectorAll('[class*="star"], [class*="rating"], [class*="evaluation"], [class*="score"]');
-    for (const el of ratingEls) {
-        const txt = el.innerText.trim();
-        if (!txt) continue;
-        const m = txt.match(/^([0-5](?:[.,]\d)?)$/);
-        if (m) return parseFloat(m[1].replace(',', '.'));
-    }
-
-    // 3. تنظيف النص من الأسعار وأرقام المبيعات
-    let cleanText = text;
-    // إزالة الأسعار
-    cleanText = cleanText.replace(/(?:NT\$|US\s*\$|CA\s*\$|AU\s*\$|\$|€|£|¥|₽|zł|kr|CHF|R\$|S\$|د\.ج|DA|SAR|AED)\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*(?:NT\$|US\s*\$|CA\s*\$|AU\s*\$|\$|€|£|¥|₽|zł|kr|CHF|R\$|S\$|د\.ج|DA|SAR|AED)/gi, '');
-    // إزالة المبيعات
-    cleanText = cleanText.replace(/\d+(?:[.,]\d+)?\s*[kKmM]?\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/gi, '');
-    cleanText = cleanText.replace(/\d+(?:[.,]\d+)?\s*[kKmM]\+/gi, '');
-    cleanText = cleanText.replace(/\(\s*\d+\S*\s*\)/g, ''); // إزالة الأقواس مثل (1000-)
-
-    // 4. البحث عن التقييم في النص النظيف
-    const decimalMatch = cleanText.match(/([0-5][.,]\d)/);
-    if (decimalMatch) return parseFloat(decimalMatch[1].replace(',', '.'));
-
-    const intMatch = cleanText.match(/([0-5])\s*(?:★|stars?|sold|out of)/i) || cleanText.match(/(?:★|stars?|sold|out of)\s*([0-5])/i);
-    if (intMatch) return parseFloat(intMatch[1]);
-
-    // 5. عد النجوم إذا كانت مرسومة برموز
-    if (text.includes('★')) {
-        const filled = (text.match(/★/g) || []).length;
-        const empty = (text.match(/☆/g) || []).length;
-        if (filled > 0 && filled <= 5) return filled;
-    }
-
-    return 0;
-}
-
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
 
@@ -131,88 +79,125 @@ function scanPageForProducts(sortByPopular = false) {
     const links = document.querySelectorAll('a[href*="/item/"]');
 
     for (const link of links) {
-        const match = link.href.match(/\/item\/(\d+)\.html/);
-        if (!match) continue;
-        const pid = match[1];
-        if (seen.has(pid)) continue;
+        try {
+            const match = link.href.match(/\/item\/(\d+)\.html/);
+            if (!match) continue;
+            const pid = match[1];
+            if (seen.has(pid)) continue;
 
-        // 1. جلب الصورة
-        let img = '';
-        const imgEls = link.querySelectorAll('img');
-        for (let el of imgEls) {
-            let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
-            if (src.startsWith('//')) src = 'https:' + src;
-            if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
-                if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
-                    img = src.split(' ')[0].split(',')[0];
-                    break;
+            // 1. جلب الصورة
+            let img = '';
+            const imgEls = link.querySelectorAll('img');
+            for (let el of imgEls) {
+                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
+                if (src.startsWith('//')) src = 'https:' + src;
+                if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
+                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
+                        img = src.split(' ')[0].split(',')[0];
+                        break;
+                    }
                 }
             }
-        }
-        if (!img) {
-            const firstImg = link.querySelector('img');
-            if (firstImg) {
-                img = firstImg.src || firstImg.getAttribute('data-src') || '';
-                if (img.startsWith('//')) img = 'https:' + img;
-            }
-        }
-        if (!img) continue;
-
-        // 2. العنوان
-        let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
-        if (!title || title.length < 5) {
-            title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
-        }
-        if (!title) continue;
-        title = title.replace(/\n/g, ' ').trim().substring(0, 80);
-
-        // 3. السعر
-        let price = '—';
-        const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
-        if (priceEl) {
-            const pText = priceEl.innerText.trim().split('\n')[0];
-            if (pText.match(/\d/)) price = pText;
-        }
-        if (price === '—') {
-            const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
-            if (priceMatch) price = priceMatch[0];
-        }
-
-        // 4. التقييم (باستخدام الدالة الجديدة)
-        let rating = extractRating(link);
-
-        // 5. المبيعات
-        let soldCount = 0;
-        const soldMatch = link.innerText.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
-        if (soldMatch) {
-            let numStr = soldMatch[1].toLowerCase().replace(',', '.');
-            soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-        } else {
-            const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
-            if (tradeEl) {
-                const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
-                if (sMatch) {
-                    let numStr = sMatch[1].toLowerCase().replace(',', '.');
-                    soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+            if (!img) {
+                const firstImg = link.querySelector('img');
+                if (firstImg) {
+                    img = firstImg.src || firstImg.getAttribute('data-src') || '';
+                    if (img.startsWith('//')) img = 'https:' + img;
                 }
             }
+            if (!img) continue;
+
+            // 2. العنوان
+            let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
+            if (!title || title.length < 5) {
+                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
+            }
+            if (!title) continue;
+            title = title.replace(/\n/g, ' ').trim().substring(0, 80);
+
+            // 3. السعر
+            let price = '—';
+            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
+            if (priceEl) {
+                const pText = priceEl.innerText.trim().split('\n')[0];
+                if (pText.match(/\d/)) price = pText;
+            }
+            if (price === '—') {
+                const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
+                if (priceMatch) price = priceMatch[0];
+            }
+
+            // 4. التقييم (استخراج آمن ومضمون)
+            let rating = 0;
+            const text = link.innerText;
+
+            // أ. عد النجوم المرسومة (★)
+            if (text.includes('★')) {
+                const filled = (text.match(/★/g) || []).length;
+                if (filled > 0 && filled <= 5) rating = filled;
+            }
+
+            // ب. البحث عن رقم عشري (مثل 4.5) مع استبعاد الأسعار والمبيعات
+            if (rating === 0) {
+                const decMatch = text.match(/(?<!\d)([1-5][.,]\d)(?![\dkmKM+\-])/);
+                if (decMatch) {
+                    rating = parseFloat(decMatch[1].replace(',', '.'));
+                }
+            }
+
+            // ج. البحث عن رقم صحيح (مثل 4) بجانب كلمة نجوم
+            if (rating === 0) {
+                const intMatch = text.match(/(?<!\d)([1-5])(?!\d)\s*(?:★|stars?|out of 5)/i) || text.match(/(?:★|stars?|rated)\s*(?<!\d)([1-5])(?!\d)/i);
+                if (intMatch) {
+                    rating = parseFloat(intMatch[1]);
+                }
+            }
+
+            // د. البحث في خصائص aria-label
+            if (rating === 0) {
+                const ariaEl = link.querySelector('[aria-label*="star" i], [aria-label*="rating" i]');
+                if (ariaEl) {
+                    const aria = ariaEl.getAttribute('aria-label');
+                    const am = aria.match(/([0-5][.,]\d)/);
+                    if (am) rating = parseFloat(am[1].replace(',', '.'));
+                }
+            }
+
+            // 5. المبيعات
+            let soldCount = 0;
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
+            if (soldMatch) {
+                let numStr = soldMatch[1].toLowerCase().replace(',', '.');
+                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+            } else {
+                const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
+                if (tradeEl) {
+                    const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
+                    if (sMatch) {
+                        let numStr = sMatch[1].toLowerCase().replace(',', '.');
+                        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+                    }
+                }
+            }
+
+            // 6. الشحن المجاني
+            let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
+
+            seen.add(pid);
+            products.push({
+                productId: pid,
+                title: { displayTitle: title },
+                image: { imgUrl: img },
+                prices: { salePrice: { formattedPrice: price } },
+                evaluation: { starRating: rating },
+                trade: { realTradeCount: soldCount },
+                _isLocal: true,
+                _isFreeShipping: isFreeShipping,
+                url: link.href
+            });
+        } catch (e) {
+            console.warn("Nezzer: Skipped a product due to parsing error", e);
         }
-
-        // 6. الشحن المجاني
-        let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(link.innerText);
-
-        seen.add(pid);
-        products.push({
-            productId: pid,
-            title: { displayTitle: title },
-            image: { imgUrl: img },
-            prices: { salePrice: { formattedPrice: price } },
-            evaluation: { starRating: rating },
-            trade: { realTradeCount: soldCount },
-            _isLocal: true,
-            _isFreeShipping: isFreeShipping,
-            url: link.href
-        });
     }
 
     if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
