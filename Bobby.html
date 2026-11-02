@@ -1,240 +1,620 @@
-<!DOCTYPE html>
-<html lang="en" dir="ltr">
-<head>
-  <meta charset="UTF-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+let darkModeQueryRef = null;
+let darkModeListenerRef = null;
+let isFetchingAlternatives = false;
+let alternativesBuffer = [];
+let alternativesDelivered = 0;
+let currentRoundDelivered = 0;
+const ROUND_SIZE = 12;
+const STEP_SIZE = 3;
 
-    body {
-      width: 100%; height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #f8fafc !important; 
-      display: flex; flex-direction: column; overflow: hidden;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      overscroll-behavior: none;
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ بدائل أفضل' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page', betterAlternatives: '✨ Meilleures alternatives' },
+    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado', thisPage: '🛍️ Esta página', betterAlternatives: '✨ Mejores alternativas' },
+    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado', thisPage: '🛍️ Esta página', betterAlternatives: '✨ Melhores alternativas' },
+    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг', thisPage: '🛍️ Эта страница', betterAlternatives: '✨ Лучшие альтернативы' },
+    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet', thisPage: '🛍️ Diese Seite', betterAlternatives: '✨ Bessere Alternativen' },
+    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato', thisPage: '🛍️ Questa pagina', betterAlternatives: '✨ Alternative migliori' },
+    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan', thisPage: '🛍️ Bu Sayfa', betterAlternatives: '✨ Daha İyi Alternatifler' },
+    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld', thisPage: '🛍️ Deze pagina', betterAlternatives: '✨ Betere alternatieven' },
+    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane', thisPage: '🛍️ Ta strona', betterAlternatives: '✨ Lepsze alternatywy' },
+    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점', thisPage: '🛍️ 이 페이지', betterAlternatives: '✨ 더 나은 대안' },
+    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価', thisPage: '🛍️ このページ', betterAlternatives: '✨ より良い代替品' },
+    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高', thisPage: '🛍️ 本页', betterAlternatives: '✨ 更好的替代品' },
+    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高', thisPage: '🛍️ 本頁', betterAlternatives: '✨ 更好的替代品' },
+    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất', thisPage: '🛍️ Trang này', betterAlternatives: '✨ Lựa chọn tốt hơn' },
+    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi', thisPage: '🛍️ Halaman Ini', betterAlternatives: '✨ Alternatif Lebih Baik' },
+    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด', thisPage: '🛍️ หน้านี้', betterAlternatives: '✨ ทางเลือกที่ดีกว่า' },
+    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר', thisPage: '🛍️ דף זה', betterAlternatives: '✨ חלופות טובות יותר' },
+    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg', thisPage: '🛍️ Denna sida', betterAlternatives: '✨ Bättre alternativ' },
+    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt', thisPage: '🛍️ Denne side', betterAlternatives: '✨ Bedre alternativer' },
+    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu', thisPage: '🛍️ Tämä sivu', betterAlternatives: '✨ Parempia vaihtoehtoja' },
+    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert', thisPage: '🛍️ Denne siden', betterAlternatives: '✨ Bedre alternativer' },
+    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené', thisPage: '🛍️ Tato stránka', betterAlternatives: '✨ Lepší alternativy' },
+    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate', thisPage: '🛍️ Această pagină', betterAlternatives: '✨ Alternative mai bune' },
+    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt', thisPage: '🛍️ Ez az oldal', betterAlternatives: '✨ Jobb alternatívák' },
+    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα', thisPage: '🛍️ Αυτή η σελίδα', betterAlternatives: '✨ Καλύτερες εναλλακτικές' },
+    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг', thisPage: '🛍️ Ця сторінка', betterAlternatives: '✨ Кращі альтернативи' },
+    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik', thisPage: '🛍️ Halaman Ini', betterAlternatives: '✨ Alternatif Lebih Baik' },
+    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating', thisPage: '🛍️ Pahinang Ito', betterAlternatives: '✨ Mas Magandang Alternatibo' },
+    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड', thisPage: '🛍️ यह पृष्ठ', betterAlternatives: '✨ बेहतर विकल्प' },
+    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени', thisPage: '🛍️ Тази страница', betterAlternatives: '✨ По-добри алтернативи' }
+};
+
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || '';
+        if (!lang) {
+            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
+            if (match) {
+                const cookieStr = decodeURIComponent(match[1]);
+                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
+                if (localeMatch) lang = localeMatch[1];
+            }
+        }
+        let lowerLang = String(lang).toLowerCase();
+        if (lowerLang.includes('zh-cn')) return 'zh_CN';
+        if (!lang) {
+            if (location.href.includes('aliexpress.ru')) lang = 'ru';
+            else if (location.href.includes('aliexpress.us')) lang = 'en';
+            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
+            else lang = 'en';
+        }
+        lang = lowerLang.split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function shuffleArray(array) {
+    let currentIndex = array.length, randomIndex;
+    while (currentIndex != 0) {
+        randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+    }
+    return array;
+}
+
+function scanPageForProducts(sortByPopular = false, randomize = false) {
+    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
+
+    let products = [];
+    const seen = new Set();
+    const links = document.querySelectorAll('a[href*="/item/"]');
+
+    for (const link of links) {
+        try {
+            const match = link.href.match(/\/item\/(\d+)\.html/);
+            if (!match) continue;
+            const pid = match[1];
+            if (seen.has(pid)) continue;
+
+            let img = '';
+            const imgEls = link.querySelectorAll('img');
+            for (let el of imgEls) {
+                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
+                if (src.startsWith('//')) src = 'https:' + src;
+                if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
+                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
+                        img = src.split(' ')[0].split(',')[0];
+                        break;
+                    }
+                }
+            }
+            if (!img) {
+                const firstImg = link.querySelector('img');
+                if (firstImg) {
+                    img = firstImg.src || firstImg.getAttribute('data-src') || '';
+                    if (img.startsWith('//')) img = 'https:' + img;
+                }
+            }
+            if (!img) continue;
+
+            let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
+            if (!title || title.length < 5) {
+                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
+            }
+            if (!title) continue;
+            title = title.replace(/\n/g, ' ').trim().substring(0, 80);
+
+            let price = '—';
+            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
+            if (priceEl) {
+                const pText = priceEl.innerText.trim().split('\n')[0];
+                if (pText.match(/\d/)) price = pText;
+            }
+            if (price === '—') {
+                const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
+                if (priceMatch) price = priceMatch[0];
+            }
+
+            let soldCount = 0;
+            const text = link.innerText;
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
+            if (soldMatch) {
+                let numStr = soldMatch[1].toLowerCase().replace(',', '.');
+                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+            } else {
+                const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
+                if (tradeEl) {
+                    const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
+                    if (sMatch) {
+                        let numStr = sMatch[1].toLowerCase().replace(',', '.');
+                        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+                    }
+                }
+            }
+
+            let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
+
+            seen.add(pid);
+            products.push({
+                productId: pid,
+                title: { displayTitle: title },
+                image: { imgUrl: img },
+                prices: { salePrice: { formattedPrice: price } },
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: soldCount },
+                _isLocal: true,
+                _isFreeShipping: isFreeShipping,
+                url: link.href
+            });
+        } catch (e) {
+            console.warn("Nezzer: Skipped a product due to parsing error", e);
+        }
     }
 
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-
-    #results {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 10px 12px; 
-      width: 100%;
-      scrollbar-gutter: stable both-edges;
-      overscroll-behavior-y: contain;
+    if (randomize) {
+        products = shuffleArray(products);
     }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px 10px; 
-      width: 100%;
-      align-items: start;
-    }
-
-    .product-card {
-      display: flex; flex-direction: column;
-      text-decoration: none; color: inherit;
-      position: relative;
-      background: #ffffff !important;
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px; 
-      width: 100%;
-      height: 100%;
-      min-width: 0;
-      transition: all 0.25s ease;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-    }
-
-    .product-card:hover { 
-      transform: translateY(-3px); 
-      box-shadow: 0 6px 12px rgba(0,0,0,0.08);
-      border-color: #cbd5e1;
-    }
-
-    .img-box {
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      background: #ffffff;
-      position: relative;
-      overflow: hidden;
-      border-radius: 6px;
-      margin-bottom: 6px; 
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .img-box img {
-      width: 100%; height: 100%;
-      object-fit: cover;
-    }
-
-    .info {
-      display: flex;
-      flex-direction: column;
-      width: 100%;
-      flex: 1;
-      padding: 0 2px;
-      min-width: 0;
-    }
-
-    .title {
-      font-size: 11px;
-      color: #1e293b;
-      font-weight: 500;
-      line-height: 1.25;
-      height: 28px;
-      overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      margin-bottom: 4px;
-      text-align: start;
-      word-break: break-word;
-      overflow-wrap: break-word;
-    }
-
-    .meta-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #64748b;
-      height: 14px;
-      margin-bottom: 2px; 
-      justify-content: flex-start;
-    }
+    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
     
-    .divider { color: #cbd5e1; margin: 0 2px; font-size: 10px; }
-    .rating { display: flex; align-items: center; gap: 2px; color: #475569; font-weight: 600; }
-    .star { color: #f59e0b; font-size: 11px; }
+    return products.slice(0, 21);
+}
 
-    .price {
-      font-size: 14px;
-      font-weight: 800;
-      color: #ef4444 !important; 
-      white-space: nowrap;
-      text-align: start;
-      height: 18px;
-      margin-bottom: 2px;
-      letter-spacing: -0.5px;
-      overflow: hidden;
-      text-overflow: ellipsis;
+function removeWidget() {
+    if (widgetWrapper) {
+        if (darkModeQueryRef && darkModeListenerRef) {
+            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
+            else darkModeQueryRef.removeListener(darkModeListenerRef);
+        }
+        darkModeQueryRef = null;
+        darkModeListenerRef = null;
+        widgetWrapper.remove();
+        widgetWrapper = null;
+        iframeContainer = null;
+        iframe = null;
+        sidebar = null;
+        alternativesBuffer = [];
+        alternativesDelivered = 0;
+        currentRoundDelivered = 0;
+        isFetchingAlternatives = false;
+        window._nezzerPendingRequest = false;
     }
+}
 
-    .shipping-row {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 10px;
-      color: #059669; 
-      font-weight: 600;
-      height: 14px;
-      margin-top: auto;
-      justify-content: flex-start;
-    }
+function deliverNextStep() {
+    if (!iframe || !iframe.contentWindow) return;
+    
+    if (currentRoundDelivered >= ROUND_SIZE) return;
+    if (alternativesDelivered >= alternativesBuffer.length) return;
+    
+    const remainingInRound = ROUND_SIZE - currentRoundDelivered;
+    const stepSize = Math.min(STEP_SIZE, remainingInRound);
+    const nextBatch = alternativesBuffer.slice(alternativesDelivered, alternativesDelivered + stepSize);
+    
+    if (nextBatch.length === 0) return;
+    
+    alternativesDelivered += nextBatch.length;
+    currentRoundDelivered += nextBatch.length;
+    
+    const hasMore = alternativesDelivered < alternativesBuffer.length || isFetchingAlternatives;
+    try { 
+        iframe.contentWindow.postMessage({ 
+            action: 'APPEND_LOCAL', 
+            products: nextBatch, 
+            hasMore: hasMore
+        }, '*'); 
+    } catch(e) {}
+}
 
-    .skeleton-shimmer {
-      background: #f1f5f9;
-      background-image: linear-gradient(to right, #f1f5f9 0%, #e2e8f0 20%, #f1f5f9 40%, #f1f5f9 100%);
-      background-repeat: no-repeat;
-      background-size: 800px 100%;
-      animation-duration: 1.5s;
-      animation-fill-mode: forwards;
-      animation-iteration-count: infinite;
-      animation-name: shimmer;
-      animation-timing-function: linear;
-      border-radius: 4px;
-    }
-    @keyframes shimmer {
-      0% { background-position: -468px 0; }
-      100% { background-position: 468px 0; }
-    }
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
 
-    .skeleton-card { 
-      display: flex; flex-direction: column; 
-      background: #fff; 
-      border: 1px solid #e2e8f0;
-      border-radius: 10px;
-      padding: 6px;
-    }
-    .skeleton-img { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; margin-bottom: 6px; } 
-    .skeleton-title { width: 100%; height: 12px; margin-bottom: 4px; }
-    .skeleton-title.short { width: 70%; margin-bottom: 6px; }
-    .skeleton-meta { width: 50%; height: 10px; margin-bottom: 2px; }
-    .skeleton-price { width: 40%; height: 14px; margin-bottom: 2px; }
-    .skeleton-shipping { width: 60%; height: 10px; }
+        const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
 
-    #loader-more { display: none; text-align: center; padding: 10px; color: #ef4444; font-weight: bold; font-size: 12px; }
-    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(239,68,68,0.3); border-top-color: #ef4444; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
+        const nezzerStyleId = 'nezzer-theme-styles';
+        if (!document.getElementById(nezzerStyleId)) {
+            const styleEl = document.createElement('style');
+            styleEl.id = nezzerStyleId;
+            styleEl.textContent = `
+                #nezzer-widget-wrapper {
+                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
+                    --nezzer-pill-border: #f1f5f9;
+                    --nezzer-btn-color: #64748b;
+                    --nezzer-drag-color: #64748b;
+                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
+                    --nezzer-drag-color-hover: #475569;
+                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
+                    --nezzer-iframe-bg: #ffffff;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
+                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
+                }
+                #nezzer-widget-wrapper.nezzer-dark {
+                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
+                    --nezzer-pill-border: #2a2a33;
+                    --nezzer-btn-color: #94a3b8;
+                    --nezzer-drag-color: #94a3b8;
+                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
+                    --nezzer-drag-color-hover: #cbd5e1;
+                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
+                    --nezzer-iframe-bg: #16161c;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
+                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
+                }
+                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
+                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
+                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
+            `;
+            document.head.appendChild(styleEl);
+        }
 
-    @media (prefers-color-scheme: dark) {
-      body {
-        background: #16161c !important;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #3a3a44;
-      }
-      .product-card {
-        background: #1e1e24 !important;
-        border-color: #2a2a33;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-      }
-      .product-card:hover {
-        box-shadow: 0 6px 12px rgba(0,0,0,0.5);
-        border-color: #3a3a44;
-      }
-      .img-box {
-        background: #25252c;
-      }
-      .title {
-        color: #e2e8f0;
-      }
-      .meta-row {
-        color: #94a3b8;
-      }
-      .divider {
-        color: #475569;
-      }
-      .rating {
-        color: #cbd5e1;
-      }
-      .star {
-        color: #fbbf24;
-      }
-      .price {
-        color: #f87171 !important;
-      }
-      .shipping-row {
-        color: #34d399;
-      }
-      .skeleton-shimmer {
-        background: #2a2a33;
-        background-image: linear-gradient(to right, #2a2a33 0%, #3a3a44 20%, #2a2a33 40%, #2a2a33 100%);
-      }
-      .skeleton-card {
-        background: #1e1e24;
-        border-color: #2a2a33;
-      }
-      #loader-more {
-        background: transparent;
-      }
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = isProductPage ? 'popular' : 'betterAlternatives';
+        let disclaimerEl = null;
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
+        darkModeListenerRef = () => {
+            if (!widgetWrapper) return;
+            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+        };
+        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
+        else darkModeQueryRef.addListener(darkModeListenerRef);
+        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
+            padding: 20px 6px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid var(--nezzer-pill-border); border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 60px;
+            width: 620px; max-width: 90vw; height: 98vh;
+            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
+            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden; z-index: 5;
+        `;
+
+        const siteLang = getSiteLang();
+
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.id = 'nezzer-drag-handle';
+        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
+        dragHandle.innerHTML = '⋮⋮';
+
+        function hideDisclaimer() {
+            if (!disclaimerEl) return;
+            const el = disclaimerEl;
+            el.style.opacity = '0';
+            setTimeout(() => {
+                if (el && el.parentNode) el.remove();
+                if (disclaimerEl === el) disclaimerEl = null;
+            }, 300);
+        }
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+                hideDisclaimer();
+            }
+        }
+
+        function showDisclaimer() {
+            if (disclaimerEl || !widgetWrapper) return;
+            const lang = getSiteLang();
+            const translations = window.NEZZER_DISCLAIMER_TRANSLATIONS || { 'en': { title: 'Nezzer is completely free!', body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links...', button: 'Got it, thanks' } };
+            const dis = translations[lang] || translations['en'];
+            const rtlLangs = ['ar', 'he', 'fa', 'ur'];
+            const isRtlLang = rtlLangs.includes(lang);
+            const isLeft = currentSide === 'left';
+
+            disclaimerEl = document.createElement('div');
+            disclaimerEl.id = 'nezzer-disclaimer';
+            disclaimerEl.setAttribute('dir', isRtlLang ? 'rtl' : 'ltr');
+            disclaimerEl.style.cssText = `position: absolute; top: 50%; ${isLeft ? 'left: 60px;' : 'right: 60px;'} width: 620px; max-width: 90vw; height: 98vh; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); border-radius: 16px; overflow: hidden; opacity: 0; transition: opacity 0.4s ease-out; pointer-events: auto; z-index: 20; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;`;
+            const card = document.createElement('div');
+            card.style.cssText = `width: 100%; max-width: 360px; background: var(--nezzer-pill-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); border: 1px solid var(--nezzer-pill-border); padding: 26px 22px; transform: scale(0.92); transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);`;
+            card.innerHTML = `
+                <div style="display: flex; justify-content: center; margin-bottom: 16px;">
+                    <div style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 8px 20px rgba(255,107,53,0.45);">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </div>
+                </div>
+                <div style="font-size: 16px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 10px; text-align: center; line-height: 1.3;">${dis.title}</div>
+                <div style="font-size: 13px; line-height: 1.6; color: var(--nezzer-btn-color); margin-bottom: 22px; text-align: center;">${dis.body}</div>
+                <button id="nezzer-disclaimer-btn" style="width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #ff6b35, #ff4747); color: white; border: none; border-radius: 12px; font-weight: 700; font-size: 13px; letter-spacing: 0.3px; cursor: pointer; transition: opacity 0.15s ease, transform 0.15s ease; font-family: inherit; box-shadow: 0 6px 16px rgba(255,107,53,0.35);">${dis.button}</button>
+            `;
+            disclaimerEl.appendChild(card);
+            widgetWrapper.appendChild(disclaimerEl);
+
+            requestAnimationFrame(() => { if (disclaimerEl) { disclaimerEl.style.opacity = '1'; card.style.transform = 'scale(1)'; } });
+            const btn = card.querySelector('#nezzer-disclaimer-btn');
+            if (btn) {
+                btn.onmouseenter = () => { btn.style.opacity = '0.92'; btn.style.transform = 'translateY(-1px)'; };
+                btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
+                btn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    try { chrome.storage.local.set({ nezzer_disclaimer_accepted: true }); } catch(e) {}
+                    hideDisclaimer();
+                };
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
+            btn.className = 'nezzer-sort-btn';
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+
+            btn.onmouseenter = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid #ff6b35'; btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)'; btn.style.color = '#ff6b35';
+                } else btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+            };
+            btn.onmouseleave = () => {
+                if (activeSort !== sortValue) {
+                    btn.style.border = '1px solid transparent'; btn.style.boxShadow = 'none'; btn.style.color = '';
+                } else btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
+            };
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                if (activeSort === sortValue && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
+
+                    togglePanel(true);
+
+                    try {
+                        if (sortValue === 'betterAlternatives') {
+                            if (isFetchingAlternatives) return;
+
+                            const scraped = scanPageForProducts(false, true);
+                            if (scraped === 'CAPTCHA') {
+                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                            } else if (scraped.length === 0) {
+                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
+                            } else {
+                                isFetchingAlternatives = true;
+                                alternativesBuffer = [];
+                                alternativesDelivered = 0;
+                                currentRoundDelivered = 0;
+                                window._nezzerPendingRequest = false;
+                                try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
+                                
+                                const top21 = scraped.slice(0, 21);
+                                const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
+                                
+                                chrome.runtime.sendMessage({ 
+                                    action: 'FETCH_ALTERNATIVES', 
+                                    products: top21,
+                                    domain: domain
+                                });
+                            }
+                        } else {
+                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                        }
+
+                        if (chrome.runtime && chrome.runtime.id) {
+                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                                if (chrome.runtime.lastError) return;
+                                if (!result || !result.nezzer_disclaimer_accepted) {
+                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                                }
+                            });
+                        }
+                    } catch(err) {
+                        console.error("Nezzer Scan Error:", err);
+                    }
+                }
+            };
+            return btn;
+        };
+
+        let btnTop, btnMiddle, btnBottom;
+        if (isProductPage) {
+            btnTop = createSortBtn(t('rating'), 'rating');
+            btnMiddle = createSortBtn(t('popular'), 'popular');
+            btnBottom = createSortBtn(t('cheapest'), 'cheapest');
+            activeSort = 'popular';
+            btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
+        } else {
+            btnTop = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+            btnMiddle = null;
+            btnBottom = null;
+            activeSort = 'betterAlternatives';
+            btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnTop.style.color = 'white'; btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
+        }
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnTop);
+        if (btnMiddle) pillContainer.appendChild(btnMiddle);
+        if (btnBottom) pillContainer.appendChild(btnBottom);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            if (e.button !== 0) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            if (disclaimerEl && disclaimerEl.contains(e.target)) return;
+            togglePanel(false);
+        });
+
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen) togglePanel(false); });
+
+        let scrollAccumulated = 0;
+        let scrollResetTimer = null;
+        window.addEventListener('wheel', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
+            if (disclaimerEl && disclaimerEl.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
+            scrollAccumulated += Math.abs(e.deltaY);
+            clearTimeout(scrollResetTimer);
+            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
+            if (scrollAccumulated >= 150) { togglePanel(false); scrollAccumulated = 0; clearTimeout(scrollResetTimer); }
+        }, { passive: true });
+
+        window.addEventListener('message', (event) => {
+            if (!event.data) return;
+            
+            if (event.data.action === 'REQUEST_MORE_ALTERNATIVES') {
+                if (currentRoundDelivered >= ROUND_SIZE) {
+                    currentRoundDelivered = 0;
+                }
+                
+                if (alternativesDelivered < alternativesBuffer.length) {
+                    deliverNextStep();
+                } else if (!isFetchingAlternatives) {
+                    try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {}
+                } else {
+                    window._nezzerPendingRequest = true;
+                }
+            }
+        });
+
+        function setSide(side) {
+            currentSide = side;
+            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
+                if (side === 'left') btn.style.transform = 'rotate(180deg)';
+                else btn.style.transform = 'rotate(0deg)';
+            });
+            if (side === 'right') {
+                sidebar.style.right = '0'; sidebar.style.left = 'auto';
+                pillContainer.style.borderRadius = '40px 0 0 40px';
+                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                if (disclaimerEl) { disclaimerEl.style.left = 'auto'; disclaimerEl.style.right = '60px'; }
+            } else {
+                sidebar.style.left = '0'; sidebar.style.right = 'auto';
+                pillContainer.style.borderRadius = '0 40px 40px 0';
+                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
+                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
+                iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto';
+                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                if (disclaimerEl) { disclaimerEl.style.right = 'auto'; disclaimerEl.style.left = '60px'; }
+            }
+        }
+
+        let isDragging = false;
+        dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); }
+            else { if (currentSide !== 'right') setSide('right'); }
+        });
+        window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
+
+    } catch(err) {
+        console.error("Nezzer Error:", err);
     }
-  </style>
-</head>
-<body>
-  <div id="results">
-    <div class="grid" id="main-grid"></div>
-    <div id="loader-more"><span class="spinner"></span></div>
-  </div>
-  <script src="panel.js"></script>
-</body>
-</html>
+}
+
+injectWidget();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.action === 'ALTERNATIVE_PROGRESS') {
+        try { if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ action: 'UPDATE_PROGRESS', current: msg.current, total: msg.total }, '*'); } catch(e) {}
+    }
+    if (msg.action === 'ALTERNATIVE_BATCH') {
+        alternativesBuffer = alternativesBuffer.concat(msg.alternatives || []);
+        deliverNextStep();
+    }
+    if (msg.action === 'ALTERNATIVES_FINISHED') {
+        isFetchingAlternatives = false;
+        
+        if (window._nezzerPendingRequest) {
+            window._nezzerPendingRequest = false;
+            if (alternativesDelivered < alternativesBuffer.length) {
+                deliverNextStep();
+            } else {
+                try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {}
+            }
+        } else {
+            try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: alternativesBuffer.length - alternativesDelivered }, '*'); } catch(e) {}
+        }
+    }
+});
