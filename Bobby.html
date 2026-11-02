@@ -89,93 +89,78 @@ function shuffleArray(array) {
     return array;
 }
 
+// الكود المستقر والأصلي للكشط
 function scanPageForProducts(sortByPopular = false, randomize = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
 
     let products = [];
     const seen = new Set();
-    
-    // العناصر التي قد تحتوي على روابط منتجات أو صور
-    const productElements = document.querySelectorAll('a, [data-product-id], [data-item-id], [data-id]');
-    
-    for (const el of productElements) {
+    const links = document.querySelectorAll('a[href*="/item/"]');
+
+    for (const link of links) {
         try {
-            let pid = el.getAttribute('data-product-id') || el.getAttribute('data-item-id') || el.getAttribute('data-id');
-            let href = el.href || el.getAttribute('data-href') || '';
-            
-            // إذا لم يوجد في الداتا، نبحث في الرابط
-            if (!pid && href) {
-                const match = href.match(/(?:\/item\/|\/i\/|productId=|itemId=)(\d{8,})/i);
-                if (match) pid = match[1];
-            }
-            
-            // التحقق من أن الـ ID عبارة عن رقم صحيح للمنتج
-            if (!pid || isNaN(parseInt(pid)) || pid.length < 8) continue;
+            const match = link.href.match(/\/item\/(\d+)\.html/);
+            if (!match) continue;
+            const pid = match[1];
             if (seen.has(pid)) continue;
 
-            // البحث عن الصورة (قد تكون في العنصر نفسه أو العنصر الأب)
             let img = '';
-            let imgEl = el.querySelector('img') || el.parentElement?.querySelector('img');
-            
-            if (imgEl) {
-                let src = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.getAttribute('srcset') || imgEl.getAttribute('data-lazy-src') || '';
+            const imgEls = link.querySelectorAll('img');
+            for (let el of imgEls) {
+                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
                 if (src.startsWith('//')) src = 'https:' + src;
-                if (src && (src.includes('alicdn.com') || src.includes('.jpg') || src.includes('.webp') || src.includes('.png'))) {
-                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo') && !src.includes('icon')) {
+                if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
+                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
                         img = src.split(' ')[0].split(',')[0];
+                        break;
                     }
                 }
             }
-            
-            // إذا لم توجد صورة، قد تكون خلفية CSS
             if (!img) {
-                const bgDiv = el.querySelector('[style*="background-image"]') || el.parentElement?.querySelector('[style*="background-image"]');
-                if (bgDiv) {
-                    const bgMatch = (bgDiv.getAttribute('style') || '').match(/url\(["']?([^"')]+)["']?\)/);
-                    if (bgMatch && bgMatch[1]) img = bgMatch[1].startsWith('//') ? 'https:' + bgMatch[1] : bgMatch[1];
+                const firstImg = link.querySelector('img');
+                if (firstImg) {
+                    img = firstImg.src || firstImg.getAttribute('data-src') || '';
+                    if (img.startsWith('//')) img = 'https:' + img;
                 }
             }
             if (!img) continue;
 
-            // استخراج العنوان
-            let title = el.getAttribute('title') || '';
-            if (!title && el.innerText) {
-                title = el.innerText.split('\n').find(line => line.trim().length > 10) || '';
+            let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
+            if (!title || title.length < 5) {
+                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
             }
-            if (!title) {
-                title = el.querySelector('img')?.getAttribute('alt') || '';
-            }
-            if (!title || title.length < 5) continue;
+            if (!title) continue;
             title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
-            // استخراج السعر
             let price = '—';
-            const text = el.innerText || el.parentElement?.innerText || '';
-            const priceEl = el.querySelector('[class*="price"], [class*="Price"]') || el.parentElement?.querySelector('[class*="price"], [class*="Price"]');
+            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
             if (priceEl) {
                 const pText = priceEl.innerText.trim().split('\n')[0];
                 if (pText.match(/\d/)) price = pText;
             }
             if (price === '—') {
-                const priceMatch = text.match(/(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)\s*(\d+(?:[.,]\d+)?)/i) 
-                    || text.match(/(\d+(?:[.,]\d+)?)\s*(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)/i);
+                const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
                 if (priceMatch) price = priceMatch[0];
             }
 
-            // استخراج المبيعات
             let soldCount = 0;
-            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kKmM]?)\s*\+?\s*(?:sold|vendus|vendido|مباع|продано|verkauft|venduti|vendidos|pedidos|ventas)/i);
+            const text = link.innerText;
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
             if (soldMatch) {
                 let numStr = soldMatch[1].toLowerCase().replace(',', '.');
-                if (numStr.includes('k')) soldCount = parseFloat(numStr) * 1000;
-                else if (numStr.includes('m')) soldCount = parseFloat(numStr) * 1000000;
-                else soldCount = parseFloat(numStr);
+                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+            } else {
+                const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
+                if (tradeEl) {
+                    const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
+                    if (sMatch) {
+                        let numStr = sMatch[1].toLowerCase().replace(',', '.');
+                        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+                    }
+                }
             }
 
-            const isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費|envio gratis/i.test(text);
-
-            // إنشاء رابط المنتج في حال كان الـ href فارغاً
-            const finalUrl = href || `https://www.aliexpress.com/item/${pid}.html`;
+            let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
 
             seen.add(pid);
             products.push({
@@ -187,7 +172,7 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                 trade: { realTradeCount: soldCount },
                 _isLocal: true,
                 _isFreeShipping: isFreeShipping,
-                url: finalUrl
+                url: link.href
             });
         } catch (e) {
             console.warn("Nezzer: Skipped a product due to parsing error", e);
@@ -451,49 +436,47 @@ function injectWidget() {
 
                     togglePanel(true);
 
-                    setTimeout(() => {
-                        try {
-                            if (sortValue === 'betterAlternatives') {
-                                if (isFetchingAlternatives) return;
+                    try {
+                        if (sortValue === 'betterAlternatives') {
+                            if (isFetchingAlternatives) return;
 
-                                const scraped = scanPageForProducts(false, true);
-                                if (scraped === 'CAPTCHA') {
-                                    try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                                } else if (scraped.length === 0) {
-                                    try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
-                                } else {
-                                    isFetchingAlternatives = true;
-                                    alternativesBuffer = [];
-                                    alternativesDelivered = 0;
-                                    currentRoundDelivered = 0;
-                                    currentRoundTarget = FIRST_ROUND_SIZE;
-                                    window._nezzerPendingRequest = false;
-                                    try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
-                                    
-                                    const top21 = scraped.slice(0, 21);
-                                    const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
-                                    
-                                    chrome.runtime.sendMessage({ 
-                                        action: 'FETCH_ALTERNATIVES', 
-                                        products: top21,
-                                        domain: domain
-                                    });
-                                }
+                            const scraped = scanPageForProducts(false, true);
+                            if (scraped === 'CAPTCHA') {
+                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                            } else if (scraped.length === 0) {
+                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
                             } else {
-                                try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                                isFetchingAlternatives = true;
+                                alternativesBuffer = [];
+                                alternativesDelivered = 0;
+                                currentRoundDelivered = 0;
+                                currentRoundTarget = FIRST_ROUND_SIZE;
+                                window._nezzerPendingRequest = false;
+                                try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
+                                
+                                const top21 = scraped.slice(0, 21);
+                                const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
+                                
+                                chrome.runtime.sendMessage({ 
+                                    action: 'FETCH_ALTERNATIVES', 
+                                    products: top21,
+                                    domain: domain
+                                });
                             }
-                        } catch(err) {
-                            console.error("Nezzer Scan Error:", err);
+                        } else {
+                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
                         }
-                    }, 300);
 
-                    if (chrome.runtime && chrome.runtime.id) {
-                        chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                            if (chrome.runtime.lastError) return;
-                            if (!result || !result.nezzer_disclaimer_accepted) {
-                                setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
-                            }
-                        });
+                        if (chrome.runtime && chrome.runtime.id) {
+                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                                if (chrome.runtime.lastError) return;
+                                if (!result || !result.nezzer_disclaimer_accepted) {
+                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                                }
+                            });
+                        }
+                    } catch(err) {
+                        console.error("Nezzer Scan Error:", err);
                     }
                 }
             };
