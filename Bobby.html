@@ -1,134 +1,37 @@
-/* Nezzer History panel — Per-Card Skeleton Wave */
-
-const grid = document.getElementById('grid');
-const currentCards = new Map();
-const ALLOWED_ORIGIN = /^https:\/\/([a-z0-9-]+\.)*aliexpress\.com$/i;
-
-function createCardEl() {
-  const card = document.createElement('a');
-  card.className = 'product-card';
-  card.target = '_blank';
-  card.rel = 'noopener noreferrer';
-
-  const imgBox = document.createElement('div');
-  imgBox.className = 'img-box';
-  
-  // 1. طبقة النبض (تظهر دائماً في الخلفية حتى تُحمّل الصورة)
-  const skeleton = document.createElement('div');
-  skeleton.className = 'skeleton-wave';
-
-  // 2. الصورة (تبدأ شفافة تماماً)
-  const img = document.createElement('img');
-  img.style.opacity = '0'; 
-  img.style.transition = 'opacity 0.3s ease';
-  img.loading = 'lazy';
-  
-  // عند اكتمال تحميل الصورة من السيرفر، نظهرها برفق
-  img.onload = () => {
-    img.style.opacity = '1';
-  };
-  
-  // في حال فشل التحميل (مثلاً الرابط مكسور)، نضع صورة بيضاء فارغة ونظهرها
-  img.onerror = () => {
-    img.onerror = null;
-    img.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect fill="%23f1f5f9" width="100" height="100"/></svg>';
-    img.style.opacity = '1';
-  };
-
-  imgBox.append(skeleton, img);
-
-  const info = document.createElement('div');
-  info.className = 'info';
-  const title = document.createElement('div');
-  title.className = 'title';
-  const price = document.createElement('div');
-  price.className = 'price';
-  info.append(title, price);
-
-  card.append(imgBox, info);
-  
-  // حفظ المراجع لتحديثها لاحقاً دون إعادة بناء البطاقة
-  card._img = img;
-  card._title = title;
-  card._price = price;
-  return card;
-}
-
-function updateCardEl(card, item) {
-  let href = '#';
-  try {
-    const u = new URL(item.url);
-    if (u.protocol === 'https:' || u.protocol === 'http:') href = item.url;
-  } catch (e) {}
-  
-  card.href = href;
-  card._title.textContent = item.title || '';
-  card._price.textContent = item.price || '—';
-
-  let imgSrc = item.img || '';
-  if (imgSrc.startsWith('//')) imgSrc = 'https:' + imgSrc;
-
-  // إذا تغير رابط الصورة أو كان جديداً، أعد تحميلها
-  if (imgSrc && card._img.getAttribute('src') !== imgSrc) {
-    card._img.style.opacity = '0'; // إخفاء الصورة الحالية (بينما يظهر النبض)
-    card._img.src = imgSrc; // بدء التحميل الجديد
-  } else if (!imgSrc) {
-    card._img.style.opacity = '0'; // لا توجد صورة، أبقِ النبض ظاهراً
-  }
-}
-
-function renderCards(products) {
-  if (!products || !products.length) {
-    grid.innerHTML = '<div class="empty">No products found.</div>';
-    currentCards.clear();
-    return;
-  }
-
-  const empty = grid.querySelector('.empty');
-  if (empty) empty.remove();
-
-  const seen = new Set();
-  const frag = document.createDocumentFragment();
-
-  for (const item of products) {
-    if (!item || !item.productId) continue;
-    seen.add(item.productId);
-
-    // بصمة للتحقق مما إذا تغيرت بيانات البطاقة
-    const fp = item.productId + '|' + (item.price || '') + '|' + (item.title || '') + '|' + (item.img || '');
-    const existing = currentCards.get(item.productId);
-
-    if (existing && existing.fp === fp) {
-      frag.appendChild(existing.el); // لم يتغير شيء، أعد استخدام البطاقة
-    } else {
-      const card = existing ? existing.el : createCardEl();
-      updateCardEl(card, item);
-      currentCards.set(item.productId, { el: card, fp });
-      frag.appendChild(card);
+{
+  "manifest_version": 3,
+  "name": "__MSG_appName__",
+  "description": "__MSG_appDesc__",
+  "default_locale": "en",
+  "version": "1.0.4",
+  "minimum_chrome_version": "102",
+  "permissions": ["storage", "scripting", "tabs", "cookies"],
+  "host_permissions": [
+    "*://*.aliexpress.com/*",
+    "*://*.aliexpress.us/*",
+    "*://*.aliexpress.ru/*",
+    "https://smart-shopper-proxy.fislilouiza91.workers.dev/*"
+  ],
+  "background": {
+    "service_worker": "background/engine.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"],
+      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
+      "run_at": "document_idle"
     }
-  }
-
-  // إزالة البطاقات التي لم تعد موجودة
-  for (const id of Array.from(currentCards.keys())) {
-    if (!seen.has(id)) currentCards.delete(id);
-  }
-
-  grid.replaceChildren(frag);
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["panel/panel.html", "panel/panel.js"],
+      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": { "128": "assets/icons/icon128.png" }
+  },
+  "icons": { "128": "assets/icons/icon128.png" }
 }
-
-// الاستماع للرسائل القادمة من content.js
-window.addEventListener('message', (event) => {
-  if (!ALLOWED_ORIGIN.test(event.origin)) return;
-  const data = event.data;
-  if (!data || typeof data !== 'object') return;
-
-  if (data.action === 'RENDER_DATA') {
-    renderCards(data.products);
-  } else if (data.action === 'RENDER_LOADING') {
-    grid.innerHTML = '<div class="empty">⏳ Scanning in background...</div>';
-    currentCards.clear();
-  } else if (data.action === 'CAPTCHA_FOUND') {
-    grid.innerHTML = '<div class="empty" style="color:#ef4444;">⚠️ AliExpress is checking your browser (CAPTCHA).<br>Please solve it on the page first.</div>';
-    currentCards.clear();
-  }
-});
