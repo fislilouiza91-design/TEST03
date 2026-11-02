@@ -1,408 +1,81 @@
-/* Nezzer History Test — Auto-Scan & Cache System */
-
-const MD5_S = new Uint8Array([7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22, 5,9,14,20, 5,9,14,20, 5,9,14,20, 5,9,14,20, 4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23, 6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21]);
-const MD5_K = new Uint32Array(64);
-for (let i = 0; i < 64; i++) MD5_K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
-const _md5_enc = new TextEncoder();
-function md5(str) {
-  const bytes = _md5_enc.encode(str), len = bytes.length, bitLen = len * 8;
-  const blocks = ((len + 8) >> 6) + 1;
-  const w = new Uint32Array(blocks * 16);
-  for (let i = 0; i < len; i++) w[i >> 2] |= bytes[i] << ((i & 3) << 3);
-  w[len >> 2] |= 0x80 << ((len & 3) << 3); w[blocks * 16 - 2] = bitLen >>> 0; w[blocks * 16 - 1] = Math.floor(bitLen / 0x100000000) >>> 0;
-  let A0 = 0x67452301, B0 = 0xefcdab89, C0 = 0x98badcfe, D0 = 0x10325476;
-  for (let i = 0, wl = blocks * 16; i < wl; i += 16) {
-    let A = A0, B = B0, C = C0, D = D0;
-    for (let j = 0; j < 64; j++) {
-      let F, g;
-      if (j < 16) { F = (B & C) | (~B & D); g = j; } else if (j < 32) { F = (D & B) | (~D & C); g = (5 * j + 1) & 15; } else if (j < 48) { F = B ^ C ^ D; g = (3 * j + 5) & 15; } else { F = C ^ (B | ~D); g = (7 * j) & 15; }
-      F = (F + A + MD5_K[j] + w[i + g]) | 0; A = D; D = C; C = B; const s = MD5_S[j]; B = (B + ((F << s) | (F >>> (32 - s)))) | 0;
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 100%; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: #f8fafc !important; display: flex; flex-direction: column; overflow: hidden;
     }
-    A0 = (A0 + A) | 0; B0 = (B0 + B) | 0; C0 = (C0 + C) | 0; D0 = (D0 + D) | 0;
-  }
-  const out = new Uint8Array(16), vals = [A0, B0, C0, D0];
-  for (let i = 0; i < 4; i++) { const v = vals[i]; out[i*4] = v & 0xff; out[i*4+1] = (v>>>8)&0xff; out[i*4+2] = (v>>>16)&0xff; out[i*4+3] = (v>>>24)&0xff; }
-  let hex = ''; for (let i = 0; i < 16; i++) hex += out[i].toString(16).padStart(2, '0'); return hex;
-}
-
-/* ============================================================
- *  Cache Layer
- * ============================================================ */
-const CACHE_PREFIX = 'nz_cache_v7_'; 
-const CACHE_TTL = 30 * 60 * 1000; // 30 دقيقة
-
-let _memCache = null;
-let isAutoScanning = false;
-let pageUrlHash = '';
-
-function cacheKey(sortValue) { return CACHE_PREFIX + md5(location.href.split('?')[0] + '|' + sortValue); }
-function getStoredCache(sortValue) {
-  return new Promise(resolve => {
-    const key = cacheKey(sortValue);
-    chrome.storage.local.get([key], r => {
-      const e = r[key];
-      resolve(e && (Date.now() - e.timestamp < CACHE_TTL) ? e : null);
-    });
-  });
-}
-function setStoredCache(sortValue, products) {
-  const key = cacheKey(sortValue);
-  chrome.storage.local.set({ [key]: { products, timestamp: Date.now() } });
-}
-
-/* ============================================================
- *  Widget state & Messaging
- * ============================================================ */
-let widgetWrapper = null, iframeContainer = null, iframe = null, sidebar = null;
-let iframeReady = false, pendingMessages = [];
-
-function postToIframe(msg) {
-  if (iframeReady && iframe && iframe.contentWindow) {
-    try { iframe.contentWindow.postMessage(msg, '*'); } catch (e) { pendingMessages.push(msg); }
-  } else { pendingMessages.push(msg); }
-}
-
-/* ============================================================
- *  Scraping & Image Extraction
- * ============================================================ */
-function extractImageUrl(link) {
-  const imgs = link.querySelectorAll('img');
-  for (const img of imgs) {
-    let src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original') || img.getAttribute('src');
-    if (src && src.startsWith('//')) src = 'https:' + src;
-    if (src && !src.startsWith('data:image') && !src.includes('11.11') && !src.includes('choice') && !src.includes('placeholder') && !src.includes('.gif')) return src;
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    #results { flex: 1; overflow-y: auto; padding: 10px 12px; width: 100%; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
     
-    const srcset = img.getAttribute('srcset');
-    if (srcset) {
-      for (let part of srcset.split(',')) {
-        let candidate = part.trim().split(' ')[0];
-        if (candidate && candidate.startsWith('//')) candidate = 'https:' + candidate;
-        if (candidate && !candidate.startsWith('data:image') && !candidate.includes('11.11') && !candidate.includes('choice')) return candidate;
-      }
+    .product-card {
+      display: flex; flex-direction: column; text-decoration: none; color: inherit;
+      background: #ffffff !important; border: 1px solid #e2e8f0; border-radius: 10px;
+      padding: 6px; width: 100%; height: 100%;
+      transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
     }
-  }
-  const elementsWithBg = [link, ...link.querySelectorAll('div, span')];
-  for (const el of elementsWithBg) {
-    const bg = el.style.backgroundImage || window.getComputedStyle(el).backgroundImage;
-    if (bg && bg.includes('url(')) {
-      let url = bg.slice(5, -2).replace(/['"]/g, '');
-      if (url.startsWith('//')) url = 'https:' + url;
-      if (url && !url.includes('11.11') && !url.includes('choice') && !url.includes('data:image')) return url;
+    .product-card:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.08); border-color: #cbd5e1; }
+    
+    .img-box {
+      position: relative; width: 100%; aspect-ratio: 1 / 1; background: #f1f5f9; border-radius: 6px;
+      margin-bottom: 6px; display: flex; align-items: center; justify-content: center; overflow: hidden;
     }
-  }
-  return '';
-}
+    .img-box img { width: 100%; height: 100%; object-fit: cover; position: absolute; top: 0; left: 0; z-index: 2; }
+    
+    .info { display: flex; flex-direction: column; width: 100%; flex: 1; padding: 0 2px; }
+    .title {
+      font-size: 11px; color: #1e293b; font-weight: 500; line-height: 1.25;
+      height: 28px; overflow: hidden; display: -webkit-box;
+      -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-bottom: 4px;
+    }
+    .price {
+      font-size: 14px; font-weight: 800; color: #ef4444 !important;
+      white-space: nowrap; height: 18px; letter-spacing: -0.5px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .empty { text-align: center; color: #64748b; padding: 20px; grid-column: 1/-1; font-size: 14px; }
 
-function scanPageForProducts() {
-  const pageTitle = document.title.toLowerCase();
-  if (pageTitle.includes('security') || pageTitle.includes('captcha')) return 'CAPTCHA';
-
-  let products = [];
-  const seen = new Set();
-  const links = document.querySelectorAll('a[href*="/item/"]');
-
-  for (const link of links) {
-    const match = link.href.match(/\/item\/(\d+)\.html?/);
-    if (!match || seen.has(match[1])) continue;
-    const pid = match[1];
-    let img = extractImageUrl(link);
-    let title = link.getAttribute('title') || link.querySelector('h3')?.innerText || link.innerText.split('\n')[0];
-    if (!title || title.trim() === '') continue;
-    title = title.replace(/\n/g, ' ').substring(0, 60);
-
-    let price = '—';
-    const priceMatch = link.innerText.match(/(?:€|\$|£|руб|R\$)\s?[\d.,]+|[\d.,]+\s?(?:€|\$|£|руб|R\$)/);
-    if (priceMatch) price = priceMatch[0];
-
-    let soldCount = 0;
-    const soldMatch = link.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti)/i);
-    if (soldMatch) {
-      let numStr = soldMatch[1].toLowerCase();
-      soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr.replace(',', '.'));
+    /* ===== Skeleton Wave (النبض الواضح جداً) ===== */
+    .skeleton-wave {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
+      background: #e2e8f0;
+      background-image: linear-gradient(90deg, #e2e8f0 0px, #f8fafc 40px, #e2e8f0 80px);
+      background-size: 200px 100%;
+      animation: wave 1.5s infinite linear;
+    }
+    @keyframes wave {
+      0% { background-position: -200px 0; }
+      100% { background-position: 200px 0; }
     }
 
-    seen.add(pid);
-    products.push({ productId: pid, title, img, url: link.href, price, soldCount });
-  }
-  return products.slice(0, 40); // زيادة العدد قليلاً لجلب منتجات أكثر
-}
-
-/* ============================================================
- *  Auto Scan (يحدث في الخلفية بمجرد فتح الصفحة)
- * ============================================================ */
-async function triggerAutoScan() {
-  if (isAutoScanning) return;
-  isAutoScanning = true;
-  
-  // 1. مسح سريع (بدون تمرير) لجلب العناوين والأسعار فوراً
-  let initial = scanPageForProducts();
-  if (initial === 'CAPTCHA') { isAutoScanning = false; return; }
-  
-  let pageProducts = initial;
-  let popularProducts = [...initial].sort((a, b) => b.soldCount - a.soldCount);
-
-  // 2. تمرير خفي لتحميل الصور
-  let scrollContainer = document.scrollingElement || document.documentElement;
-  let maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-  const divs = document.querySelectorAll('div');
-  for (const div of divs) {
-      const style = window.getComputedStyle(div);
-      if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && div.scrollHeight > div.clientHeight && div.clientHeight > window.innerHeight * 0.5) {
-          scrollContainer = div; maxScroll = div.scrollHeight; break;
-      }
-  }
-
-  const originalScrollY = window.scrollY;
-  let currentScroll = 0;
-  
-  await new Promise(resolve => {
-      let steps = 0;
-      const intv = setInterval(() => {
-          currentScroll += 700; steps++;
-          if (scrollContainer === document.scrollingElement || scrollContainer === document.documentElement || scrollContainer === document.body) window.scrollTo(0, currentScroll);
-          else scrollContainer.scrollTop = currentScroll;
-
-          if (currentScroll >= maxScroll || steps > 15) {
-              clearInterval(intv);
-              setTimeout(() => {
-                  if (scrollContainer === document.scrollingElement || scrollContainer === document.documentElement || scrollContainer === document.body) window.scrollTo(0, originalScrollY);
-                  else scrollContainer.scrollTop = 0;
-                  resolve();
-              }, 2000); // انتظار 2 ثانية لتحميل الصور بعد التمرير
-          }
-      }, 80);
-  });
-
-  // 3. مسح نهائي بعد تحميل الصور
-  let finalProducts = scanPageForProducts();
-  if (finalProducts !== 'CAPTCHA' && finalProducts.length > 0) {
-      pageProducts = finalProducts;
-      popularProducts = [...finalProducts].sort((a, b) => b.soldCount - a.soldCount);
+    @media (prefers-color-scheme: dark) {
+      body { background: #16161c !important; }
+      ::-webkit-scrollbar-thumb { background: #3a3a44; }
+      .product-card { background: #1e1e24 !important; border-color: #2a2a33; }
+      .product-card:hover { border-color: #3a3a44; box-shadow: 0 6px 12px rgba(0,0,0,0.5); }
+      .img-box { background: #25252c; }
+      .title { color: #e2e8f0; }
+      .price { color: #f87171 !important; }
+      .empty { color: #94a3b8; }
       
-      setStoredCache('page', pageProducts);
-      setStoredCache('popular', popularProducts);
-      
-      _memCache = { page: pageProducts, popular: popularProducts };
-      
-      // إذا كانت النافذة مفتوحة، حدث البيانات الحية
-      if (widgetWrapper) postToIframe({ action: 'RENDER_DATA', products: activeSort === 'popular' ? popularProducts : pageProducts });
-  }
-  
-  isAutoScanning = false;
-}
-
-/* ============================================================
- *  Widget injection
- * ============================================================ */
-let activeSort = 'page'; // متغير عام لمعرفة الزر النشط
-
-function injectWidget() {
-  if (widgetWrapper || document.getElementById('nezzer-test-wrapper')) return;
-
-  const styleId = 'nezzer-theme-styles';
-  if (!document.getElementById(styleId)) {
-    const styleEl = document.createElement('style');
-    styleEl.id = styleId;
-    styleEl.textContent = `
-      #nezzer-test-wrapper {
-        --nezzer-pill-bg: rgba(255, 255, 255, 0.95); --nezzer-pill-border: #f1f5f9;
-        --nezzer-btn-color: #64748b; --nezzer-drag-color: #64748b;
-        --nezzer-drag-bg: rgba(100, 116, 139, 0.08); --nezzer-drag-color-hover: #475569;
-        --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18); --nezzer-iframe-bg: #ffffff;
-        --nezzer-side-shadow: rgba(0, 0, 0, 0.1); --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
+      /* Skeleton Dark Mode */
+      .skeleton-wave {
+        background: #2a2a33;
+        background-image: linear-gradient(90deg, #2a2a33 0px, #3a3a44 40px, #2a2a33 80px);
+        background-size: 200px 100%;
+        animation: wave 1.5s infinite linear;
       }
-      #nezzer-test-wrapper.nezzer-dark {
-        --nezzer-pill-bg: rgba(22, 22, 28, 0.92); --nezzer-pill-border: #2a2a33;
-        --nezzer-btn-color: #94a3b8; --nezzer-drag-color: #94a3b8;
-        --nezzer-drag-bg: rgba(148, 163, 184, 0.1); --nezzer-drag-color-hover: #cbd5e1;
-        --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22); --nezzer-iframe-bg: #16161c;
-        --nezzer-side-shadow: rgba(0, 0, 0, 0.5); --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
-      }
-      #nezzer-test-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
-      #nezzer-test-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
-      #nezzer-test-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
-    `;
-    document.head.appendChild(styleEl);
-  }
-
-  let isOpen = false;
-  let currentSide = 'left';
-
-  widgetWrapper = document.createElement('div');
-  widgetWrapper.id = 'nezzer-test-wrapper';
-  widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 999999;`;
-  if (window.matchMedia('(prefers-color-scheme: dark)').matches) widgetWrapper.classList.add('nezzer-dark');
-
-  sidebar = document.createElement('div');
-  sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
-
-  const pillContainer = document.createElement('div');
-  pillContainer.style.cssText = `background: var(--nezzer-pill-bg); backdrop-filter: blur(10px); padding: 20px 6px; border-radius: 0 40px 40px 0; box-shadow: 5px 0 20px var(--nezzer-side-shadow); display: flex; flex-direction: column; align-items: center; gap: 15px; pointer-events: auto; transition: all 0.3s ease; border: 1px solid var(--nezzer-pill-border); border-left: none;`;
-
-  iframeContainer = document.createElement('div');
-  iframeContainer.style.cssText = `position: absolute; top: 50%; left: 60px; width: 620px; max-width: 90vw; height: 98vh; background: var(--nezzer-iframe-bg) !important; border-radius: 16px; box-shadow: 12px 0 40px var(--nezzer-panel-shadow); transform: translateY(-50%) translateX(-105%); opacity: 0; pointer-events: none; visibility: hidden; transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s; display: flex; overflow: hidden; z-index: 5;`;
-
-  iframe = document.createElement('iframe');
-  iframe.src = chrome.runtime.getURL('panel-history.html');
-  iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
-  iframeContainer.appendChild(iframe);
-
-  iframeReady = false; pendingMessages = [];
-  iframe.onload = () => {
-    iframeReady = true;
-    const q = pendingMessages.slice(); pendingMessages = [];
-    for (const msg of q) { try { iframe.contentWindow.postMessage(msg, '*'); } catch (e) {} }
-  };
-
-  const dragHandle = document.createElement('div');
-  dragHandle.id = 'nezzer-drag-handle';
-  dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
-  dragHandle.innerHTML = '⋮⋮';
-
-  function togglePanel(forceOpen = null) {
-    if (forceOpen === true) isOpen = true; else if (forceOpen === false) isOpen = false; else isOpen = !isOpen;
-    if (isOpen) {
-      iframeContainer.style.visibility = 'visible'; iframeContainer.style.opacity = '1'; iframeContainer.style.transform = 'translateY(-50%) translateX(0)'; iframeContainer.style.pointerEvents = 'auto';
-    } else {
-      iframeContainer.style.opacity = '0'; iframeContainer.style.pointerEvents = 'none';
-      iframeContainer.style.transform = currentSide === 'right' ? 'translateY(-50%) translateX(105%)' : 'translateY(-50%) translateX(-105%)';
-      setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
     }
-  }
-
-  const createSortBtn = (text, sortValue) => {
-    const btn = document.createElement('div');
-    btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
-    btn.className = 'nezzer-sort-btn'; btn.innerText = text; btn.setAttribute('data-sort', sortValue);
-    if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
-
-    btn.onmouseenter = () => { if (activeSort !== sortValue) { btn.style.border = '1px solid #ff6b35'; btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)'; btn.style.color = '#ff6b35'; } else btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)'; };
-    btn.onmouseleave = () => { if (activeSort !== sortValue) { btn.style.border = '1px solid transparent'; btn.style.boxShadow = 'none'; btn.style.color = ''; } else btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; };
-
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      if (activeSort === sortValue && isOpen) { togglePanel(false); return; }
-
-      activeSort = sortValue;
-      pillContainer.querySelectorAll('div[data-sort]').forEach(b => { b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; });
-      btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btn.style.color = 'white'; btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)'; btn.style.border = '1px solid rgba(255,107,53,0.5)';
-      togglePanel(true);
-
-      if (sortValue === 'history') {
-        postToIframe({ action: 'RENDER_DATA', products: [] }); // مسح الشاشة
-        chrome.storage.local.get(['test_history'], r => { postToIframe({ action: 'RENDER_DATA', products: r.test_history || [] }); });
-        return;
-      }
-
-      // === هذا هو التغيير الجوهري: إذا كانت البيانات في الكاش، اعرضها فوراً بدون مسح ===
-      let cachedData = _memCache ? _memCache[sortValue] : null;
-      
-      if (!cachedData) {
-         // إذا لم يوجد كاش (أول مرة)، اقرأ من التخزين
-         const stored = await getStoredCache(sortValue);
-         if (stored && stored.products && stored.products.length > 0) {
-            cachedData = stored.products;
-            if (!_memCache) _memCache = {};
-            _memCache[sortValue] = cachedData;
-         }
-      }
-
-      if (cachedData && cachedData.length > 0) {
-        postToIframe({ action: 'RENDER_DATA', products: cachedData });
-      } else {
-        // إذا لم يوجد أي كاش إطلاقاً، أظهر النبض وانتظر المسح التلقائي
-        postToIframe({ action: 'RENDER_LOADING' });
-        // إرسال البيانات الأولية (بدون صور) إن وجدت
-        let initScan = scanPageForProducts();
-        if (initScan !== 'CAPTCHA') postToIframe({ action: 'RENDER_DATA', products: initScan });
-        
-        // انتظر حتى ينتهي المسح التلقائي (إن كان يعمل)
-        let waitIntv = setInterval(() => {
-           if (!isAutoScanning) {
-              clearInterval(waitIntv);
-              chrome.storage.local.get([cacheKey(sortValue)], r => {
-                 if (r[cacheKey(sortValue)]) postToIframe({ action: 'RENDER_DATA', products: r[cacheKey(sortValue)].products });
-              });
-           }
-        }, 500);
-      }
-    };
-    return btn;
-  };
-
-  const btnHistory = createSortBtn('🕒 History', 'history');
-  const btnPage = createSortBtn('🛍️ This Page', 'page');
-  const btnPopular = createSortBtn('🔥 Popular', 'popular');
-
-  activeSort = 'page';
-  btnPage.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnPage.style.color = 'white'; btnPage.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnPage.style.border = '1px solid rgba(255,107,53,0.5)';
-
-  pillContainer.appendChild(dragHandle); pillContainer.appendChild(btnHistory); pillContainer.appendChild(btnPage); pillContainer.appendChild(btnPopular);
-  sidebar.appendChild(pillContainer); widgetWrapper.appendChild(sidebar); widgetWrapper.appendChild(iframeContainer); document.body.appendChild(widgetWrapper);
-
-  window.addEventListener('mousedown', (e) => { if (!isOpen || e.button !== 0) return; if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return; togglePanel(false); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen) togglePanel(false); });
-
-  function setSide(side) {
-    currentSide = side;
-    pillContainer.querySelectorAll('div[data-sort]').forEach(b => { b.style.transform = side === 'left' ? 'rotate(180deg)' : 'rotate(0deg)'; });
-    if (side === 'right') {
-      sidebar.style.right = '0'; sidebar.style.left = 'auto'; pillContainer.style.borderRadius = '40px 0 0 40px'; pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)'; pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
-      iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto'; if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-    } else {
-      sidebar.style.left = '0'; sidebar.style.right = 'auto'; pillContainer.style.borderRadius = '0 40px 40px 0'; pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)'; pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
-      iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto'; if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-    }
-  }
-
-  let isDragging = false;
-  dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
-  window.addEventListener('mousemove', (e) => { if (!isDragging) return; if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); } else { if (currentSide !== 'right') setSide('right'); } });
-  window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
-
-  // بمجرد حقن الواجهة، نطلق المسح التلقائي في الخلفية
-  setTimeout(() => { triggerAutoScan(); }, 1000);
-}
-
-/* ============================================================
- *  Lifecycle
- * ============================================================ */
-function removeWidget() {
-  if (widgetWrapper) { widgetWrapper.remove(); widgetWrapper = null; iframeContainer = null; iframe = null; sidebar = null; iframeReady = false; pendingMessages = []; }
-}
-
-function saveProductToHistory() {
-  const urlParams = window.location.href.match(/\/item\/(\d+)\.html?/);
-  if (!urlParams) return;
-  const productId = urlParams[1];
-  const title = document.querySelector('meta[property="og:title"]')?.content || document.title;
-  const img = document.querySelector('meta[property="og:image"]')?.content || '';
-  const url = window.location.href.split('?')[0];
-  let price = '—';
-  const priceEl = document.querySelector('.product-price-value') || document.querySelector('.price--current');
-  if (priceEl) price = priceEl.innerText.trim();
-
-  chrome.storage.local.get(['test_history'], (res) => {
-    let history = res.test_history || [];
-    history = history.filter(item => item.productId !== productId);
-    history.unshift({ productId, title, img, url, price });
-    if (history.length > 20) history.pop();
-    chrome.storage.local.set({ test_history: history });
-  });
-}
-
-function checkPageAndRun() {
-  const isProductPage = window.location.href.match(/\/item\/(\d+)\.html?/);
-  if (isProductPage) { saveProductToHistory(); removeWidget(); }
-  else { injectWidget(); }
-}
-
-checkPageAndRun();
-
-let lastUrl = location.href;
-new MutationObserver(() => {
-  if (location.href !== lastUrl) {
-    lastUrl = location.href; removeWidget(); _memCache = null; isAutoScanning = false;
-    setTimeout(checkPageAndRun, 800);
-  }
-}).observe(document, { subtree: true, childList: true });
+  </style>
+</head>
+<body>
+  <div id="results">
+    <div class="grid" id="grid"></div>
+  </div>
+  <script src="panel-history.js"></script>
+</body>
+</html>
