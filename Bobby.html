@@ -1,321 +1,240 @@
-const resultsEl = document.getElementById('results');
-const loaderMore = document.getElementById('loader-more');
-let globalProducts = [], globalHost = '', currentSort = 'popular';
-let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
-let lastRequestTime = 0, scrollDebounceTimer = null;
-let currentMode = 'api'; 
-const MIN_COOLDOWN_MS = 3000;
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-const urlParams = new URLSearchParams(window.location.search);
-const siteLang = urlParams.get('siteLang') || 'en';
+    body {
+      width: 100%; height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: #f8fafc !important; 
+      display: flex; flex-direction: column; overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overscroll-behavior: none;
+    }
 
-const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
-const isRtl = rtlLanguages.includes(siteLang);
-document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
-document.documentElement.setAttribute('lang', siteLang);
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
 
-const POPUP_TRANSLATIONS = {
-    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold' },
-    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع' },
-    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus' }
-};
+    #results {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 10px 12px; 
+      width: 100%;
+      scrollbar-gutter: stable both-edges;
+      overscroll-behavior-y: contain;
+    }
 
-const t_popup = (key) => (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key]) ? POPUP_TRANSLATIONS[siteLang][key] : POPUP_TRANSLATIONS['en'][key];
-const msgFreeShipping = t_popup('free_shipping');
-const msgNoProducts = t_popup('no_products');
-const msgLoadingMore = t_popup('loading_more');
-const msgSold = t_popup('sold');
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px 10px; 
+      width: 100%;
+      align-items: start;
+    }
 
-if (loaderMore) loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
+    .product-card {
+      display: flex; flex-direction: column;
+      text-decoration: none; color: inherit;
+      position: relative;
+      background: #ffffff !important;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 6px; 
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      transition: all 0.25s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+    }
 
-function escapeHTML(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
-}
+    .product-card:hover { 
+      transform: translateY(-3px); 
+      box-shadow: 0 6px 12px rgba(0,0,0,0.08);
+      border-color: #cbd5e1;
+    }
 
-function showSkeletons() {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
-  grid.innerHTML = Array(6).fill(`<div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>`).join('');
-}
+    .img-box {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      background: #ffffff;
+      position: relative;
+      overflow: hidden;
+      border-radius: 6px;
+      margin-bottom: 6px; 
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
 
-function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+    .img-box img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+    }
 
-async function fetchProducts(page, streamId) {
-  return new Promise((resolve) => { chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve); });
-}
+    .info {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      flex: 1;
+      padding: 0 2px;
+      min-width: 0;
+    }
 
-function getRating(p) { 
-    if (!p) return 0;
-    return Number(p.evaluation?.starRating) || Number(p.evaluation?.ratingAvg) || Number(p.starRating) || Number(p.averageStar) || 0; 
-}
-function getTradeCount(p) { 
-    if (!p) return 0;
-    return Number(p.trade?.realTradeCount) || Number(p.trade?.tradeCount) || Number(p.trade?.soldCount) || Number(p.tradeCount) || 0; 
-}
+    .title {
+      font-size: 11px;
+      color: #1e293b;
+      font-weight: 500;
+      line-height: 1.25;
+      height: 28px;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      margin-bottom: 4px;
+      text-align: start;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
 
-function formatSold(count) {
-  if (!count || count === 0) return '';
-  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
-  return count + '+ ' + msgSold;
-}
-
-function formatPrice(priceStr) {
-  if (!priceStr) return '—';
-  let cleanStr = String(priceStr).replace(/^US\s*/, '').trim();
-  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
-  if (match) {
-    let prefix = match[1] ? match[1].trim() : '', number = match[2] ? match[2].trim() : '', suffix = match[3] ? match[3].trim() : '', currency = suffix || prefix;
-    if (number && currency) return `${number} ${currency}`;
-  }
-  return cleanStr;
-}
-
-function sortProducts(mode) {
-  if (currentMode === 'local' || !globalProducts) return; 
-  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
-  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
-  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
-}
-
-function checkFreeShipping(obj) {
-    if (!obj) return false;
-    if (obj._isFreeShipping !== undefined) return obj._isFreeShipping;
-    try {
-        const str = JSON.stringify(obj).toLowerCase();
-        const keywords = ['free shipping', 'free delivery', 'frete grátis', 'envío gratis', 'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 'ücretsiz kargo', '送料無料', '무료 배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir', 'pengiriman gratis'];
-        if (keywords.some(kw => str.includes(kw))) return true;
-        return false;
-    } catch (e) { return false; }
-}
-
-function createCard(p) {
-  try {
-    if (!p) return document.createElement('div');
+    .meta-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      color: #64748b;
+      height: 14px;
+      margin-bottom: 2px; 
+      justify-content: flex-start;
+    }
     
-    let rawImg = p.image?.imgUrl || '';
-    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-    const img = rawImg && rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
-    
-    const price = formatPrice(p.prices?.salePrice?.formattedPrice);
-    const title = p.title?.displayTitle || 'Product';
-    const rating = getRating(p);
-    const trades = getTradeCount(p);
-    const soldText = formatSold(trades);
+    .divider { color: #cbd5e1; margin: 0 2px; font-size: 10px; }
+    .rating { display: flex; align-items: center; gap: 2px; color: #475569; font-weight: 600; }
+    .star { color: #f59e0b; font-size: 11px; }
 
-    const originalUrl = p._isLocal ? p.url : `https://${globalHost || 'www.aliexpress.com'}/item/${p.productId}.html`;
-    const WORKER_API = "https://smart-shopper-proxy.fislilouiza91.workers.dev";
+    .price {
+      font-size: 14px;
+      font-weight: 800;
+      color: #ef4444 !important; 
+      white-space: nowrap;
+      text-align: start;
+      height: 18px;
+      margin-bottom: 2px;
+      letter-spacing: -0.5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
-    let isFreeShipping = checkFreeShipping(p); 
-    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
+    .shipping-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      color: #059669; 
+      font-weight: 600;
+      height: 14px;
+      margin-top: auto;
+      justify-content: flex-start;
+    }
 
-    let shippingHtml = isFreeShipping ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>` : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
-    let metaHtml = (soldText || rating) ? `<div class="meta-row">${soldText ? `<span>${escapeHTML(soldText)}</span>` : ''}${soldText && rating ? `<span class="divider">|</span>` : ''}${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}</div>` : `<div class="meta-row" style="visibility: hidden;">-</div>`;
+    .skeleton-shimmer {
+      background: #f1f5f9;
+      background-image: linear-gradient(to right, #f1f5f9 0%, #e2e8f0 20%, #f1f5f9 40%, #f1f5f9 100%);
+      background-repeat: no-repeat;
+      background-size: 800px 100%;
+      animation-duration: 1.5s;
+      animation-fill-mode: forwards;
+      animation-iteration-count: infinite;
+      animation-name: shimmer;
+      animation-timing-function: linear;
+      border-radius: 4px;
+    }
+    @keyframes shimmer {
+      0% { background-position: -468px 0; }
+      100% { background-position: 468px 0; }
+    }
 
-    const a = document.createElement('a');
-    a.href = originalUrl || '#'; a.target = '_blank'; a.className = 'product-card';
+    .skeleton-card { 
+      display: flex; flex-direction: column; 
+      background: #fff; 
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 6px;
+    }
+    .skeleton-img { width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; margin-bottom: 6px; } 
+    .skeleton-title { width: 100%; height: 12px; margin-bottom: 4px; }
+    .skeleton-title.short { width: 70%; margin-bottom: 6px; }
+    .skeleton-meta { width: 50%; height: 10px; margin-bottom: 2px; }
+    .skeleton-price { width: 40%; height: 14px; margin-bottom: 2px; }
+    .skeleton-shipping { width: 60%; height: 10px; }
 
-    a.onclick = async (e) => {
-        if (!originalUrl || originalUrl === '#') return;
-        e.preventDefault(); 
-        const newTab = window.open('about:blank', '_blank'); 
-        try {
-            const response = await fetch(`${WORKER_API}/?url=${encodeURIComponent(originalUrl)}`);
-            const data = await response.json();
-            if (data.success && data.affiliate_url) newTab.location.href = data.affiliate_url;
-            else newTab.location.href = originalUrl;
-        } catch (error) { newTab.location.href = originalUrl; }
-    };
+    #loader-more { display: none; text-align: center; padding: 10px; color: #ef4444; font-weight: bold; font-size: 12px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(239,68,68,0.3); border-top-color: #ef4444; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-left: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    a.innerHTML = `
-      <div class="img-box"><img src="${escapeHTML(img)}"></div>
-      <div class="info">
-        <div class="title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
-        ${metaHtml}
-        <div class="price">${escapeHTML(price)}</div>
-        ${shippingHtml}
-      </div>
-    `;
-
-    const imgElement = a.querySelector('img');
-    if (imgElement) imgElement.onerror = function() { this.style.display = 'none'; };
-    return a;
-  } catch (error) { 
-      console.warn("Nezzer card error:", error);
-      const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
-  }
-}
-
-function render(appendOnly = false, newProducts = []) {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
-  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
-    if (isLoading) return;
-    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
-    return;
-  }
-  if (!appendOnly) {
-    sortProducts(currentSort);
-    grid.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    globalProducts.forEach(p => {
-        const card = createCard(p);
-        if (card) fragment.appendChild(card);
-    });
-    grid.appendChild(fragment);
-  } else {
-    const fragment = document.createDocumentFragment();
-    newProducts.forEach(p => {
-        const card = createCard(p);
-        if (card) fragment.appendChild(card);
-    });
-    grid.appendChild(fragment);
-  }
-}
-
-async function loadInitial() {
-  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
-  scrollToTop();
-  if(loaderMore) loaderMore.style.display = 'none';
-  showSkeletons();
-
-  lastRequestTime = Date.now();
-  const res = await fetchProducts(1, null) || {};
-  isLoading = false;
-
-  if (res.error) {
-    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${escapeHTML(res.error)}</p>`;
-    return;
-  }
-
-  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
-  hasMore = globalProducts.length >= 20;
-  render(false); scrollToTop();
-}
-
-async function loadMore() {
-  if (isLoading || !hasMore) return;
-  
-  if (currentMode === 'local') {
-    isLoading = true;
-    if (loaderMore) loaderMore.style.display = 'block';
-    window.parent.postMessage({ action: 'REQUEST_MORE_ALTERNATIVES' }, '*');
-    setTimeout(() => {
-      if (isLoading) {
-        isLoading = false;
-        if (loaderMore) loaderMore.style.display = 'none';
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: #16161c !important;
       }
-    }, 5000);
-    return;
-  }
-  
-  const now = Date.now();
-  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
-
-  isLoading = true; lastRequestTime = Date.now();
-  if(loaderMore) loaderMore.style.display = 'block';
-
-  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
-  await new Promise(r => setTimeout(r, 1000));
-  isLoading = false;
-  if(loaderMore) loaderMore.style.display = 'none';
-  if (res.error) return;
-
-  const newProducts = res.products || [];
-  if (newProducts.length > 0) {
-    globalProducts = [...globalProducts, ...newProducts];
-    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
-    hasMore = newProducts.length >= 20;
-    render(true, newProducts);
-  } else { hasMore = false; }
-}
-
-resultsEl.addEventListener('scroll', () => {
-  clearTimeout(scrollDebounceTimer);
-  scrollDebounceTimer = setTimeout(() => {
-    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
-  }, 300);
-});
-
-window.addEventListener('message', (event) => {
-  try {
-      if (event.data && event.data.action === 'SORT') {
-        currentMode = 'api';
-        const newSort = event.data.sort;
-        if (currentSort !== newSort) {
-          currentSort = newSort;
-          scrollToTop();
-          if (!isLoading && globalProducts.length > 0) render(false);
-          else loadInitial();
-        } else if (globalProducts.length === 0 && !isLoading) {
-          loadInitial();
-        }
+      ::-webkit-scrollbar-thumb {
+        background: #3a3a44;
       }
-
-      if (event.data && event.data.action === 'RENDER_LOCAL') {
-        currentMode = 'local';
-        globalProducts = Array.isArray(event.data.products) ? event.data.products : [];
-        hasMore = false; 
-        scrollToTop();
-        render(false);
+      .product-card {
+        background: #1e1e24 !important;
+        border-color: #2a2a33;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
       }
-
-      if (event.data && event.data.action === 'CAPTCHA_FOUND') {
-        currentMode = 'local';
-        hasMore = false;
-        document.getElementById('main-grid').innerHTML = '<p style="text-align: center; color: #ef4444; padding: 20px; grid-column: 1/-1; font-weight: bold;">⚠️ AliExpress requires CAPTCHA verification.<br>Please solve it on the page first.</p>';
+      .product-card:hover {
+        box-shadow: 0 6px 12px rgba(0,0,0,0.5);
+        border-color: #3a3a44;
       }
-
-      if (event.data && event.data.action === 'LOADING_ALTERNATIVES') {
-        currentMode = 'local';
-        hasMore = false;
-        globalProducts = [];
-        showSkeletons();
+      .img-box {
+        background: #25252c;
       }
-
-      if (event.data && event.data.action === 'APPEND_LOCAL') {
-        currentMode = 'local';
-        
-        let grid = document.getElementById('main-grid');
-        if (!grid) {
-            resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-            grid = document.getElementById('main-grid');
-        }
-        
-        if (grid.querySelector('.skeleton-card')) {
-            grid.innerHTML = '';
-        }
-        
-        const newProds = event.data.products || [];
-        if (newProds.length > 0) {
-            globalProducts = [...globalProducts, ...newProds];
-            render(true, newProds);
-        }
-        
-        hasMore = event.data.hasMore === true;
-        
-        if (loaderMore) loaderMore.style.display = 'none';
-        isLoading = false;
+      .title {
+        color: #e2e8f0;
       }
-
-      if (event.data && event.data.action === 'ALTERNATIVES_FINISHED') {
-        let grid = document.getElementById('main-grid');
-        if (grid && grid.querySelector('.skeleton-card')) {
-            grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
-        }
-        
-        if (event.data.remaining !== undefined && event.data.remaining <= 0) {
-            hasMore = false;
-            if (loaderMore) loaderMore.style.display = 'none';
-        }
+      .meta-row {
+        color: #94a3b8;
       }
-  } catch(e) {
-      console.warn("Nezzer message error:", e);
-  }
-});
+      .divider {
+        color: #475569;
+      }
+      .rating {
+        color: #cbd5e1;
+      }
+      .star {
+        color: #fbbf24;
+      }
+      .price {
+        color: #f87171 !important;
+      }
+      .shipping-row {
+        color: #34d399;
+      }
+      .skeleton-shimmer {
+        background: #2a2a33;
+        background-image: linear-gradient(to right, #2a2a33 0%, #3a3a44 20%, #2a2a33 40%, #2a2a33 100%);
+      }
+      .skeleton-card {
+        background: #1e1e24;
+        border-color: #2a2a33;
+      }
+      #loader-more {
+        background: transparent;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="results">
+    <div class="grid" id="main-grid"></div>
+    <div id="loader-more"><span class="spinner"></span></div>
+  </div>
+  <script src="panel.js"></script>
+</body>
+</html>
