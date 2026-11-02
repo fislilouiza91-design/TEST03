@@ -1,116 +1,36 @@
-export default {
-  async fetch(request, env, ctx) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    const url = new URL(request.url);
-    let targetUrl = url.searchParams.get("url");
-
-    if (!targetUrl) {
-      return new Response(JSON.stringify({ success: false, error: "Missing url" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
-
-    // تنظيف الرابط واستخراج رقم المنتج
-    let productId = targetUrl;
-    try {
-        let urlObj = new URL(targetUrl);
-        urlObj.hostname = "www.aliexpress.com";
-        urlObj.search = ""; 
-        targetUrl = urlObj.toString();
-        
-        const match = targetUrl.match(/\/item\/(\d+)\.html/);
-        if (match && match[1]) {
-            productId = match[1];
-        }
-    } catch (e) {}
-
-    // 💡 1. البحث في قاعدة البيانات
-    try {
-        const cachedLink = await env.COMPETITOR_CACHE.get(productId);
-        if (cachedLink) {
-            return new Response(JSON.stringify({ success: true, affiliate_url: cachedLink, source: "cache" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (err) {
-        console.error("KV Error:", err);
-    }
-
-    // 💡 2. طلب الرابط من علي إكسبريس
-    const appKey = env.ALI_APP_KEY;
-    const appSecret = env.ALI_APP_SECRET;
-    const trackingId = env.ALI_TRACKING_ID || "default";
-
-    const method = "aliexpress.affiliate.link.generate";
-    const timestamp = Date.now().toString();
-    
-    const params = {
-        app_key: appKey, method: method, sign_method: "md5", timestamp: timestamp,
-        format: "json", v: "2.0", tracking_id: trackingId,
-        source_values: targetUrl, promotion_link_type: 0 
-    };
-
-    const sortedKeys = Object.keys(params).sort();
-    let signString = appSecret;
-    for (const key of sortedKeys) { signString += key + params[key]; }
-    signString += appSecret;
-
-    const msgBuffer = new TextEncoder().encode(signString);
-    const hashBuffer = await crypto.subtle.digest('MD5', msgBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const sign = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-
-    const apiUrl = "https://api-sg.aliexpress.com/sync";
-    const body = new URLSearchParams({ ...params, sign: sign });
-
-    try {
-        const response = await fetch(apiUrl, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body });
-        const data = await response.json();
-
-        const rawJsonString = JSON.stringify(data);
-        const match = rawJsonString.match(/"promotion_link":"([^"]+)"/);
-        
-        let affiliateLink = null;
-        if (match && match[1]) {
-            affiliateLink = match[1];
-            
-            // 💡 الفحص الجديد: إذا كان الرابط هو الصفحة الرئيسية، ارفضه
-            if (affiliateLink.includes('best.aliexpress.com') || affiliateLink === 'https://aliexpress.com/' || affiliateLink === 'https://www.aliexpress.com/') {
-                affiliateLink = null; 
-            }
-        }
-
-        if (affiliateLink) {
-            // الرابط سليم: احفظه وأرجعه
-            try {
-                await env.COMPETITOR_CACHE.put(productId, affiliateLink);
-            } catch (err) {
-                console.error("Failed to save to KV:", err);
-            }
-
-            return new Response(JSON.stringify({ success: true, affiliate_url: affiliateLink, source: "api" }), { 
-                headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        } else {
-            // الرابط غير صالح (أو لم يرسله علي إكسبريس)
-            // نرجع فشل، لكي تفتح الإضافة الرابط الأصلي ولا يرى المستخدم صفحة بيضاء
-            return new Response(JSON.stringify({ success: false, error: "Invalid link generated", details: data }), { 
-                status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-            });
-        }
-    } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), { 
-            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-        });
-    }
+{
+  "manifest_version": 3,
+  "name": "__MSG_appName__",
+  "description": "__MSG_appDesc__",
+  "default_locale": "en",
+  "version": "1.0.4",
+  "minimum_chrome_version": "102",
+  "permissions": ["storage", "scripting", "tabs", "cookies"],
+  "host_permissions": [
+    "*://*.aliexpress.com/*",
+    "*://*.aliexpress.us/*",
+    "*://*.aliexpress.ru/*"
+  ],
+  "background": {
+    "service_worker": "background/engine.js",
+    "type": "module"
   },
-};
+  "content_scripts": [
+    {
+      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"],
+      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["panel/panel.html", "panel/panel.js"],
+      "matches": ["*://*.aliexpress.com/*", "*://*.aliexpress.us/*", "*://*.aliexpress.ru/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": { "128": "assets/icons/icon128.png" }
+  },
+  "icons": { "128": "assets/icons/icon128.png" }
+}
