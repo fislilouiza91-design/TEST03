@@ -1,313 +1,248 @@
-const resultsEl = document.getElementById('results');
-const loaderMore = document.getElementById('loader-more');
-let globalProducts = [], globalHost = '', currentSort = 'popular';
-let currentPage = 1, currentStreamId = null, isLoading = false, hasMore = true;
-let lastRequestTime = 0, scrollDebounceTimer = null;
-let currentMode = 'api'; 
-const MIN_COOLDOWN_MS = 3000;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const randomDelay = () => sleep(400 + Math.random() * 600);
 
-const urlParams = new URLSearchParams(window.location.search);
-const siteLang = urlParams.get('siteLang') || 'en';
+async function ensureToken(tabId, domain) {
+    let token = null;
 
-const rtlLanguages = ['ar', 'he', 'fa', 'ur'];
-const isRtl = rtlLanguages.includes(siteLang);
-document.documentElement.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
-document.documentElement.setAttribute('lang', siteLang);
+    if (domain === 'ru') {
+        const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
 
-const POPUP_TRANSLATIONS = {
-    'en': { free_shipping: 'Free shipping', no_products: 'No products found.', loading_more: 'Loading more...', sold: 'sold', alternatives_for: 'Alternatives for:' },
-    'ar': { free_shipping: 'شحن مجاني', no_products: 'لم يتم العثور على منتجات.', loading_more: 'جاري جلب المزيد...', sold: 'مباع', alternatives_for: 'بدائل لـ:' },
-    'fr': { free_shipping: 'Livraison gratuite', no_products: 'Aucun produit trouvé.', loading_more: 'Chargement...', sold: 'vendus', alternatives_for: 'Alternatives pour :' }
-};
-
-const t_popup = (key) => (POPUP_TRANSLATIONS[siteLang] && POPUP_TRANSLATIONS[siteLang][key]) ? POPUP_TRANSLATIONS[siteLang][key] : POPUP_TRANSLATIONS['en'][key];
-const msgFreeShipping = t_popup('free_shipping');
-const msgNoProducts = t_popup('no_products');
-const msgLoadingMore = t_popup('loading_more');
-const msgSold = t_popup('sold');
-const msgAlternativesFor = t_popup('alternatives_for');
-
-if (loaderMore) loaderMore.innerHTML = `<span class="spinner"></span> ${msgLoadingMore}`;
-
-function escapeHTML(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
-}
-
-function showSkeletons() {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
-  grid.innerHTML = Array(6).fill(`<div class="skeleton-card"><div class="skeleton-shimmer skeleton-img"></div><div class="skeleton-shimmer skeleton-title"></div><div class="skeleton-shimmer skeleton-title short"></div><div class="skeleton-shimmer skeleton-meta"></div><div class="skeleton-shimmer skeleton-price"></div><div class="skeleton-shimmer skeleton-shipping"></div></div>`).join('');
-}
-
-function scrollToTop() { resultsEl.scrollTop = 0; document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
-
-async function fetchProducts(page, streamId) {
-  return new Promise((resolve) => { chrome.runtime.sendMessage({ action: 'FETCH_SIMILAR', page, streamId }, resolve); });
-}
-
-function getRating(p) { 
-    if (!p) return 0;
-    return Number(p.evaluation?.starRating) || Number(p.evaluation?.ratingAvg) || Number(p.starRating) || Number(p.averageStar) || 0; 
-}
-function getTradeCount(p) { 
-    if (!p) return 0;
-    return Number(p.trade?.realTradeCount) || Number(p.trade?.tradeCount) || Number(p.trade?.soldCount) || Number(p.tradeCount) || 0; 
-}
-
-function formatSold(count) {
-  if (!count || count === 0) return '';
-  if (count >= 1000) return (count / 1000).toFixed(1).replace('.0', '') + 'k+ ' + msgSold;
-  return count + '+ ' + msgSold;
-}
-
-function formatPrice(priceStr) {
-  if (!priceStr) return '—';
-  let cleanStr = String(priceStr).replace(/^US\s*/, '').trim();
-  const match = cleanStr.match(/^([^\d.,]*)\s*([\d.,]+)\s*([^\d.,]*)$/);
-  if (match) {
-    let prefix = match[1] ? match[1].trim() : '', number = match[2] ? match[2].trim() : '', suffix = match[3] ? match[3].trim() : '', currency = suffix || prefix;
-    if (number && currency) return `${number} ${currency}`;
-  }
-  return cleanStr;
-}
-
-function sortProducts(mode) {
-  if (currentMode === 'local' || !globalProducts) return; 
-  if (mode === 'cheapest') globalProducts.sort((a, b) => (Number(a?.prices?.salePrice?.minPrice) || 999999) - (Number(b?.prices?.salePrice?.minPrice) || 999999));
-  else if (mode === 'rating') globalProducts.sort((a, b) => getRating(b) - getRating(a));
-  else globalProducts.sort((a, b) => getTradeCount(b) - getTradeCount(a));
-}
-
-function checkFreeShipping(obj) {
-    if (!obj) return false;
-    if (obj._isFreeShipping !== undefined) return obj._isFreeShipping;
-    try {
-        const str = JSON.stringify(obj).toLowerCase();
-        const keywords = ['free shipping', 'free delivery', 'frete grátis', 'envío gratis', 'livraison gratuite', 'spedizione gratuita', 'gratis verzending', 'darmowa dostawa', 'ücretsiz kargo', '送料無料', '무료 배송', '免运费', '免運費', 'شحن مجاني', 'توصيل مجاني', 'مجانا', 'бесплатная доставка', 'бесплатно', 'δωρεάν αποστολή', 'gratis ongkir', 'pengiriman gratis'];
-        if (keywords.some(kw => str.includes(kw))) return true;
-        return false;
-    } catch (e) { return false; }
-}
-
-function createCard(p) {
-  try {
-    if (!p) return document.createElement('div');
-    
-    let rawImg = p.image?.imgUrl || '';
-    if (Array.isArray(rawImg)) rawImg = rawImg[0] || '';
-    const img = rawImg && rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
-    
-    const price = formatPrice(p.prices?.salePrice?.formattedPrice);
-    const title = p.title?.displayTitle || 'Product';
-    const rating = getRating(p);
-    const trades = getTradeCount(p);
-    const soldText = formatSold(trades);
-
-    const originalUrl = p._isLocal ? p.url : `https://${globalHost || 'www.aliexpress.com'}/item/${p.productId}.html`;
-    const WORKER_API = "https://smart-shopper-proxy.fislilouiza91.workers.dev";
-
-    let isFreeShipping = checkFreeShipping(p); 
-    const truckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="#059669" xmlns="http://www.w3.org/2000/svg" style="margin-top:-2px;"><path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4zM6 18.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm12 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM17 12V9.5h2.5l1.96 2.5H17z"/></svg>`;
-
-    let shippingHtml = isFreeShipping ? `<div class="shipping-row">${truckIcon} <span>${msgFreeShipping}</span></div>` : `<div class="shipping-row" style="visibility: hidden;">-</div>`;
-    let metaHtml = (soldText || rating) ? `<div class="meta-row">${soldText ? `<span>${escapeHTML(soldText)}</span>` : ''}${soldText && rating ? `<span class="divider">|</span>` : ''}${rating ? `<span class="rating"><span class="star">★</span> ${rating.toFixed(1)}</span>` : ''}</div>` : `<div class="meta-row" style="visibility: hidden;">-</div>`;
-
-    const a = document.createElement('a');
-    a.href = originalUrl || '#'; a.target = '_blank'; a.className = 'product-card';
-
-    a.onclick = async (e) => {
-        if (!originalUrl || originalUrl === '#') return;
-        e.preventDefault(); 
-        const newTab = window.open('about:blank', '_blank'); 
-        try {
-            const response = await fetch(`${WORKER_API}/?url=${encodeURIComponent(originalUrl)}`);
-            const data = await response.json();
-            if (data.success && data.affiliate_url) newTab.location.href = data.affiliate_url;
-            else newTab.location.href = originalUrl;
-        } catch (error) { newTab.location.href = originalUrl; }
-    };
-
-    a.innerHTML = `
-      <div class="img-box"><img src="${escapeHTML(img)}"></div>
-      <div class="info">
-        <div class="title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
-        ${metaHtml}
-        <div class="price">${escapeHTML(price)}</div>
-        ${shippingHtml}
-      </div>
-    `;
-
-    const imgElement = a.querySelector('img');
-    if (imgElement) imgElement.onerror = function() { this.style.display = 'none'; };
-    return a;
-  } catch (error) { 
-      console.warn("Nezzer card error:", error);
-      const fallback = document.createElement('div'); fallback.style.display = 'none'; return fallback; 
-  }
-}
-
-function render(appendOnly = false, newProducts = []) {
-  let grid = document.getElementById('main-grid');
-  if (!grid) {
-    resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-    grid = document.getElementById('main-grid');
-  }
-  if (!appendOnly && (!globalProducts || globalProducts.length === 0)) {
-    if (isLoading) return;
-    grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
-    return;
-  }
-  if (!appendOnly) {
-    sortProducts(currentSort);
-    grid.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    globalProducts.forEach(p => {
-        const card = createCard(p);
-        if (card) fragment.appendChild(card);
-    });
-    grid.appendChild(fragment);
-  } else {
-    const fragment = document.createDocumentFragment();
-    newProducts.forEach(p => {
-        const card = createCard(p);
-        if (card) fragment.appendChild(card);
-    });
-    grid.appendChild(fragment);
-  }
-}
-
-async function loadInitial() {
-  isLoading = true; currentPage = 1; currentStreamId = null; globalProducts = [];
-  scrollToTop();
-  if(loaderMore) loaderMore.style.display = 'none';
-  showSkeletons();
-
-  lastRequestTime = Date.now();
-  const res = await fetchProducts(1, null) || {};
-  isLoading = false;
-
-  if (res.error) {
-    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1;">${escapeHTML(res.error)}</p>`;
-    return;
-  }
-
-  globalProducts = res.products || []; globalHost = res.host || ''; currentStreamId = res.streamId || null;
-  hasMore = globalProducts.length >= 20;
-  render(false); scrollToTop();
-}
-
-async function loadMore() {
-  if (currentMode === 'local' || isLoading || !hasMore || !currentStreamId) return;
-  const now = Date.now();
-  if (now - lastRequestTime < MIN_COOLDOWN_MS) return;
-
-  isLoading = true; lastRequestTime = Date.now();
-  if(loaderMore) loaderMore.style.display = 'block';
-
-  const res = await fetchProducts(currentPage + 1, currentStreamId) || {};
-  await new Promise(r => setTimeout(r, 1000));
-  isLoading = false;
-  if(loaderMore) loaderMore.style.display = 'none';
-  if (res.error) return;
-
-  const newProducts = res.products || [];
-  if (newProducts.length > 0) {
-    globalProducts = [...globalProducts, ...newProducts];
-    currentPage += 1; currentStreamId = res.streamId || currentStreamId;
-    hasMore = newProducts.length >= 20;
-    render(true, newProducts);
-  } else { hasMore = false; }
-}
-
-resultsEl.addEventListener('scroll', () => {
-  clearTimeout(scrollDebounceTimer);
-  scrollDebounceTimer = setTimeout(() => {
-    if (resultsEl.scrollTop + resultsEl.clientHeight >= resultsEl.scrollHeight - 100) loadMore();
-  }, 300);
-});
-
-window.addEventListener('message', (event) => {
-  try {
-      if (event.data && event.data.action === 'SORT') {
-        currentMode = 'api';
-        const newSort = event.data.sort;
-        if (currentSort !== newSort) {
-          currentSort = newSort;
-          scrollToTop();
-          if (!isLoading && globalProducts.length > 0) render(false);
-          else loadInitial();
-        } else if (globalProducts.length === 0 && !isLoading) {
-          loadInitial();
-        }
-      }
-
-      if (event.data && event.data.action === 'RENDER_LOCAL') {
-        currentMode = 'local';
-        globalProducts = Array.isArray(event.data.products) ? event.data.products : [];
-        hasMore = false; 
-        scrollToTop();
-        render(false);
-      }
-
-      if (event.data && event.data.action === 'CAPTCHA_FOUND') {
-        currentMode = 'local';
-        hasMore = false;
-        document.getElementById('main-grid').innerHTML = '<p style="text-align: center; color: #ef4444; padding: 20px; grid-column: 1/-1; font-weight: bold;">⚠️ AliExpress requires CAPTCHA verification.<br>Please solve it on the page first.</p>';
-      }
-
-      if (event.data && event.data.action === 'LOADING_ALTERNATIVES') {
-        currentMode = 'local';
-        hasMore = false;
-        showSkeletons();
-      }
-
-      if (event.data && event.data.action === 'RENDER_ALTERNATIVES') {
-        currentMode = 'local';
-        hasMore = false;
-        if (event.data.host) globalHost = event.data.host;
-        scrollToTop();
-        
-        let grid = document.getElementById('main-grid');
-        if (!grid) {
-            resultsEl.innerHTML = `<div class="grid" id="main-grid"></div><div id="loader-more" style="display:none; text-align:center; padding: 15px; color: #ff4747; font-weight: bold; font-size: 12px;"><span class="spinner"></span> ${msgLoadingMore}</div>`;
-            grid = document.getElementById('main-grid');
-        }
-        grid.innerHTML = '';
-        
-        const groups = event.data.groups || [];
-        if (groups.length === 0) {
-            grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px; grid-column: 1/-1; width: 100%;">${msgNoProducts}</p>`;
-            return;
-        }
-
-        const fragment = document.createDocumentFragment();
-        
-        groups.forEach(group => {
-            const header = document.createElement('div');
-            header.style.gridColumn = '1 / -1';
-            header.style.fontWeight = '800';
-            header.style.fontSize = '13px';
-            header.style.marginTop = '15px';
-            header.style.marginBottom = '5px';
-            header.style.color = '#ff4747';
-            header.style.textAlign = 'start';
-            header.style.borderBottom = '1px solid #e2e8f0';
-            header.style.paddingBottom = '4px';
-            header.innerText = msgAlternativesFor + ' ' + escapeHTML(group.originalTitle);
-            fragment.appendChild(header);
-            
-            group.alternatives.forEach(p => {
-                const card = createCard(p);
-                if (card) fragment.appendChild(card);
-            });
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: async (u) => {
+                try {
+                    const fd = new FormData(); fd.append("data", "");
+                    await fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" });
+                } catch (e) {}
+            },
+            args: [url],
         });
-        grid.appendChild(fragment);
+
+        let cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        if (cookie) token = cookie.value.split('_')[0];
+
+    } else {
+        let cookie = await chrome.cookies.get({ url: `https://www.aliexpress.${domain}/`, name: "_m_h5_tk" });
+        if (!cookie) {
+            cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        }
+        if (cookie) token = cookie.value.split('_')[0];
+    }
+
+    return token;
+}
+
+async function scraperInPage({ productId, page, streamId, initialToken, domain, targetImage }) {
+  function md5(e) {
+    function t(e, t) { return e << t | e >>> 32 - t; }
+    function r(e, t) {
+        var r, o, a, n, i;
+        return a = 2147483648 & e, n = 2147483648 & t, i = (1073741823 & e) + (1073741823 & t),
+        (r = 1073741824 & e) & (o = 1073741824 & t) ? 2147483648 ^ i ^ a ^ n : r | o ? 1073741824 & i ? 3221225472 ^ i ^ a ^ n : 1073741824 ^ i ^ a ^ n : i ^ a ^ n;
+    }
+    function o(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & t | ~e & r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function a(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & r | t & ~r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function n(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e ^ t ^ r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function i(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return t ^ (e | ~r); }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function c(e) {
+        var t, r = "", o = "";
+        for (t = 0; 3 >= t; t++) r += (o = "0" + (e >>> 8 * t & 255).toString(16)).substr(o.length - 2, 2);
+        return r;
+    }
+    var s, p, u, d, m, l, f, g, h, y;
+    for (y = function(e) {
+        for (var t, r = e.length, o = r + 8, a = 16 * ((o - o % 64) / 64 + 1), n = new Array(a - 1), i = 0, c = 0; r > c;)
+            i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | e.charCodeAt(c) << i, c++;
+        return i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | 128 << i, n[a - 2] = r << 3, n[a - 1] = r >>> 29, n;
+    }(e = function(e) {
+        e = e.replace(/\r\n/g, "\n");
+        for (var t = "", r = 0; r < e.length; r++) {
+            var o = e.charCodeAt(r);
+            128 > o ? t += String.fromCharCode(o) : o > 127 && 2048 > o ? (t += String.fromCharCode(o >> 6 | 192), t += String.fromCharCode(63 & o | 128)) : (t += String.fromCharCode(o >> 12 | 224), t += String.fromCharCode(o >> 6 & 63 | 128), t += String.fromCharCode(63 & o | 128));
+        }
+        return t;
+    }(e)), l = 1732584193, f = 4023233417, g = 2562383102, h = 271733878, s = 0; s < y.length; s += 16)
+        p = l, u = f, d = g, m = h,
+        l = o(l, f, g, h, y[s + 0], 7, 3614090360), h = o(h, l, f, g, y[s + 1], 12, 3905402710), g = o(g, h, l, f, y[s + 2], 17, 606105819), f = o(f, g, h, l, y[s + 3], 22, 3250441966),
+        l = o(l, f, g, h, y[s + 4], 7, 4118548399), h = o(h, l, f, g, y[s + 5], 12, 1200080426), g = o(g, h, l, f, y[s + 6], 17, 2821735955), f = o(f, g, h, l, y[s + 7], 22, 4249261313),
+        l = o(l, f, g, h, y[s + 8], 7, 1770035416), h = o(h, l, f, g, y[s + 9], 12, 2336552879), g = o(g, h, l, f, y[s + 10], 17, 4294925233), f = o(f, g, h, l, y[s + 11], 22, 2304563134),
+        l = o(l, f, g, h, y[s + 12], 7, 1804603682), h = o(h, l, f, g, y[s + 13], 12, 4254626195), g = o(g, h, l, f, y[s + 14], 17, 2792965006), l = a(l, f = o(f, g, h, l, y[s + 15], 22, 1236535329), g, h, y[s + 1], 5, 4129170786),
+        h = a(h, l, f, g, y[s + 6], 9, 3225465664), g = a(g, h, l, f, y[s + 11], 14, 643717713), f = a(f, g, h, l, y[s + 0], 20, 3921069994),
+        l = a(l, f, g, h, y[s + 5], 5, 3593408605), h = a(h, l, f, g, y[s + 10], 9, 38016083), g = a(g, h, l, f, y[s + 15], 14, 3634488961), f = a(f, g, h, l, y[s + 4], 20, 3889429448),
+        l = a(l, f, g, h, y[s + 9], 5, 568446438), h = a(h, l, f, g, y[s + 14], 9, 3275163606), g = a(g, h, l, f, y[s + 3], 14, 4107603335), f = a(f, g, h, l, y[s + 8], 20, 1163531501),
+        l = a(l, f, g, h, y[s + 13], 5, 2850285829), h = a(h, l, f, g, y[s + 2], 9, 4243563512), g = a(g, h, l, f, y[s + 7], 14, 1735328473), l = n(l, f = a(f, g, h, l, y[s + 12], 20, 2368359562), g, h, y[s + 5], 4, 4294588738),
+        h = n(h, l, f, g, y[s + 8], 11, 2272392833), g = n(g, h, l, f, y[s + 11], 16, 1839030562), f = n(f, g, h, l, y[s + 14], 23, 4259657740),
+        l = n(l, f, g, h, y[s + 1], 4, 2763975236), h = n(h, l, f, g, y[s + 4], 11, 1272893353), g = n(g, h, l, f, y[s + 7], 16, 4139469664), f = n(f, g, h, l, y[s + 10], 23, 3200236656),
+        l = n(l, f, g, h, y[s + 13], 4, 681279174), h = n(h, l, f, g, y[s + 0], 11, 3936430074), g = n(g, h, l, f, y[s + 3], 16, 3572445317), f = n(f, g, h, l, y[s + 6], 23, 76029189),
+        l = n(l, f, g, h, y[s + 9], 4, 3654602809), h = n(h, l, f, g, y[s + 12], 11, 3873151461), g = n(g, h, l, f, y[s + 15], 16, 530742520), l = i(l, f = n(f, g, h, l, y[s + 2], 23, 3299628645), g, h, y[s + 0], 6, 4096336452),
+        h = i(h, l, f, g, y[s + 7], 10, 1126891415), g = i(g, h, l, f, y[s + 14], 15, 2878612391), f = i(f, g, h, l, y[s + 5], 21, 4237533241),
+        l = i(l, f, g, h, y[s + 12], 6, 1700485571), h = i(h, l, f, g, y[s + 3], 10, 2399980690), g = i(g, h, l, f, y[s + 10], 15, 4293915773), f = i(f, g, h, l, y[s + 1], 21, 2240044497),
+        l = i(l, f, g, h, y[s + 8], 6, 1873313359), h = i(h, l, f, g, y[s + 15], 10, 4264355552), g = i(g, h, l, f, y[s + 6], 15, 2734768916), f = i(f, g, h, l, y[s + 13], 21, 1309151649),
+        l = i(l, f, g, h, y[s + 4], 6, 4149444226), h = i(h, l, f, g, y[s + 11], 10, 3174756917), g = i(g, h, l, f, y[s + 2], 15, 718787259), f = i(f, g, h, l, y[s + 9], 21, 3951481745),
+        l = r(l, p), f = r(f, u), g = r(g, d), h = r(h, m);
+    return (c(l) + c(f) + c(g) + c(h)).toLowerCase();
+  }
+
+  const token = initialToken || document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
+  if (!token) return { error: 'NO_TOKEN' };
+
+  const cna = document.cookie?.split("cna=")[1]?.split(";")[0];
+  const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
+  const acsRt = xman?.split("acs_rt=")[1];
+
+  const locale = xman?.split("x_locale=")[1]?.split("&")[0] ?? (domain === 'ru' ? "ru_RU" : "en_US");
+  const aep = document.cookie?.split("aep_usuc_f=")[1]?.split(";")[0] || '';
+  const currency = aep?.split("c_tp=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RUB" : "USD");
+  const region = aep?.split("region=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RU" : "US");
+
+  const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+
+  const getImage = (dom) => {
+    if (targetImage) return targetImage + "_";
+    if (dom === "ru") {
+      return document.querySelector('meta[property="og:image"]')?.content + "_";
+    }
+    const img = document.querySelector('div[class^="image-view--previewWrap"] img[src^="https://ae-pic-"]');
+    if (img) return img.src;
+    const video = document.querySelector('div[class^="image-view--previewWrap"] video[poster^="https://ae-pic-"]');
+    if (video) return video.poster;
+    return document.querySelector('meta[property="og:image"]')?.content;
+  };
+
+  const y = {
+    DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
+    image: getImage(domain)?.split("_")[0], isNewImageSearch: true, lang: locale, locale: locale,
+    osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+    recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
+    searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
+    sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
+    "x-appKey": 24815441,
+    "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+    _city: "", _currency: currency, _state: ""
+  };
+
+  if (streamId) { y.streamId = streamId; y.realReffer = ""; }
+
+  const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
+  const timestamp = Date.now();
+  const sign = md5(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+
+  const apiDomain = domain === "ru" ? "com" : domain;
+  const apiName = "mtop.relationrecommend.AliExpressRecommend.recommend";
+  const url = `https://recom-acs.aliexpress.${apiDomain}/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+
+  try {
+    const fd = new FormData();
+    fd.append("data", dataString);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fd),
+      credentials: "include"
+    });
+    const json = await response.json();
+    return {
+      products: json?.data?.mods?.itemList?.content ?? [],
+      streamId: json?.data?.pageInfo?.streamId,
+      ret: json?.ret?.[0],
+      host: location.host
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function fetchSimilarProductsForProduct({ tabId, productId, imageUrl, domain, page = 1, streamId = null }) {
+  const initialToken = await ensureToken(tabId, domain);
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        world: 'MAIN',
+        func: scraperInPage,
+        args: [{ productId, page, streamId, initialToken, domain, targetImage: imageUrl }],
+      });
+
+      const data = result?.result;
+      if (!data) throw new Error('EMPTY_RESULT');
+      if (data.error) throw new Error(data.error);
+      if (data.ret && !data.ret.startsWith('SUCCESS')) throw new Error('API_' + data.ret);
+
+      return data;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Nezzer] Attempt ${attempt} failed for ${productId}:`, err.message);
+      if (attempt < 3) await randomDelay();
+    }
+  }
+  throw lastError;
+}
+
+async function fetchSimilarProducts({ page = 1, streamId = null }) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
+
+  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+  const domain = tab.url.includes('aliexpress.ru') ? 'ru' : (tab.url.includes('aliexpress.us') ? 'us' : 'com');
+
+  return fetchSimilarProductsForProduct({ tabId: tab.id, productId, domain, page, streamId });
+}
+
+async function fetchAlternatives(products, domain, tabId) {
+  for (const p of products) {
+    try {
+      const res = await fetchSimilarProductsForProduct({
+        tabId,
+        productId: p.productId,
+        imageUrl: p.image?.imgUrl || '',
+        domain: domain,
+        page: 1,
+        streamId: null
+      });
+      
+      if (res && res.products && res.products.length > 0) {
+        const alts = res.products.slice(0, 3);
+        // إرسال النتائج أولاً بأول إلى injector.js
+        chrome.tabs.sendMessage(tabId, { action: 'ALTERNATIVE_BATCH', alternatives: alts }).catch(()=>{});
       }
-  } catch(e) {
-      console.warn("Nezzer message error:", e);
+    } catch (e) {
+      console.warn("Failed to fetch alternatives for", p.productId, e);
+    }
+    await sleep(1200 + Math.random() * 800); // تأخير بسيط لتجنب الحظر
+  }
+  
+  // إشعار انتهاء العملية
+  chrome.tabs.sendMessage(tabId, { action: 'ALTERNATIVES_FINISHED' }).catch(()=>{});
+  return { success: true };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'FETCH_SIMILAR') {
+    fetchSimilarProducts({ page: msg.page || 1, streamId: msg.streamId || null })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (msg.action === 'FETCH_ALTERNATIVES') {
+    if (sender && sender.tab) {
+        fetchAlternatives(msg.products, msg.domain, sender.tab.id)
+          .then(sendResponse)
+          .catch(err => sendResponse({ error: err.message }));
+        return true;
+    } else {
+        sendResponse({ error: 'NO_TAB_CONTEXT' });
+        return false;
+    }
   }
 });
