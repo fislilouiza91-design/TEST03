@@ -127,44 +127,9 @@ function scanPageForProducts(sortByPopular = false) {
                 if (priceMatch) price = priceMatch[0];
             }
 
-            // 4. التقييم (استخراج آمن ومضمون)
-            let rating = 0;
-            const text = link.innerText;
-
-            // أ. عد النجوم المرسومة (★)
-            if (text.includes('★')) {
-                const filled = (text.match(/★/g) || []).length;
-                if (filled > 0 && filled <= 5) rating = filled;
-            }
-
-            // ب. البحث عن رقم عشري (مثل 4.5) مع استبعاد الأسعار والمبيعات
-            if (rating === 0) {
-                const decMatch = text.match(/(?<!\d)([1-5][.,]\d)(?![\dkmKM+\-])/);
-                if (decMatch) {
-                    rating = parseFloat(decMatch[1].replace(',', '.'));
-                }
-            }
-
-            // ج. البحث عن رقم صحيح (مثل 4) بجانب كلمة نجوم
-            if (rating === 0) {
-                const intMatch = text.match(/(?<!\d)([1-5])(?!\d)\s*(?:★|stars?|out of 5)/i) || text.match(/(?:★|stars?|rated)\s*(?<!\d)([1-5])(?!\d)/i);
-                if (intMatch) {
-                    rating = parseFloat(intMatch[1]);
-                }
-            }
-
-            // د. البحث في خصائص aria-label
-            if (rating === 0) {
-                const ariaEl = link.querySelector('[aria-label*="star" i], [aria-label*="rating" i]');
-                if (ariaEl) {
-                    const aria = ariaEl.getAttribute('aria-label');
-                    const am = aria.match(/([0-5][.,]\d)/);
-                    if (am) rating = parseFloat(am[1].replace(',', '.'));
-                }
-            }
-
-            // 5. المبيعات
+            // 4. المبيعات (بدون نجوم)
             let soldCount = 0;
+            const text = link.innerText;
             const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
             if (soldMatch) {
                 let numStr = soldMatch[1].toLowerCase().replace(',', '.');
@@ -180,7 +145,7 @@ function scanPageForProducts(sortByPopular = false) {
                 }
             }
 
-            // 6. الشحن المجاني
+            // 5. الشحن المجاني
             let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
 
             seen.add(pid);
@@ -189,7 +154,7 @@ function scanPageForProducts(sortByPopular = false) {
                 title: { displayTitle: title },
                 image: { imgUrl: img },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: rating },
+                evaluation: { starRating: 0 }, // تم تثبيت التقييم على 0 لتجنب الأخطاء
                 trade: { realTradeCount: soldCount },
                 _isLocal: true,
                 _isFreeShipping: isFreeShipping,
