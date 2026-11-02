@@ -1,4 +1,4 @@
-/* Nezzer History Test — content script (Skeleton Loading + Stealth Scroll) */
+/* Nezzer History Test — content script (Per-Card Skeleton + Stealth Scroll) */
 
 /* ============================================================
  *  MD5 (optimized)
@@ -53,7 +53,7 @@ function md5(str) {
 /* ============================================================
  *  Cache layer
  * ============================================================ */
-const CACHE_PREFIX = 'nz_cache_v5_'; // إصدار جديد لضمان التحديث
+const CACHE_PREFIX = 'nz_cache_v6_'; 
 const CACHE_TTL = 5 * 60 * 1000;
 const MEM_TTL = 30 * 1000;
 
@@ -215,7 +215,7 @@ function scanPageForProducts(sortByPopular = false) {
 }
 
 /* ============================================================
- *  Stealth Background Scroll
+ *  Stealth Background Scroll (بدون شاشة سوداء)
  * ============================================================ */
 async function triggerLazyLoadAndScan(sortByPopular = false) {
     let scrollContainer = document.scrollingElement || document.documentElement;
@@ -256,8 +256,7 @@ async function triggerLazyLoadAndScan(sortByPopular = false) {
                     } else {
                         scrollContainer.scrollTop = 0;
                     }
-                    
-                    resolve(scanPageForProducts(sortByPopular));
+                    resolve(scanPageForProducts(sortByPopular)); // إرجاع النتائج بعد التمرير
                 }, 1500); // الانتظار لتُحمل الصور
             }
         }, 80);
@@ -424,21 +423,17 @@ function injectWidget() {
       togglePanel(true);
 
       if (sortValue === 'history') {
-        postToIframe({ action: 'RENDER_SKELETON' }); // إظهار النبض
+        postToIframe({ action: 'RENDER_LOADING' });
         chrome.storage.local.get(['test_history'], r => {
           postToIframe({ action: 'RENDER_DATA', products: r.test_history || [] });
         });
         return;
       }
 
-      // الكاش
       if (_memCache && _memCache.sortValue === sortValue && Date.now() - _memCache.ts < MEM_TTL) {
         postToIframe({ action: 'RENDER_DATA', products: _memCache.products });
         return;
       }
-
-      // إظهار النبض فوراً في النافذة
-      postToIframe({ action: 'RENDER_SKELETON' });
 
       const stored = await getStoredCache(sortValue);
       if (stored) {
@@ -446,22 +441,33 @@ function injectWidget() {
         _memCache = { sortValue, products: stored.products, ts: Date.now() };
       }
 
-      // التمرير الخفي في الخلفية (بدون شاشة سوداء)
-      const scraped = await triggerLazyLoadAndScan(sortValue === 'popular');
+      // 1. التقاط أولي وإرساله فوراً (لتظهر العناوين والأسعار ومربع الصورة ينبض)
+      let initialScraped = scanPageForProducts(sortValue === 'popular');
+      if (initialScraped === 'CAPTCHA') {
+        postToIframe({ action: 'CAPTCHA_FOUND' });
+        return;
+      }
+      if (!stored) {
+         postToIframe({ action: 'RENDER_DATA', products: initialScraped });
+      }
+
+      // 2. بدء التمرير في الخلفية لجلب الصور
+      const finalScraped = await triggerLazyLoadAndScan(sortValue === 'popular');
       
-      if (scraped === 'CAPTCHA') {
+      if (finalScraped === 'CAPTCHA') {
         postToIframe({ action: 'CAPTCHA_FOUND' });
         return;
       }
       
-      const newFp = fingerprintProducts(scraped);
+      const newFp = fingerprintProducts(finalScraped);
       const changed = !stored || stored.fingerprint !== newFp;
 
-      _memCache = { sortValue, products: scraped, ts: Date.now() };
-      setStoredCache(sortValue, scraped);
+      _memCache = { sortValue, products: finalScraped, ts: Date.now() };
+      setStoredCache(sortValue, finalScraped);
 
+      // 3. إرسال النتائج النهائية (لتُستبدل الصور النابضة بالصور الحقيقية)
       if (changed || !stored) {
-        postToIframe({ action: 'RENDER_DATA', products: scraped });
+        postToIframe({ action: 'RENDER_DATA', products: finalScraped });
       }
     };
     return btn;
