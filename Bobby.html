@@ -93,49 +93,61 @@ function shuffleArray(array) {
     return array;
 }
 
-// الملتقط الذكي (يبحث في الروابط والنصوص والأرقام)
+// الماسح الوحشي (يقرأ كود HTML كاملاً ويستخرج الروابط)
 function collectPageProducts() {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return;
 
-    const links = document.querySelectorAll('a');
-    
+    // 1. البحث في الروابط المباشرة
+    const links = document.querySelectorAll('a[href*="/item/"]');
     for (const link of links) {
         try {
-            const href = link.href || '';
-            
-            // 1. البحث في الروابط التقليدية
-            let match = href.match(/\/(?:item|i)\/(\d{8,})\.html/) || href.match(/[?&]productId[s]?=(\d{8,})/);
-            let pid = match ? match[1] : null;
+            const match = link.href.match(/\/item\/(\d+)\.html/);
+            if (match) {
+                const pid = match[1];
+                if (!pageProductsCache.has(pid)) {
+                    let img = '';
+                    const imgEl = link.querySelector('img');
+                    if (imgEl) {
+                        let src = imgEl.src || imgEl.getAttribute('data-src') || '';
+                        if (src.startsWith('//')) src = 'https:' + src;
+                        if (src && !src.includes('tps') && !src.includes('banner')) img = src;
+                    }
 
-            // 2. البحث في النصوص أو خصائص العنصر
-            if (!pid) {
-                const textToSearch = (link.getAttribute('data-spm') || '') + (link.getAttribute('data-id') || '') + (link.innerText || '');
-                const numMatch = textToSearch.match(/\b(\d{12,15})\b/);
-                if (numMatch) pid = numMatch[1];
-            }
-
-            if (pid && !pageProductsCache.has(pid)) {
-                let img = '';
-                const imgEl = link.querySelector('img');
-                if (imgEl) {
-                    let src = imgEl.src || imgEl.getAttribute('data-src') || '';
-                    if (src.startsWith('//')) src = 'https:' + src;
-                    img = src;
+                    pageProductsCache.set(pid, {
+                        productId: pid,
+                        title: { displayTitle: '' },
+                        image: { imgUrl: img },
+                        prices: { salePrice: { formattedPrice: '' } },
+                        evaluation: { starRating: 0 },
+                        trade: { realTradeCount: 0 },
+                        _isLocal: true,
+                        _isFreeShipping: false,
+                        url: link.href
+                    });
                 }
-
-                pageProductsCache.set(pid, {
-                    productId: pid,
-                    title: { displayTitle: '' },
-                    image: { imgUrl: img },
-                    prices: { salePrice: { formattedPrice: '' } },
-                    evaluation: { starRating: 0 },
-                    trade: { realTradeCount: 0 },
-                    _isLocal: true,
-                    _isFreeShipping: false,
-                    url: `https://www.aliexpress.com/item/${pid}.html`
-                });
             }
         } catch (e) {}
+    }
+
+    // 2. الماسح الوحشي (يقرأ كود HTML كاملاً)
+    const htmlContent = document.body.innerHTML;
+    const regex = /\/item\/(\d{8,})\.html/g;
+    let match;
+    while ((match = regex.exec(htmlContent)) !== null) {
+        const pid = match[1];
+        if (!pageProductsCache.has(pid)) {
+            pageProductsCache.set(pid, {
+                productId: pid,
+                title: { displayTitle: '' },
+                image: { imgUrl: '' },
+                prices: { salePrice: { formattedPrice: '' } },
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: 0 },
+                _isLocal: true,
+                _isFreeShipping: false,
+                url: `https://www.aliexpress.com/item/${pid}.html`
+            });
+        }
     }
 }
 
@@ -398,7 +410,7 @@ function injectWidget() {
                             let scraped = Array.from(pageProductsCache.values());
 
                             if (scraped.length === 0) {
-                                await new Promise(r => setTimeout(r, 1000));
+                                await new Promise(r => setTimeout(r, 2000));
                                 collectPageProducts();
                                 scraped = Array.from(pageProductsCache.values());
                             }
