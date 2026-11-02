@@ -13,6 +13,10 @@ const FIRST_ROUND_SIZE = 12;
 const NEXT_ROUND_SIZE = 6;
 const STEP_SIZE = 3;
 
+// الذاكرة المؤقتة للمنتجات المكتشفة
+let pageProductsCache = new Map();
+let collectTimeout = null;
+
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
     'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ بدائل أفضل' },
@@ -89,69 +93,42 @@ function shuffleArray(array) {
     return array;
 }
 
-function scanPageForProducts(sortByPopular = false, randomize = false) {
+// دالة جمع المنتجات في الذاكرة المؤقتة
+function collectPageProducts() {
     const pageTitle = document.title.toLowerCase();
-    if (pageTitle.includes('security') || pageTitle.includes('captcha')) {
-        return Promise.resolve('CAPTCHA');
-    }
+    if (pageTitle.includes('security') || pageTitle.includes('captcha')) return;
 
-    return new Promise((resolve) => {
-        let collectedProducts = new Map();
-        let attempts = 0;
-        const maxAttempts = 15;
-
-        const scan = () => {
-            document.querySelectorAll('a[href*="/item/"], a[href*="/i/"]').forEach(link => {
-                const match = link.href.match(/\/(?:item|i)\/(\d{8,})\.html/);
-                if (match && !collectedProducts.has(match[1])) {
-                    collectedProducts.set(match[1], link.href);
+    const links = document.querySelectorAll('a[href*="/item/"], a[href*="/i/"]');
+    
+    for (const link of links) {
+        try {
+            const match = link.href.match(/\/(?:item|i)\/(\d{8,})\.html/);
+            if (!match) continue;
+            const pid = match[1];
+            
+            if (!pageProductsCache.has(pid)) {
+                let img = '';
+                const imgEl = link.querySelector('img');
+                if (imgEl) {
+                    let src = imgEl.src || imgEl.getAttribute('data-src') || '';
+                    if (src.startsWith('//')) src = 'https:' + src;
+                    if (src && !src.includes('tps') && !src.includes('banner')) img = src;
                 }
-            });
-        };
 
-        const checkAndResolve = () => {
-            scan();
-            attempts++;
-
-            if (collectedProducts.size >= 10) {
-                let products = Array.from(collectedProducts.values()).map(url => ({
-                    productId: url.match(/\/(?:item|i)\/(\d{8,})\.html/)[1],
+                pageProductsCache.set(pid, {
+                    productId: pid,
                     title: { displayTitle: '' },
-                    image: { imgUrl: '' },
+                    image: { imgUrl: img },
                     prices: { salePrice: { formattedPrice: '' } },
                     evaluation: { starRating: 0 },
                     trade: { realTradeCount: 0 },
                     _isLocal: true,
                     _isFreeShipping: false,
-                    url: url
-                }));
-                
-                if (randomize) products = shuffleArray(products);
-                return resolve(products.slice(0, 21));
+                    url: link.href
+                });
             }
-
-            if (attempts >= maxAttempts) {
-                let products = Array.from(collectedProducts.values()).map(url => ({
-                    productId: url.match(/\/(?:item|i)\/(\d{8,})\.html/)[1],
-                    title: { displayTitle: '' },
-                    image: { imgUrl: '' },
-                    prices: { salePrice: { formattedPrice: '' } },
-                    evaluation: { starRating: 0 },
-                    trade: { realTradeCount: 0 },
-                    _isLocal: true,
-                    _isFreeShipping: false,
-                    url: url
-                }));
-
-                if (randomize) products = shuffleArray(products);
-                return resolve(products.slice(0, 21));
-            }
-
-            setTimeout(checkAndResolve, 200);
-        };
-
-        checkAndResolve();
-    });
+        } catch (e) {}
+    }
 }
 
 function removeWidget() {
@@ -409,11 +386,16 @@ function injectWidget() {
 
                             try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                            const scraped = await scanPageForProducts(false, true);
+                            collectPageProducts(); // تحديث سريع
+                            let scraped = Array.from(pageProductsCache.values());
 
-                            if (scraped === 'CAPTCHA') {
-                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                            } else if (scraped.length === 0) {
+                            if (scraped.length === 0) {
+                                await new Promise(r => setTimeout(r, 1500));
+                                collectPageProducts();
+                                scraped = Array.from(pageProductsCache.values());
+                            }
+
+                            if (scraped.length === 0) {
                                 try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
                             } else {
                                 isFetchingAlternatives = true;
@@ -423,7 +405,7 @@ function injectWidget() {
                                 currentRoundTarget = FIRST_ROUND_SIZE;
                                 window._nezzerPendingRequest = false;
                                 
-                                const top21 = scraped.slice(0, 21);
+                                const top21 = shuffleArray(scraped).slice(0, 21);
                                 const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
                                 
                                 chrome.runtime.sendMessage({ 
@@ -561,12 +543,24 @@ function injectWidget() {
 
 injectWidget();
 
+// كشط أولي بمجرد تحميل الصفحة
+collectPageProducts();
+
+// مراقبة التغييرات في الصفحة (أثناء التمرير) وتحديث الذاكرة تلقائياً
+const pageObserver = new MutationObserver(() => {
+    clearTimeout(collectTimeout);
+    collectTimeout = setTimeout(collectPageProducts, 500);
+});
+pageObserver.observe(document.body, { childList: true, subtree: true });
+
 let lastUrl = location.href;
 new MutationObserver(() => {
     if (location.href !== lastUrl) {
         lastUrl = location.href;
+        pageProductsCache.clear();
         removeWidget();
         setTimeout(injectWidget, 1000);
+        setTimeout(collectPageProducts, 1500);
     }
 }).observe(document, {subtree: true, childList: true});
 
