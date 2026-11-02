@@ -89,7 +89,7 @@ function shuffleArray(array) {
     return array;
 }
 
-// الكود المستقر والأصلي للكشط
+// الكشف المبسط (فقط الروابط والمعرفات)
 function scanPageForProducts(sortByPopular = false, randomize = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
 
@@ -104,74 +104,16 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
             const pid = match[1];
             if (seen.has(pid)) continue;
 
-            let img = '';
-            const imgEls = link.querySelectorAll('img');
-            for (let el of imgEls) {
-                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
-                if (src.startsWith('//')) src = 'https:' + src;
-                if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
-                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
-                        img = src.split(' ')[0].split(',')[0];
-                        break;
-                    }
-                }
-            }
-            if (!img) {
-                const firstImg = link.querySelector('img');
-                if (firstImg) {
-                    img = firstImg.src || firstImg.getAttribute('data-src') || '';
-                    if (img.startsWith('//')) img = 'https:' + img;
-                }
-            }
-            if (!img) continue;
-
-            let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
-            if (!title || title.length < 5) {
-                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
-            }
-            if (!title) continue;
-            title = title.replace(/\n/g, ' ').trim().substring(0, 80);
-
-            let price = '—';
-            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
-            if (priceEl) {
-                const pText = priceEl.innerText.trim().split('\n')[0];
-                if (pText.match(/\d/)) price = pText;
-            }
-            if (price === '—') {
-                const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
-                if (priceMatch) price = priceMatch[0];
-            }
-
-            let soldCount = 0;
-            const text = link.innerText;
-            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
-            if (soldMatch) {
-                let numStr = soldMatch[1].toLowerCase().replace(',', '.');
-                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-            } else {
-                const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
-                if (tradeEl) {
-                    const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
-                    if (sMatch) {
-                        let numStr = sMatch[1].toLowerCase().replace(',', '.');
-                        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-                    }
-                }
-            }
-
-            let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
-
             seen.add(pid);
             products.push({
                 productId: pid,
-                title: { displayTitle: title },
-                image: { imgUrl: img },
-                prices: { salePrice: { formattedPrice: price } },
+                title: { displayTitle: '' },
+                image: { imgUrl: '' },
+                prices: { salePrice: { formattedPrice: '' } },
                 evaluation: { starRating: 0 },
-                trade: { realTradeCount: soldCount },
+                trade: { realTradeCount: 0 },
                 _isLocal: true,
-                _isFreeShipping: isFreeShipping,
+                _isFreeShipping: false,
                 url: link.href
             });
         } catch (e) {
@@ -182,7 +124,9 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
     if (randomize) {
         products = shuffleArray(products);
     }
-    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
+    if (sortByPopular) {
+        products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
+    }
     
     return products.slice(0, 21);
 }
@@ -436,48 +380,51 @@ function injectWidget() {
 
                     togglePanel(true);
 
-                    try {
-                        if (sortValue === 'betterAlternatives') {
-                            if (isFetchingAlternatives) return;
+                    // تأخير بسيط لضمان تحميل الصفحة قبل الكشط
+                    setTimeout(() => {
+                        try {
+                            if (sortValue === 'betterAlternatives') {
+                                if (isFetchingAlternatives) return;
 
-                            const scraped = scanPageForProducts(false, true);
-                            if (scraped === 'CAPTCHA') {
-                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                            } else if (scraped.length === 0) {
-                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
+                                const scraped = scanPageForProducts(false, true);
+                                if (scraped === 'CAPTCHA') {
+                                    try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                                } else if (scraped.length === 0) {
+                                    try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
+                                } else {
+                                    isFetchingAlternatives = true;
+                                    alternativesBuffer = [];
+                                    alternativesDelivered = 0;
+                                    currentRoundDelivered = 0;
+                                    currentRoundTarget = FIRST_ROUND_SIZE;
+                                    window._nezzerPendingRequest = false;
+                                    try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
+                                    
+                                    const top21 = scraped.slice(0, 21);
+                                    const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
+                                    
+                                    chrome.runtime.sendMessage({ 
+                                        action: 'FETCH_ALTERNATIVES', 
+                                        products: top21,
+                                        domain: domain
+                                    });
+                                }
                             } else {
-                                isFetchingAlternatives = true;
-                                alternativesBuffer = [];
-                                alternativesDelivered = 0;
-                                currentRoundDelivered = 0;
-                                currentRoundTarget = FIRST_ROUND_SIZE;
-                                window._nezzerPendingRequest = false;
-                                try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
-                                
-                                const top21 = scraped.slice(0, 21);
-                                const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
-                                
-                                chrome.runtime.sendMessage({ 
-                                    action: 'FETCH_ALTERNATIVES', 
-                                    products: top21,
-                                    domain: domain
+                                try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                            }
+
+                            if (chrome.runtime && chrome.runtime.id) {
+                                chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                                    if (chrome.runtime.lastError) return;
+                                    if (!result || !result.nezzer_disclaimer_accepted) {
+                                        setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                                    }
                                 });
                             }
-                        } else {
-                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                        } catch(err) {
+                            console.error("Nezzer Scan Error:", err);
                         }
-
-                        if (chrome.runtime && chrome.runtime.id) {
-                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                                if (chrome.runtime.lastError) return;
-                                if (!result || !result.nezzer_disclaimer_accepted) {
-                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
-                                }
-                            });
-                        }
-                    } catch(err) {
-                        console.error("Nezzer Scan Error:", err);
-                    }
+                    }, 500);
                 }
             };
             return btn;
