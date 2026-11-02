@@ -4,7 +4,11 @@ let iframe = null;
 let sidebar = null;
 let darkModeQueryRef = null;
 let darkModeListenerRef = null;
-let isFetchingAlternatives = false; // قفل لمنع الجلب المتكرر أثناء التحميل
+let isFetchingAlternatives = false;
+let alternativesBuffer = [];
+let alternativesDelivered = 0;
+const ALTERNATIVES_FIRST_BATCH = 12;
+const ALTERNATIVES_STEP = 6;
 
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
@@ -176,7 +180,7 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
     }
     if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
     
-    return products.slice(0, 20);
+    return products.slice(0, 21);
 }
 
 function removeWidget() {
@@ -239,7 +243,7 @@ function injectWidget() {
 
         let isOpen = false;
         let currentSide = 'left';
-        let activeSort = isProductPage ? 'popular' : 'thisPage';
+        let activeSort = isProductPage ? 'popular' : 'betterAlternatives';
         let disclaimerEl = null;
 
         widgetWrapper = document.createElement('div');
@@ -398,18 +402,9 @@ function injectWidget() {
                     togglePanel(true);
 
                     try {
-                        if (sortValue === 'thisPage') {
-                            const scraped = scanPageForProducts(false, false);
-                            if (scraped === 'CAPTCHA') {
-                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                            } else {
-                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
-                            }
-                        } else if (sortValue === 'betterAlternatives') {
-                            // إذا كانت عملية جلب سابقة لا تزال تعمل، لا تفعل شيئاً لمنع التكرار
+                        if (sortValue === 'betterAlternatives') {
                             if (isFetchingAlternatives) return;
 
-                            // جلب منتجات عشوائية جديدة في كل مرة يتم فيها الضغط على الزر
                             const scraped = scanPageForProducts(false, true);
                             if (scraped === 'CAPTCHA') {
                                 try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
@@ -417,14 +412,16 @@ function injectWidget() {
                                 try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
                             } else {
                                 isFetchingAlternatives = true;
+                                alternativesBuffer = [];
+                                alternativesDelivered = 0;
                                 try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
                                 
-                                const top20 = scraped.slice(0, 20);
+                                const top21 = scraped.slice(0, 21);
                                 const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
                                 
                                 chrome.runtime.sendMessage({ 
                                     action: 'FETCH_ALTERNATIVES', 
-                                    products: top20,
+                                    products: top21,
                                     domain: domain
                                 });
                             }
@@ -456,16 +453,16 @@ function injectWidget() {
             activeSort = 'popular';
             btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
         } else {
-            btnTop = createSortBtn(t('thisPage'), 'thisPage');
-            btnMiddle = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+            btnTop = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+            btnMiddle = null;
             btnBottom = null;
-            activeSort = 'thisPage';
+            activeSort = 'betterAlternatives';
             btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnTop.style.color = 'white'; btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
         }
 
         pillContainer.appendChild(dragHandle);
         pillContainer.appendChild(btnTop);
-        pillContainer.appendChild(btnMiddle);
+        if (btnMiddle) pillContainer.appendChild(btnMiddle);
         if (btnBottom) pillContainer.appendChild(btnBottom);
 
         sidebar.appendChild(pillContainer);
@@ -490,72 +487,4 @@ function injectWidget() {
         window.addEventListener('wheel', (e) => {
             if (!isOpen) return;
             if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            if (disclaimerEl && disclaimerEl.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            scrollAccumulated += Math.abs(e.deltaY);
-            clearTimeout(scrollResetTimer);
-            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
-            if (scrollAccumulated >= 150) { togglePanel(false); scrollAccumulated = 0; clearTimeout(scrollResetTimer); }
-        }, { passive: true });
-
-        function setSide(side) {
-            currentSide = side;
-            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
-                if (side === 'left') btn.style.transform = 'rotate(180deg)';
-                else btn.style.transform = 'rotate(0deg)';
-            });
-            if (side === 'right') {
-                sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '40px 0 0 40px';
-                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                if (disclaimerEl) { disclaimerEl.style.left = 'auto'; disclaimerEl.style.right = '60px'; }
-            } else {
-                sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 40px 40px 0';
-                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                if (disclaimerEl) { disclaimerEl.style.right = 'auto'; disclaimerEl.style.left = '60px'; }
-            }
-        }
-
-        let isDragging = false;
-        dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); }
-            else { if (currentSide !== 'right') setSide('right'); }
-        });
-        window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
-
-    } catch(err) {
-        console.error("Nezzer Error:", err);
-    }
-}
-
-injectWidget();
-
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
-    }
-}).observe(document, {subtree: true, childList: true});
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.action === 'ALTERNATIVE_PROGRESS') {
-        try { if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ action: 'UPDATE_PROGRESS', current: msg.current, total: msg.total }, '*'); } catch(e) {}
-    }
-    if (msg.action === 'ALTERNATIVE_BATCH') {
-        try { if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: msg.alternatives }, '*'); } catch(e) {}
-    }
-    if (msg.action === 'ALTERNATIVES_FINISHED') {
-        isFetchingAlternatives = false; // فتح القفل عند انتهاء الجلب
-        try { if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED' }, '*'); } catch(e) {}
-    }
-});
+            if (disclaimerEl && disclaimerEl.contains(e.target)) { scroll
