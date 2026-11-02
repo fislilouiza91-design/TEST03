@@ -1,4 +1,4 @@
-/* Nezzer History Test — content script (Background Stealth Scroll + MD5 Cache) */
+/* Nezzer History Test — content script (Force Stealth Scroll + Cache) */
 
 /* ============================================================
  *  MD5 (optimized)
@@ -53,7 +53,7 @@ function md5(str) {
 /* ============================================================
  *  Cache layer
  * ============================================================ */
-const CACHE_PREFIX = 'nz_cache_v3_'; 
+const CACHE_PREFIX = 'nz_cache_v4_'; // تم تغيير الإصدار لإجبار جلب صور جديدة
 const CACHE_TTL = 5 * 60 * 1000;
 const MEM_TTL = 30 * 1000;
 
@@ -142,12 +142,10 @@ function extractImageUrl(link) {
     let src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original') || img.getAttribute('src');
     if (src && src.startsWith('//')) src = 'https:' + src;
 
-    // التحقق من أن الصورة حقيقية وليست مؤقتة
     if (src && !src.startsWith('data:image') && !src.includes('11.11') && !src.includes('choice') && !src.includes('placeholder') && !src.includes('.gif')) {
       return src;
     }
     
-    // فحص srcset
     const srcset = img.getAttribute('srcset');
     if (srcset) {
       const parts = srcset.split(',');
@@ -161,14 +159,13 @@ function extractImageUrl(link) {
     }
   }
 
-  // فحص خلفية العناصر
   const elementsWithBg = [link, ...link.querySelectorAll('div, span')];
   for (const el of elementsWithBg) {
-    const bg = el.style.backgroundImage;
+    const bg = el.style.backgroundImage || window.getComputedStyle(el).backgroundImage;
     if (bg && bg.includes('url(')) {
       let url = bg.slice(5, -2).replace(/['"]/g, '');
       if (url.startsWith('//')) url = 'https:' + url;
-      if (url && !url.includes('11.11') && !url.includes('choice')) {
+      if (url && !url.includes('11.11') && !url.includes('choice') && !url.includes('data:image')) {
         return url;
       }
     }
@@ -218,20 +215,12 @@ function scanPageForProducts(sortByPopular = false) {
 }
 
 /* ============================================================
- *  Stealth Background Scroll & Scan
+ *  Force Stealth Scroll (The Magic)
  * ============================================================ */
 async function triggerLazyLoadAndScan(sortByPopular = false) {
-    // 1. المحاولة الأولى لقراءة البيانات
-    let products = scanPageForProducts(sortByPopular);
-    if (products === 'CAPTCHA') return 'CAPTCHA';
-
-    // 2. إذا كانت معظم الصور مفقودة، نقوم بالتمرير الخفي
-    const missingImages = products.filter(p => !p.img).length;
-    if (products.length > 0 && missingImages === 0) {
-        return products; // كل شيء جاهز
-    }
-
-    // 3. إنشاء طبقة التمويه (Overlay)
+    console.log("🛠️ [Nezzer] بدء التمرير الخفي...");
+    
+    // 1. إظهار شاشة التحميل
     const overlay = document.createElement('div');
     overlay.style.cssText = `
         position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; 
@@ -239,44 +228,69 @@ async function triggerLazyLoadAndScan(sortByPopular = false) {
         z-index: 2147483647; display: flex; flex-direction: column; 
         align-items: center; justify-content: center; font-family: sans-serif; 
         font-weight: bold; color: white; opacity: 0; transition: opacity 0.3s;
-        pointer-events: none;
+        pointer-events: auto;
     `;
     overlay.innerHTML = `
         <div style="width:40px; height:40px; border:4px solid #ff6b35; border-top-color:transparent; border-radius:50%; animation:nz-spin 1s linear infinite; margin-bottom:20px;"></div>
-        <div>Loading Images...</div>
+        <div style="color: white; font-size: 16px;">Loading Images...</div>
         <style>@keyframes nz-spin { 100% { transform: rotate(360deg); } }</style>
     `;
     document.body.appendChild(overlay);
     requestAnimationFrame(() => { overlay.style.opacity = '1'; });
 
-    const originalScroll = window.scrollY;
+    // 2. البحث عن الحاوية الحقيقية للتمرير (لأن علي إكسبريس لا يستخدم نافذة المتصفح)
+    let scrollContainer = document.scrollingElement || document.documentElement;
+    let maxScrollHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
     
-    // 4. التمرير التدريجي لأسفل (محاكاة الإنسان)
+    const divs = document.querySelectorAll('div');
+    for (const div of divs) {
+        const style = window.getComputedStyle(div);
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && div.scrollHeight > div.clientHeight && div.clientHeight > window.innerHeight * 0.5) {
+            scrollContainer = div;
+            maxScrollHeight = div.scrollHeight;
+            console.log("🎯 [Nezzer] تم العثور على حاوية تمرير داخلية");
+            break;
+        }
+    }
+
+    const originalScrollY = window.scrollY;
+
     return new Promise(resolve => {
-        const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
         let currentScroll = 0;
+        let steps = 0;
         
+        // 3. التمرير التدريجي
         const scrollInterval = setInterval(() => {
-            // خطوات عشوائية لتبدو طبيعية
-            currentScroll += (500 + Math.random() * 300); 
-            window.scrollTo(0, currentScroll);
+            currentScroll += 600; // خطوة 600 بكسل
+            steps++;
             
-            if (currentScroll >= maxScroll) {
+            if (scrollContainer === document.scrollingElement || scrollContainer === document.documentElement || scrollContainer === document.body) {
+                window.scrollTo(0, currentScroll);
+            } else {
+                scrollContainer.scrollTop = currentScroll;
+            }
+
+            if (currentScroll >= maxScrollHeight || steps > 15) {
                 clearInterval(scrollInterval);
+                console.log(`✅ [Nezzer] وصلنا للأسفل (${steps} خطوات). ننتظر تحميل الصور...`);
                 
-                // 5. الانتظار حتى تقوم الشبكة بتحميل الصور
+                // 4. الانتظار حتى تحميل الصور
                 setTimeout(() => {
-                    window.scrollTo(0, originalScroll); // العودة لمكان المستخدم
+                    if (scrollContainer === document.scrollingElement || scrollContainer === document.documentElement || scrollContainer === document.body) {
+                        window.scrollTo(0, originalScrollY);
+                    } else {
+                        scrollContainer.scrollTop = 0;
+                    }
                     
                     overlay.style.opacity = '0';
                     setTimeout(() => {
                         overlay.remove();
-                        // التقاط البيانات مرة أخرى بعد التحميل
+                        console.log("🚀 [Nezzer] انتهى التحميل، جاري استخراج المنتجات.");
                         resolve(scanPageForProducts(sortByPopular));
                     }, 300);
-                }, 1500); // الانتظار ثانية ونصف في أسفل الصفحة
+                }, 2000); // الانتظار ثانيتين
             }
-        }, 50 + Math.random() * 50); // سرعة عشوائية
+        }, 100);
     });
 }
 
@@ -426,6 +440,7 @@ function injectWidget() {
 
     btn.onclick = async (e) => {
       e.stopPropagation();
+      console.log("🖱️ [Nezzer] تم النقر على:", sortValue);
 
       if (activeSort === sortValue && isOpen) { togglePanel(false); return; }
 
@@ -460,7 +475,7 @@ function injectWidget() {
         _memCache = { sortValue, products: stored.products, ts: Date.now() };
       }
 
-      // استخدام دالة التمرير الخفي لضمان جلب الصور
+      // هنا يتم استدعاء التمرير الخفي
       const scraped = await triggerLazyLoadAndScan(sortValue === 'popular');
       
       if (scraped === 'CAPTCHA') {
