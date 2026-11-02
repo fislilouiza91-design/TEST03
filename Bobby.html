@@ -1,439 +1,117 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Privacy Policy - Nezzer</title>
-    <style>
-        :root {
-            --bg-color: #f8fafc;
-            --text-color: #334155;
-            --heading-color: #0f172a;
-            --primary-color: #ff4747;
-            --card-bg: #ffffff;
-            --border-color: #e2e8f0;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg-color: #16161c;
-                --text-color: #cbd5e1;
-                --heading-color: #f1f5f9;
-                --primary-color: #ff6b35;
-                --card-bg: #1e1e24;
-                --border-color: #2a2a33;
+function scanPageForProducts(sortByPopular = false) {
+    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
+
+    let products = [];
+    const seen = new Set();
+    const links = document.querySelectorAll('a[href*="/item/"]');
+
+    for (const link of links) {
+        const match = link.href.match(/\/item\/(\d+)\.html/);
+        if (!match) continue;
+        const pid = match[1];
+        if (seen.has(pid)) continue;
+
+        // 1. جلب الصورة
+        let img = '';
+        const imgEls = link.querySelectorAll('img');
+        for (let el of imgEls) {
+            let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
+            if (src.startsWith('//')) src = 'https:' + src;
+            if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
+                if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
+                    img = src.split(' ')[0].split(',')[0];
+                    break;
+                }
             }
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            line-height: 1.6;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            padding: 40px 20px;
-            transition: background-color 0.3s, color 0.3s;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: var(--card-bg);
-            padding: 40px;
-            border-radius: 16px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-            border: 1px solid var(--border-color);
-        }
-        h1 {
-            color: var(--primary-color);
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        h2 {
-            color: var(--heading-color);
-            margin-top: 30px;
-            margin-bottom: 15px;
-            font-size: 20px;
-            border-bottom: 2px solid var(--border-color);
-            padding-bottom: 5px;
-        }
-        p { margin-bottom: 15px; }
-        ul { margin: 0 0 15px 20px; }
-        li { margin-bottom: 8px; }
-        strong { color: var(--heading-color); }
-        code {
-            background: var(--bg-color);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 13px;
-            font-family: "SF Mono", Monaco, Consolas, monospace;
-        }
-        .date {
-            font-size: 14px;
-            color: #94a3b8;
-            margin-bottom: 30px;
-            display: block;
-            font-style: italic;
-        }
-        a { color: var(--primary-color); text-decoration: none; word-break: break-word; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1 id="pp-title"></h1>
-        <span class="date" id="pp-date"></span>
-
-        <h2 id="pp-h-intro"></h2>
-        <p id="pp-p-intro"></p>
-
-        <h2 id="pp-h-indep"></h2>
-        <p id="pp-p-indep"></p>
-
-        <h2 id="pp-h-data"></h2>
-        <p id="pp-p-data-1"></p>
-        <p id="pp-p-data-2"></p>
-        <p id="pp-p-data-3"></p>
-
-        <h2 id="pp-h-storage"></h2>
-        <p id="pp-p-storage"></p>
-
-        <h2 id="pp-h-perm"></h2>
-        <p id="pp-p-perm"></p>
-        <ul id="pp-ul-perm"></ul>
-
-        <h2 id="pp-h-third"></h2>
-        <p id="pp-p-third"></p>
-        <p id="pp-p-third-2"></p>
-
-        <h2 id="pp-h-changes"></h2>
-        <p id="pp-p-changes"></p>
-
-        <h2 id="pp-h-contact"></h2>
-        <p id="pp-p-contact"></p>
-    </div>
-
-    <script>
-        const PP_TEXTS = {
-            'en': {
-                title: 'Privacy Policy for Nezzer',
-                date: 'Last updated: November 2026',
-                h_intro: '1. Introduction',
-                p_intro: 'This Privacy Policy explains how Nezzer ("we", "our", or "the extension") handles user data. We are committed to protecting your privacy and being transparent about our practices.',
-                h_indep: '2. Independence',
-                p_indep: 'Nezzer is an independent product. We are not AliExpress or Alibaba, and we are not endorsed by them. We participate in the AliExpress affiliate program. When you purchase through our links, we may earn a small commission at no extra cost to you.',
-                h_data: '3. Data Collection and Usage',
-                p_data_1: 'We do not collect, store on our servers, or transmit any personal data. We do not collect your name, email address, passwords, or general browsing history.',
-                p_data_2: 'To provide our product recommendation features, the extension reads publicly available product information and uses specific AliExpress technical cookies strictly to communicate with AliExpress official APIs. This processing happens locally in your browser and is never sent to our servers.',
-                p_data_3: 'Specifically, the extension reads the following AliExpress cookies: _m_h5_tk (API signature token), cna (visitor identifier), aep_usuc_f (currency and region preferences), and xman_us_f (language and locale). These are technical cookies set by AliExpress itself and contain no personal information.',
-                h_storage: '4. Local Storage',
-                p_storage: 'The extension stores a single boolean flag in your browser using chrome.storage.local: whether you have accepted the affiliate disclaimer. This flag never leaves your device and is not sent to any server. You can reset it at any time by removing the extension or by clearing your browser extension data.',
-                h_perm: '5. Permissions and Their Purpose',
-                p_perm: 'Each permission requested by the extension has a specific, limited purpose:',
-                ul_perm: [
-                    '<strong>storage:</strong> Remember disclaimer acceptance.',
-                    '<strong>scripting:</strong> Inject the sidebar UI into AliExpress pages, read product identifiers from the page, and call AliExpress official recommendation API from the page context (required because the API enforces CORS).',
-                    '<strong>tabs:</strong> Detect whether the current tab is an AliExpress product page to enable the "Find Similar" feature.',
-                    '<strong>cookies:</strong> Read the AliExpress technical cookies listed in section 3 to sign API requests and display prices in your local currency.',
-                    '<strong>host_permissions:</strong> Operate only on AliExpress domains (.com, .us, .ru).'
-                ],
-                h_third: '6. Third-Party Links and Services',
-                p_third: 'Our extension generates affiliate links. When you click a product in the sidebar, the product URL is sent to our Cloudflare Worker service, which returns an official AliExpress affiliate link and redirects you to it. Only the product URL is transmitted, no personal data. The service caches generated links to improve performance.',
-                p_third_2: 'We do not control how AliExpress handles your data once you are redirected. Please refer to the AliExpress Privacy Policy for details on their data practices.',
-                h_changes: '7. Changes to This Policy',
-                p_changes: 'We may update our Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy on this page and updating the "Last updated" date above.',
-                h_contact: '8. Contact Us',
-                p_contact: 'If you have any questions about this Privacy Policy, you can contact us at: support@nezzer.com'
-            },
-            'ar': {
-                title: 'سياسة الخصوصية لإضافة Nezzer',
-                date: 'آخر تحديث: نوفمبر 2026',
-                h_intro: '1. مقدمة',
-                p_intro: 'توضح سياسة الخصوصية هذه كيفية تعامل إضافة Nezzer ("نحن" أو "الإضافة") مع بيانات المستخدم. نحن ملتزمون بحماية خصوصيتك وبالشفافية التامة بشأن ممارساتنا.',
-                h_indep: '2. الاستقلالية',
-                p_indep: 'Nezzer هو منتج مستقل. نحن لسنا شركة AliExpress أو Alibaba، ولسنا مدعومين رسمياً منهم. نحن نشارك في برنامج التسويق بالعمولة الخاص بـ AliExpress. عند الشراء عبر روابطنا، قد نحصل على عمولة صغيرة دون أي تكلفة إضافية عليك.',
-                h_data: '3. جمع البيانات واستخدامها',
-                p_data_1: 'نحن لا نجمع أو نخزن على خوادمنا أو نرسل أي بيانات شخصية. لا نجمع اسمك أو بريدك الإلكتروني أو كلمات المرور أو سجل التصفح العام.',
-                p_data_2: 'لتقديم ميزات اقتراح المنتجات، تقرأ الإضافة معلومات المنتجات المتاحة للعامة وتستخدم ملفات تعريف ارتباط تقنية خاصة بـ AliExpress حصرياً للتواصل مع واجهات برمجة التطبيقات الرسمية. تتم هذه المعالجة محلياً في متصفحك ولا تُرسل أبداً إلى خوادمنا.',
-                p_data_3: 'تحديداً، تقرأ الإضافة ملفات تعريف الارتباط التالية الخاصة بـ AliExpress: _m_h5_tk (رمز توقيع الـ API)، cna (معرّف الزائر)، aep_usuc_f (تفضيلات العملة والمنطقة)، و xman_us_f (اللغة والموقع الجغرافي). هذه ملفات تقنية تضعها AliExpress نفسها ولا تحتوي على أي معلومات شخصية.',
-                h_storage: '4. التخزين المحلي',
-                p_storage: 'تخزّن الإضافة علامة منطقية واحدة في متصفحك باستخدام chrome.storage.local: ما إذا كنت قد قبلت إفصاح العمولة. هذه العلامة لا تغادر جهازك أبداً ولا تُرسل إلى أي خادم. يمكنك إعادة تعيينها في أي وقت عبر إزالة الإضافة أو مسح بيانات الإضافات في المتصفح.',
-                h_perm: '5. الأذونات والغرض منها',
-                p_perm: 'كل إذن تطلبه الإضافة له غرض محدد ومحدود:',
-                ul_perm: [
-                    '<strong>storage:</strong> تذكر قبول إفصاح العمولة.',
-                    '<strong>scripting:</strong> حقن واجهة الشريط الجانبي في صفحات AliExpress، وقراءة معرفات المنتجات من الصفحة، واستدعاء واجهة API التوصيات الرسمية من سياق الصفحة (مطلوب لأن الـ API يفرض CORS).',
-                    '<strong>tabs:</strong> كشف ما إذا كان التبويب الحالي صفحة منتج AliExpress لتفعيل ميزة "البحث عن مشابه".',
-                    '<strong>cookies:</strong> قراءة ملفات تعريف الارتباط التقنية لـ AliExpress المذكورة في القسم 3 لتوقيع طلبات الـ API وعرض الأسعار بعملتك المحلية.',
-                    '<strong>host_permissions:</strong> العمل حصرياً على نطاقات AliExpress (.com و .us و .ru).'
-                ],
-                h_third: '6. روابط وخدمات الطرف الثالث',
-                p_third: 'تنشئ إضافتنا روابط تسويق بالعمولة. عند النقر على منتج في الشريط الجانبي، يُرسل رابط المنتج إلى خدمة Cloudflare Worker الخاصة بنا، والتي تعيد رابط عمولة رسمي من AliExpress وتوجّهك إليه. يُنقل رابط المنتج فقط، دون أي بيانات شخصية. تخزّن الخدمة الروابط المولّدة مؤقتاً لتحسين الأداء.',
-                p_third_2: 'نحن لا نتحكم في كيفية تعامل AliExpress مع بياناتك بعد إعادة التوجيه. يرجى الرجوع إلى سياسة الخصوصية الخاصة بـ AliExpress للحصول على التفاصيل.',
-                h_changes: '7. التغييرات في هذه السياسة',
-                p_changes: 'قد نقوم بتحديث سياسة الخصوصية من وقت لآخر. سنخطرك بأي تغييرات عن طريق نشر السياسة الجديدة على هذه الصفحة وتحديث تاريخ "آخر تحديث" أعلاه.',
-                h_contact: '8. اتصل بنا',
-                p_contact: 'إذا كان لديك أي أسئلة حول سياسة الخصوصية هذه، يمكنك الاتصال بنا على: support@nezzer.com'
-            },
-            'fr': {
-                title: 'Politique de confidentialité pour Nezzer',
-                date: 'Dernière mise à jour : Novembre 2026',
-                h_intro: '1. Introduction',
-                p_intro: 'Cette politique de confidentialité explique comment Nezzer ("nous" ou "l\'extension") gère les données des utilisateurs. Nous nous engageons à protéger votre vie privée et à être transparents sur nos pratiques.',
-                h_indep: '2. Indépendance',
-                p_indep: 'Nezzer est un produit indépendant. Nous ne sommes ni AliExpress ni Alibaba et ne sommes pas approuvés par eux. Nous participons au programme d\'affiliation AliExpress. Lorsque vous achetez via nos liens, nous pouvons gagner une petite commission sans frais supplémentaires pour vous.',
-                h_data: '3. Collecte et utilisation des données',
-                p_data_1: 'Nous ne collectons, ne stockons sur nos serveurs, ni ne transmettons aucune donnée personnelle. Nous ne collectons pas votre nom, votre adresse e-mail, vos mots de passe ou votre historique de navigation général.',
-                p_data_2: 'Pour fournir nos fonctionnalités de recommandation de produits, l\'extension lit les informations publiques sur les produits et utilise des cookies techniques spécifiques à AliExpress pour communiquer strictement avec les API officielles d\'AliExpress. Ce traitement se fait localement dans votre navigateur et n\'est jamais envoyé à nos serveurs.',
-                p_data_3: 'Plus précisément, l\'extension lit les cookies AliExpress suivants : _m_h5_tk (jeton de signature API), cna (identifiant de visiteur), aep_usuc_f (préférences de devise et de région), et xman_us_f (langue et locale). Ce sont des cookies techniques définis par AliExpress lui-même et qui ne contiennent aucune information personnelle.',
-                h_storage: '4. Stockage local',
-                p_storage: 'L\'extension stocke un seul indicateur booléen dans votre navigateur via chrome.storage.local : si vous avez accepté l\'avertissement d\'affiliation. Cet indicateur ne quitte jamais votre appareil et n\'est envoyé à aucun serveur. Vous pouvez le réinitialiser à tout moment en supprimant l\'extension ou en vidant les données de l\'extension dans votre navigateur.',
-                h_perm: '5. Autorisations et leur finalité',
-                p_perm: 'Chaque autorisation demandée par l\'extension a une finalité spécifique et limitée :',
-                ul_perm: [
-                    '<strong>storage :</strong> Mémoriser l\'acceptation de l\'avertissement.',
-                    '<strong>scripting :</strong> Injecter l\'interface latérale dans les pages AliExpress, lire les identifiants produits, et appeler l\'API officielle de recommandation depuis le contexte de la page (nécessaire car l\'API impose CORS).',
-                    '<strong>tabs :</strong> Détecter si l\'onglet actif est une page produit AliExpress pour activer la fonctionnalité "Trouver similaire".',
-                    '<strong>cookies :</strong> Lire les cookies techniques AliExpress listés à la section 3 pour signer les requêtes API et afficher les prix dans votre devise locale.',
-                    '<strong>host_permissions :</strong> Fonctionner uniquement sur les domaines AliExpress (.com, .us, .ru).'
-                ],
-                h_third: '6. Liens et services tiers',
-                p_third: 'Notre extension génère des liens d\'affiliation. Lorsque vous cliquez sur un produit dans le panneau latéral, l\'URL du produit est envoyée à notre service Cloudflare Worker, qui renvoie un lien d\'affiliation officiel AliExpress et vous y redirige. Seule l\'URL du produit est transmise, aucune donnée personnelle. Le service met en cache les liens générés pour améliorer les performances.',
-                p_third_2: 'Nous ne contrôlons pas la façon dont AliExpress traite vos données après la redirection. Veuillez consulter la Politique de confidentialité d\'AliExpress pour plus de détails.',
-                h_changes: '7. Modifications de cette politique',
-                p_changes: 'Nous pouvons mettre à jour notre politique de confidentialité de temps à autre. Nous vous informerons de tout changement en publiant la nouvelle politique sur cette page et en mettant à jour la date de "Dernière mise à jour" ci-dessus.',
-                h_contact: '8. Contactez-nous',
-                p_contact: 'Si vous avez des questions concernant cette politique de confidentialité, vous pouvez nous contacter à : support@nezzer.com'
-            },
-            'es': {
-                title: 'Política de privacidad de Nezzer',
-                date: 'Última actualización: Noviembre de 2026',
-                h_intro: '1. Introducción',
-                p_intro: 'Esta Política de privacidad explica cómo Nezzer ("nosotros" o "la extensión") maneja los datos de los usuarios. Estamos comprometidos a proteger su privacidad y ser transparentes sobre nuestras prácticas.',
-                h_indep: '2. Independencia',
-                p_indep: 'Nezzer es un producto independiente. No somos AliExpress ni Alibaba, y no estamos respaldados por ellos. Participamos en el programa de afiliados de AliExpress. Cuando compra a través de nuestros enlaces, podemos ganar una pequeña comisión sin costo adicional para usted.',
-                h_data: '3. Recopilación y uso de datos',
-                p_data_1: 'No recopilamos, almacenamos en nuestros servidores ni transmitimos ningún dato personal. No recopilamos su nombre, dirección de correo electrónico, contraseñas ni historial de navegación general.',
-                p_data_2: 'Para proporcionar nuestras funciones de recomendación de productos, la extensión lee información de productos disponible públicamente y utiliza cookies técnicas específicas de AliExpress estrictamente para comunicarse con las API oficiales de AliExpress. Este procesamiento ocurre localmente en su navegador y nunca se envía a nuestros servidores.',
-                p_data_3: 'Específicamente, la extensión lee las siguientes cookies de AliExpress: _m_h5_tk (token de firma de API), cna (identificador de visitante), aep_usuc_f (preferencias de moneda y región) y xman_us_f (idioma y configuración regional). Son cookies técnicas establecidas por el propio AliExpress y no contienen información personal.',
-                h_storage: '4. Almacenamiento local',
-                p_storage: 'La extensión almacena un único indicador booleano en su navegador usando chrome.storage.local: si ha aceptado el aviso de afiliados. Este indicador nunca sale de su dispositivo y no se envía a ningún servidor. Puede restablecerlo en cualquier momento eliminando la extensión o borrando los datos de extensiones en su navegador.',
-                h_perm: '5. Permisos y su propósito',
-                p_perm: 'Cada permiso solicitado por la extensión tiene un propósito específico y limitado:',
-                ul_perm: [
-                    '<strong>storage:</strong> Recordar la aceptación del aviso de afiliados.',
-                    '<strong>scripting:</strong> Inyectar la interfaz lateral en las páginas de AliExpress, leer identificadores de productos y llamar a la API oficial de recomendaciones desde el contexto de la página (necesario porque la API impone CORS).',
-                    '<strong>tabs:</strong> Detectar si la pestaña actual es una página de producto de AliExpress para habilitar la función "Buscar similar".',
-                    '<strong>cookies:</strong> Leer las cookies técnicas de AliExpress listadas en la sección 3 para firmar solicitudes de API y mostrar precios en su moneda local.',
-                    '<strong>host_permissions:</strong> Funcionar únicamente en dominios de AliExpress (.com, .us, .ru).'
-                ],
-                h_third: '6. Enlaces y servicios de terceros',
-                p_third: 'Nuestra extensión genera enlaces de afiliados. Cuando hace clic en un producto en el panel lateral, la URL del producto se envía a nuestro servicio Cloudflare Worker, que devuelve un enlace de afiliado oficial de AliExpress y lo redirige a él. Solo se transmite la URL del producto, sin datos personales. El servicio almacena en caché los enlaces generados para mejorar el rendimiento.',
-                p_third_2: 'No controlamos cómo AliExpress maneja sus datos después de la redirección. Consulte la Política de privacidad de AliExpress para obtener más detalles.',
-                h_changes: '7. Cambios a esta política',
-                p_changes: 'Podemos actualizar nuestra Política de privacidad de vez en cuando. Le notificaremos de cualquier cambio publicando la nueva Política en esta página y actualizando la fecha de "Última actualización" arriba.',
-                h_contact: '8. Contáctenos',
-                p_contact: 'Si tiene alguna pregunta sobre esta Política de privacidad, puede contactarnos en: support@nezzer.com'
-            },
-            'de': {
-                title: 'Datenschutzrichtlinie für Nezzer',
-                date: 'Zuletzt aktualisiert: November 2026',
-                h_intro: '1. Einleitung',
-                p_intro: 'Diese Datenschutzrichtlinie erklärt, wie Nezzer ("wir" oder "die Erweiterung") mit Benutzerdaten umgeht. Wir sind bestrebt, Ihre Privatsphäre zu schützen und transparent über unsere Praktiken zu informieren.',
-                h_indep: '2. Unabhängigkeit',
-                p_indep: 'Nezzer ist ein unabhängiges Produkt. Wir sind nicht AliExpress oder Alibaba und werden von diesen nicht unterstützt. Wir nehmen am AliExpress-Partnerprogramm teil. Wenn Sie über unsere Links einkaufen, erhalten wir möglicherweise eine kleine Provision, ohne dass Ihnen zusätzliche Kosten entstehen.',
-                h_data: '3. Datenerfassung und -nutzung',
-                p_data_1: 'Wir sammeln, speichern auf unseren Servern oder übertragen keine personenbezogenen Daten. Wir sammeln nicht Ihren Namen, Ihre E-Mail-Adresse, Passwörter oder Ihren allgemeinen Browserverlauf.',
-                p_data_2: 'Um unsere Produktempfehlungsfunktionen bereitzustellen, liest die Erweiterung öffentlich verfügbare Produktinformationen und verwendet spezifische technische Cookies von AliExpress ausschließlich zur Kommunikation mit den offiziellen APIs von AliExpress. Diese Verarbeitung erfolgt lokal in Ihrem Browser und wird niemals an unsere Server gesendet.',
-                p_data_3: 'Konkret liest die Erweiterung folgende AliExpress-Cookies: _m_h5_tk (API-Signatur-Token), cna (Besucherkennung), aep_usuc_f (Währungs- und Regionseinstellungen) und xman_us_f (Sprache und Gebietsschema). Dies sind technische Cookies, die von AliExpress selbst gesetzt werden und keine persönlichen Informationen enthalten.',
-                h_storage: '4. Lokale Speicherung',
-                p_storage: 'Die Erweiterung speichert ein einzelnes boolesches Flag in Ihrem Browser über chrome.storage.local: ob Sie den Partner-Haftungsausschluss akzeptiert haben. Dieses Flag verlässt niemals Ihr Gerät und wird an keinen Server gesendet. Sie können es jederzeit zurücksetzen, indem Sie die Erweiterung entfernen oder die Erweiterungsdaten in Ihrem Browser löschen.',
-                h_perm: '5. Berechtigungen und ihr Zweck',
-                p_perm: 'Jede von der Erweiterung angeforderte Berechtigung hat einen bestimmten, begrenzten Zweck:',
-                ul_perm: [
-                    '<strong>storage:</strong> Annahme des Haftungsausschlusses merken.',
-                    '<strong>scripting:</strong> Einfügen der Seitenleisten-Oberfläche in AliExpress-Seiten, Lesen von Produktkennungen und Aufrufen der offiziellen Empfehlungs-API von AliExpress aus dem Seitenkontext (erforderlich, da die API CORS erzwingt).',
-                    '<strong>tabs:</strong> Erkennen, ob der aktuelle Tab eine AliExpress-Produktseite ist, um die Funktion "Ähnliche finden" zu aktivieren.',
-                    '<strong>cookies:</strong> Lesen der in Abschnitt 3 aufgeführten technischen AliExpress-Cookies zum Signieren von API-Anfragen und Anzeigen von Preisen in Ihrer lokalen Währung.',
-                    '<strong>host_permissions:</strong> Ausschließlich auf AliExpress-Domänen (.com, .us, .ru) arbeiten.'
-                ],
-                h_third: '6. Links und Dienste Dritter',
-                p_third: 'Unsere Erweiterung generiert Affiliate-Links. Wenn Sie in der Seitenleiste auf ein Produkt klicken, wird die Produkt-URL an unseren Cloudflare Worker-Dienst gesendet, der einen offiziellen AliExpress-Affiliate-Link zurückgibt und Sie dorthin weiterleitet. Es wird nur die Produkt-URL übertragen, keine personenbezogenen Daten. Der Dienst speichert generierte Links zwischen, um die Leistung zu verbessern.',
-                p_third_2: 'Wir kontrollieren nicht, wie AliExpress Ihre Daten nach der Weiterleitung verarbeitet. Bitte lesen Sie die Datenschutzrichtlinie von AliExpress für weitere Details.',
-                h_changes: '7. Änderungen dieser Richtlinie',
-                p_changes: 'Wir können unsere Datenschutzrichtlinie von Zeit zu Zeit aktualisieren. Wir werden Sie über Änderungen informieren, indem wir die neue Datenschutzrichtlinie auf dieser Seite veröffentlichen und das Datum "Zuletzt aktualisiert" oben aktualisieren.',
-                h_contact: '8. Kontaktieren Sie uns',
-                p_contact: 'Wenn Sie Fragen zu dieser Datenschutzrichtlinie haben, können Sie uns unter folgender Adresse kontaktieren: support@nezzer.com'
-            },
-            'ru': {
-                title: 'Политика конфиденциальности Nezzer',
-                date: 'Последнее обновление: Ноябрь 2026',
-                h_intro: '1. Введение',
-                p_intro: 'Настоящая Политика конфиденциальности объясняет, как Nezzer («мы» или «расширение») обрабатывает данные пользователей. Мы стремимся защищать вашу конфиденциальность и быть прозрачными в отношении наших методов.',
-                h_indep: '2. Независимость',
-                p_indep: 'Nezzer — независимый продукт. Мы не являемся AliExpress или Alibaba и не поддерживаемся ими. Мы участвуем в партнерской программе AliExpress. Совершая покупку по нашим ссылкам, мы можем получить небольшую комиссию без каких-либо дополнительных затрат для вас.',
-                h_data: '3. Сбор и использование данных',
-                p_data_1: 'Мы не собираем, не храним на наших серверах и не передаем какие-либо личные данные. Мы не собираем ваше имя, адрес электронной почты, пароли или общую историю просмотров.',
-                p_data_2: 'Для предоставления функций рекомендаций продуктов расширение читает общедоступную информацию о продуктах и использует определенные технические файлы cookie AliExpress исключительно для связи с официальными API AliExpress. Эта обработка происходит локально в вашем браузере и никогда не отправляется на наши серверы.',
-                p_data_3: 'В частности, расширение читает следующие файлы cookie AliExpress: _m_h5_tk (токен подписи API), cna (идентификатор посетителя), aep_usuc_f (настройки валюты и региона) и xman_us_f (язык и локаль). Это технические файлы cookie, устанавливаемые самим AliExpress, не содержащие личной информации.',
-                h_storage: '4. Локальное хранилище',
-                p_storage: 'Расширение хранит один логический флаг в вашем браузере через chrome.storage.local: приняли ли вы партнерский отказ от ответственности. Этот флаг никогда не покидает ваше устройство и не отправляется на какой-либо сервер. Вы можете сбросить его в любое время, удалив расширение или очистив данные расширений в браузере.',
-                h_perm: '5. Разрешения и их назначение',
-                p_perm: 'Каждое разрешение, запрашиваемое расширением, имеет конкретное ограниченное назначение:',
-                ul_perm: [
-                    '<strong>storage:</strong> Запоминание принятия отказа от ответственности.',
-                    '<strong>scripting:</strong> Внедрение боковой панели на страницы AliExpress, чтение идентификаторов продуктов и вызов официального API рекомендаций из контекста страницы (требуется, так как API применяет CORS).',
-                    '<strong>tabs:</strong> Определение, является ли текущая вкладка страницей продукта AliExpress, для активации функции «Найти похожие».',
-                    '<strong>cookies:</strong> Чтение технических файлов cookie AliExpress, перечисленных в разделе 3, для подписи API-запросов и отображения цен в вашей местной валюте.',
-                    '<strong>host_permissions:</strong> Работа исключительно на доменах AliExpress (.com, .us, .ru).'
-                ],
-                h_third: '6. Ссылки и сервисы третьих сторон',
-                p_third: 'Наше расширение генерирует партнерские ссылки. Когда вы нажимаете на продукт на боковой панели, URL продукта отправляется в наш сервис Cloudflare Worker, который возвращает официальную партнерскую ссылку AliExpress и перенаправляет вас на неё. Передается только URL продукта, никаких личных данных. Сервис кэширует сгенерированные ссылки для повышения производительности.',
-                p_third_2: 'Мы не контролируем, как AliExpress обрабатывает ваши данные после перенаправления. Пожалуйста, ознакомьтесь с Политикой конфиденциальности AliExpress для получения подробностей.',
-                h_changes: '7. Изменения в настоящей Политике',
-                p_changes: 'Мы можем время от времени обновлять нашу Политику конфиденциальности. Мы уведомим вас о любых изменениях, опубликовав новую Политику на этой странице и обновив дату «Последнее обновление» выше.',
-                h_contact: '8. Свяжитесь с нами',
-                p_contact: 'Если у вас есть какие-либо вопросы относительно настоящей Политики конфиденциальности, вы можете связаться с нами по адресу: support@nezzer.com'
-            },
-            'pt': {
-                title: 'Política de Privacidade do Nezzer',
-                date: 'Última atualização: Novembro de 2026',
-                h_intro: '1. Introdução',
-                p_intro: 'Esta Política de Privacidade explica como o Nezzer ("nós" ou "a extensão") lida com os dados do usuário. Estamos comprometidos em proteger sua privacidade e ser transparentes sobre nossas práticas.',
-                h_indep: '2. Independência',
-                p_indep: 'O Nezzer é um produto independente. Não somos o AliExpress ou o Alibaba, e não somos endossados por eles. Participamos do programa de afiliados do AliExpress. Quando você compra através dos nossos links, podemos ganhar uma pequena comissão sem custo extra para você.',
-                h_data: '3. Coleta e Uso de Dados',
-                p_data_1: 'Não coletamos, armazenamos em nossos servidores ou transmitimos quaisquer dados pessoais. Não coletamos seu nome, endereço de e-mail, senhas ou histórico geral de navegação.',
-                p_data_2: 'Para fornecer nossos recursos de recomendação de produtos, a extensão lê informações de produtos disponíveis publicamente e usa cookies técnicos específicos do AliExpress estritamente para se comunicar com as APIs oficiais do AliExpress. Esse processamento ocorre localmente no seu navegador e nunca é enviado aos nossos servidores.',
-                p_data_3: 'Especificamente, a extensão lê os seguintes cookies do AliExpress: _m_h5_tk (token de assinatura da API), cna (identificador de visitante), aep_usuc_f (preferências de moeda e região) e xman_us_f (idioma e localidade). Esses são cookies técnicos definidos pelo próprio AliExpress e não contêm informações pessoais.',
-                h_storage: '4. Armazenamento Local',
-                p_storage: 'A extensão armazena um único sinalizador booleano no seu navegador usando chrome.storage.local: se você aceitou o aviso de afiliados. Este sinalizador nunca sai do seu dispositivo e não é enviado a nenhum servidor. Você pode redefini-lo a qualquer momento removendo a extensão ou limpando os dados de extensões no seu navegador.',
-                h_perm: '5. Permissões e seu propósito',
-                p_perm: 'Cada permissão solicitada pela extensão tem um propósito específico e limitado:',
-                ul_perm: [
-                    '<strong>storage:</strong> Lembrar a aceitação do aviso de afiliados.',
-                    '<strong>scripting:</strong> Injetar a interface lateral nas páginas do AliExpress, ler identificadores de produtos e chamar a API oficial de recomendações do contexto da página (necessário porque a API impõe CORS).',
-                    '<strong>tabs:</strong> Detectar se a aba atual é uma página de produto do AliExpress para habilitar o recurso "Encontrar Similar".',
-                    '<strong>cookies:</strong> Ler os cookies técnicos do AliExpress listados na seção 3 para assinar solicitações de API e exibir preços na sua moeda local.',
-                    '<strong>host_permissions:</strong> Funcionar apenas em domínios do AliExpress (.com, .us, .ru).'
-                ],
-                h_third: '6. Links e serviços de terceiros',
-                p_third: 'Nossa extensão gera links de afiliados. Quando você clica em um produto na barra lateral, a URL do produto é enviada ao nosso serviço Cloudflare Worker, que retorna um link de afiliado oficial do AliExpress e redireciona você para ele. Apenas a URL do produto é transmitida, sem dados pessoais. O serviço armazena em cache os links gerados para melhorar o desempenho.',
-                p_third_2: 'Não controlamos como o AliExpress trata seus dados após o redirecionamento. Consulte a Política de Privacidade do AliExpress para obter detalhes.',
-                h_changes: '7. Alterações nesta Política',
-                p_changes: 'Podemos atualizar nossa Política de Privacidade periodicamente. Notificaremos você sobre quaisquer alterações publicando a nova Política nesta página e atualizando a data de "Última atualização" acima.',
-                h_contact: '8. Fale Conosco',
-                p_contact: 'Se você tiver alguma dúvida sobre esta Política de Privacidade, entre em contato conosco em: support@nezzer.com'
-            },
-            'zh_CN': {
-                title: 'Nezzer 隐私政策',
-                date: '最后更新：2026年11月',
-                h_intro: '1. 引言',
-                p_intro: '本隐私政策解释了 Nezzer（“我们”或“该扩展程序”）如何处理用户数据。我们致力于保护您的隐私，并对我们的做法保持透明。',
-                h_indep: '2. 独立性',
-                p_indep: 'Nezzer 是一个独立产品。我们不是 AliExpress 或 Alibaba，也未得到他们的认可。我们参与 AliExpress 联盟计划。当您通过我们的链接购买时，我们可能会获得少量佣金，而不会给您带来额外费用。',
-                h_data: '3. 数据收集与使用',
-                p_data_1: '我们不收集、不在我们的服务器上存储或传输任何个人数据。我们不会收集您的姓名、电子邮件地址、密码或一般浏览历史记录。',
-                p_data_2: '为了提供我们的产品推荐功能，该扩展程序会读取公开的产品信息，并严格使用 AliExpress 特定的技术 cookie 与 AliExpress 的官方 API 进行通信。此处理在您的浏览器本地进行，绝不会发送到我们的服务器。',
-                p_data_3: '具体而言，该扩展程序会读取以下 AliExpress cookie：_m_h5_tk（API 签名令牌）、cna（访客标识符）、aep_usuc_f（货币和地区偏好）以及 xman_us_f（语言和区域设置）。这些是由 AliExpress 自身设置的技术 cookie，不包含任何个人信息。',
-                h_storage: '4. 本地存储',
-                p_storage: '该扩展程序使用 chrome.storage.local 在您的浏览器中存储一个布尔标志：您是否已接受联盟披露。此标志绝不会离开您的设备，也不会发送到任何服务器。您可以随时通过移除扩展程序或清除浏览器中的扩展程序数据来重置它。',
-                h_perm: '5. 权限及其用途',
-                p_perm: '该扩展程序请求的每项权限都有特定且有限的用途：',
-                ul_perm: [
-                    '<strong>storage：</strong> 记住对免责声明的接受。',
-                    '<strong>scripting：</strong> 将侧边栏 UI 注入 AliExpress 页面，读取产品标识符，并从页面上下文调用 AliExpress 官方推荐 API（由于 API 强制 CORS，因此需要）。',
-                    '<strong>tabs：</strong> 检测当前标签页是否为 AliExpress 产品页面，以启用“查找相似”功能。',
-                    '<strong>cookies：</strong> 读取第 3 节中列出的 AliExpress 技术 cookie，以签署 API 请求并以您的本地货币显示价格。',
-                    '<strong>host_permissions：</strong> 仅在 AliExpress 域名（.com、.us、.ru）上运行。'
-                ],
-                h_third: '6. 第三方链接和服务',
-                p_third: '我们的扩展程序会生成联盟链接。当您点击侧边栏中的产品时，产品 URL 会发送到我们的 Cloudflare Worker 服务，该服务会返回官方 AliExpress 联盟链接并将您重定向到该链接。仅传输产品 URL，不传输任何个人数据。该服务会缓存生成的链接以提高性能。',
-                p_third_2: '我们无法控制 AliExpress 在重定向后如何处理您的数据。请参阅 AliExpress 隐私政策了解详情。',
-                h_changes: '7. 本政策的变更',
-                p_changes: '我们可能会不时更新我们的隐私政策。我们将通过在此页面上发布新的隐私政策并更新上面的“最后更新”日期来通知您任何变更。',
-                h_contact: '8. 联系我们',
-                p_contact: '如果您对本隐私政策有任何疑问，可以通过以下方式联系我们：support@nezzer.com'
-            },
-            'zh_TW': {
-                title: 'Nezzer 隱私權政策',
-                date: '最後更新：2026年11月',
-                h_intro: '1. 引言',
-                p_intro: '本隱私權政策說明 Nezzer（「我們」或「該擴充功能」）如何處理使用者資料。我們致力於保護您的隱私，並對我們的做法保持透明。',
-                h_indep: '2. 獨立性',
-                p_indep: 'Nezzer 是一個獨立產品。我們不是 AliExpress 或 Alibaba，也未獲得他們的認可。我們參與 AliExpress 聯盟計畫。當您透過我們的連結購買時，我們可能會獲得少量佣金，而不會給您帶來額外費用。',
-                h_data: '3. 資料收集與使用',
-                p_data_1: '我們不收集、不在我們的伺服器上儲存或傳輸任何個人資料。我們不會收集您的姓名、電子郵件地址、密碼或一般瀏覽歷史記錄。',
-                p_data_2: '為了提供我們的產品推薦功能，該擴充功能會讀取公開的產品資訊，並嚴格使用 AliExpress 特定的技術性 cookie 與 AliExpress 的官方 API 進行通訊。此處理在您的瀏覽器本機進行，絕不會傳送至我們的伺服器。',
-                p_data_3: '具體而言，該擴充功能會讀取以下 AliExpress cookie：_m_h5_tk（API 簽章權杖）、cna（訪客識別碼）、aep_usuc_f（貨幣與地區偏好）以及 xman_us_f（語言與地區設定）。這些是由 AliExpress 本身設定的技術性 cookie，不包含任何個人資訊。',
-                h_storage: '4. 本機儲存',
-                p_storage: '該擴充功能使用 chrome.storage.local 在您的瀏覽器中儲存一個布林標誌：您是否已接受聯盟揭露。此標誌絕不會離開您的裝置，也不會傳送至任何伺服器。您可以隨時透過移除擴充功能或清除瀏覽器中的擴充功能資料來重設它。',
-                h_perm: '5. 權限及其用途',
-                p_perm: '該擴充功能要求的每項權限都有特定且有限的用途：',
-                ul_perm: [
-                    '<strong>storage：</strong> 記住對免責聲明的接受。',
-                    '<strong>scripting：</strong> 將側邊欄 UI 注入 AliExpress 頁面、讀取產品識別碼，並從頁面內容呼叫 AliExpress 官方推薦 API（由於 API 強制 CORS，因此需要）。',
-                    '<strong>tabs：</strong> 偵測目前分頁是否為 AliExpress 產品頁面，以啟用「尋找相似」功能。',
-                    '<strong>cookies：</strong> 讀取第 3 節中列出的 AliExpress 技術性 cookie，以簽署 API 要求並以您的本機貨幣顯示價格。',
-                    '<strong>host_permissions：</strong> 僅在 AliExpress 網域（.com、.us、.ru）上運作。'
-                ],
-                h_third: '6. 第三方連結與服務',
-                p_third: '我們的擴充功能會產生聯盟連結。當您點擊側邊欄中的產品時，產品 URL 會傳送至我們的 Cloudflare Worker 服務，該服務會傳回官方 AliExpress 聯盟連結並將您重新導向至該連結。僅傳輸產品 URL，不傳輸任何個人資料。該服務會快取產生的連結以提升效能。',
-                p_third_2: '我們無法控制 AliExpress 在重新導向後如何處理您的資料。請參閱 AliExpress 隱私權政策了解詳情。',
-                h_changes: '7. 本政策的變更',
-                p_changes: '我們可能會不時更新我們的隱私權政策。我們將透過在此頁面上發佈新的隱私權政策並更新上方的「最後更新」日期來通知您任何變更。',
-                h_contact: '8. 聯絡我們',
-                p_contact: '如果您對本隱私權政策有任何疑問，可以透過以下方式與我們聯絡：support@nezzer.com'
+        if (!img) {
+            const firstImg = link.querySelector('img');
+            if (firstImg) {
+                img = firstImg.src || firstImg.getAttribute('data-src') || '';
+                if (img.startsWith('//')) img = 'https:' + img;
             }
-        };
-
-        let userLang = (navigator.languages && navigator.languages.length > 0) ? navigator.languages[0] : (navigator.language || navigator.userLanguage);
-        userLang = userLang.split('-')[0].split('_')[0].toLowerCase();
-        
-        if (userLang === 'zh') {
-            const fullLang = (navigator.languages && navigator.languages.length > 0) ? navigator.languages[0] : navigator.language;
-            userLang = (fullLang && fullLang.toLowerCase().includes('tw')) ? 'zh_TW' : 'zh_CN';
         }
+        if (!img) continue;
 
-        const texts = PP_TEXTS[userLang] || PP_TEXTS['en'];
+        // 2. استخراج النصوص
+        let fullText = link.innerText || '';
+        let textLines = fullText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-        if (['ar', 'he', 'fa', 'ur'].includes(userLang)) {
-            document.documentElement.dir = 'rtl';
+        // 3. العنوان (نجلبه من خصائص العناصر أو من أطول سطر)
+        let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || '';
+        if (!title || title.length < 5) {
+            title = textLines.reduce((a, b) => a.length > b.length ? a : b, '');
+        }
+        if (!title) continue;
+        title = title.replace(/\n/g, ' ').trim().substring(0, 80);
+
+        // 4. السعر (يدعم NT$ وجميع العملات)
+        let price = '—';
+        const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
+        if (priceEl && priceEl.innerText.match(/\d/)) {
+            price = priceEl.innerText.trim().split('\n')[0];
         } else {
-            document.documentElement.dir = 'ltr';
+            const priceMatch = fullText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || fullText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
+            if (priceMatch) price = priceMatch[0];
         }
-        document.documentElement.lang = userLang;
 
-        document.title = texts.title;
-        document.getElementById('pp-title').textContent = texts.title;
-        document.getElementById('pp-date').textContent = texts.date;
+        // 5. عدد المبيعات (يدعم صيغة الأقواس مثل (1000-) أو (500+) أو كلمة sold)
+        let soldCount = 0;
+        const soldRegex = /\((\d+(?:[.,]\d+)?[kK]?)[^\)]*\)/; // يلتقط (1000-) أو (500+)
+        let soldMatch = fullText.match(soldRegex);
         
-        document.getElementById('pp-h-intro').textContent = texts.h_intro;
-        document.getElementById('pp-p-intro').textContent = texts.p_intro;
-        
-        document.getElementById('pp-h-indep').textContent = texts.h_indep;
-        document.getElementById('pp-p-indep').textContent = texts.p_indep;
-        
-        document.getElementById('pp-h-data').textContent = texts.h_data;
-        document.getElementById('pp-p-data-1').textContent = texts.p_data_1;
-        document.getElementById('pp-p-data-2').textContent = texts.p_data_2;
-        document.getElementById('pp-p-data-3').textContent = texts.p_data_3;
+        if (soldMatch) {
+            let numStr = soldMatch[1].toLowerCase().replace(',', '.');
+            soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+        } else {
+            const soldTextRegex = /(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i;
+            let soldTextMatch = fullText.match(soldTextRegex);
+            if (soldTextMatch) {
+                let numStr = soldTextMatch[1].toLowerCase().replace(',', '.');
+                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
+            }
+        }
 
-        document.getElementById('pp-h-storage').textContent = texts.h_storage;
-        document.getElementById('pp-p-storage').textContent = texts.p_storage;
+        // 6. التقييم (يبحث عن أرقام مثل 4.5، أو يقرأ أسماء صور النجوم)
+        let rating = 0;
+        const ratingTextRegex = /([0-5][.,]\d)/;
+        let ratingTextMatch = fullText.match(ratingTextRegex);
+        if (ratingTextMatch) {
+            // التأكد من أن الرقم ليس جزءاً من السعر
+            if (!new RegExp(`([a-zA-Z$€£])\\s*${ratingTextMatch[1]}`).test(fullText)) {
+                rating = parseFloat(ratingTextMatch[1].replace(',', '.'));
+            }
+        }
         
-        document.getElementById('pp-h-perm').textContent = texts.h_perm;
-        document.getElementById('pp-p-perm').textContent = texts.p_perm;
+        // إذا لم يجد رقماً نصياً، يقرأ صورة النجمة (مثال: star_4_5.png)
+        if (rating === 0) {
+            const starImg = link.querySelector('img[src*="star"], [class*="star"] img');
+            if (starImg) {
+                const src = starImg.src || '';
+                const starMatch = src.match(/star[_-]?(\d)[_-]?(\d)?/i);
+                if (starMatch) {
+                    rating = parseFloat(starMatch[1] + (starMatch[2] ? '.' + starMatch[2] : ''));
+                }
+            }
+        }
 
-        const ul = document.getElementById('pp-ul-perm');
-        ul.innerHTML = texts.ul_perm.map(item => `<li>${item}</li>`).join('');
-        
-        document.getElementById('pp-h-third').textContent = texts.h_third;
-        document.getElementById('pp-p-third').textContent = texts.p_third;
-        document.getElementById('pp-p-third-2').textContent = texts.p_third_2;
-        
-        document.getElementById('pp-h-changes').textContent = texts.h_changes;
-        document.getElementById('pp-p-changes').textContent = texts.p_changes;
-        
-        document.getElementById('pp-h-contact').textContent = texts.h_contact;
-        document.getElementById('pp-p-contact').textContent = texts.p_contact;
-    </script>
-</body>
-</html>
+        // 7. الشحن المجاني
+        let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(fullText);
+
+        seen.add(pid);
+        products.push({
+            productId: pid,
+            title: { displayTitle: title },
+            image: { imgUrl: img },
+            prices: { salePrice: { formattedPrice: price } },
+            evaluation: { starRating: rating },
+            trade: { realTradeCount: soldCount },
+            _isLocal: true,
+            _isFreeShipping: isFreeShipping,
+            url: link.href
+        });
+    }
+
+    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
+    return products.slice(0, 20);
+}
