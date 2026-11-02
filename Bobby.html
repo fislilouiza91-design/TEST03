@@ -89,7 +89,6 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الكشط المزدوج (فوري + انتظار 1.5 ثانية)
 function scanPageForProducts(sortByPopular = false, randomize = false) {
     const pageTitle = document.title.toLowerCase();
     if (pageTitle.includes('security') || pageTitle.includes('captcha')) {
@@ -98,6 +97,8 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
 
     return new Promise((resolve) => {
         let collectedProducts = new Map();
+        let attempts = 0;
+        const maxAttempts = 15;
 
         const scan = () => {
             document.querySelectorAll('a[href*="/item/"], a[href*="/i/"]').forEach(link => {
@@ -106,24 +107,15 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                     collectedProducts.set(match[1], link.href);
                 }
             });
-
-            document.querySelectorAll('[data-product-id]').forEach(el => {
-                const pid = el.getAttribute('data-product-id');
-                if (pid && pid.length >= 8 && !collectedProducts.has(pid)) {
-                    collectedProducts.set(pid, `https://www.aliexpress.com/item/${pid}.html`);
-                }
-            });
         };
 
-        scan();
-
-        setTimeout(() => {
+        const checkAndResolve = () => {
             scan();
-            
-            let products = [];
-            collectedProducts.forEach((url, pid) => {
-                products.push({
-                    productId: pid,
+            attempts++;
+
+            if (collectedProducts.size >= 10) {
+                let products = Array.from(collectedProducts.values()).map(url => ({
+                    productId: url.match(/\/(?:item|i)\/(\d{8,})\.html/)[1],
                     title: { displayTitle: '' },
                     image: { imgUrl: '' },
                     prices: { salePrice: { formattedPrice: '' } },
@@ -132,13 +124,33 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                     _isLocal: true,
                     _isFreeShipping: false,
                     url: url
-                });
-            });
+                }));
+                
+                if (randomize) products = shuffleArray(products);
+                return resolve(products.slice(0, 21));
+            }
 
-            if (randomize) products = shuffleArray(products);
-            
-            resolve(products.slice(0, 21));
-        }, 1500);
+            if (attempts >= maxAttempts) {
+                let products = Array.from(collectedProducts.values()).map(url => ({
+                    productId: url.match(/\/(?:item|i)\/(\d{8,})\.html/)[1],
+                    title: { displayTitle: '' },
+                    image: { imgUrl: '' },
+                    prices: { salePrice: { formattedPrice: '' } },
+                    evaluation: { starRating: 0 },
+                    trade: { realTradeCount: 0 },
+                    _isLocal: true,
+                    _isFreeShipping: false,
+                    url: url
+                }));
+
+                if (randomize) products = shuffleArray(products);
+                return resolve(products.slice(0, 21));
+            }
+
+            setTimeout(checkAndResolve, 200);
+        };
+
+        checkAndResolve();
     });
 }
 
@@ -395,10 +407,8 @@ function injectWidget() {
                         if (sortValue === 'betterAlternatives') {
                             if (isFetchingAlternatives) return;
 
-                            // إظهار التحميل فوراً
                             try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                            // بدء البحث
                             const scraped = await scanPageForProducts(false, true);
 
                             if (scraped === 'CAPTCHA') {
