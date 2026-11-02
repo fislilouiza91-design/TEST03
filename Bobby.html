@@ -95,60 +95,63 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
     let products = [];
     const seen = new Set();
     
-    const allLinks = Array.from(document.querySelectorAll('a'));
+    // العناصر التي قد تحتوي على روابط منتجات أو صور
+    const productElements = document.querySelectorAll('a, [data-product-id], [data-item-id], [data-id]');
     
-    for (const link of allLinks) {
+    for (const el of productElements) {
         try {
-            const href = link.href || '';
-            if (!href) continue;
+            let pid = el.getAttribute('data-product-id') || el.getAttribute('data-item-id') || el.getAttribute('data-id');
+            let href = el.href || el.getAttribute('data-href') || '';
             
-            let pid = null;
-            const match = href.match(/(?:\/item\/|\/i\/|productId=|itemId=)(\d{8,})/i);
-            if (match) pid = match[1];
+            // إذا لم يوجد في الداتا، نبحث في الرابط
+            if (!pid && href) {
+                const match = href.match(/(?:\/item\/|\/i\/|productId=|itemId=)(\d{8,})/i);
+                if (match) pid = match[1];
+            }
             
-            if (!pid) continue;
+            // التحقق من أن الـ ID عبارة عن رقم صحيح للمنتج
+            if (!pid || isNaN(parseInt(pid)) || pid.length < 8) continue;
             if (seen.has(pid)) continue;
 
+            // البحث عن الصورة (قد تكون في العنصر نفسه أو العنصر الأب)
             let img = '';
-            const imgEls = link.querySelectorAll('img');
-            for (let el of imgEls) {
-                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || el.getAttribute('data-lazy-src') || '';
+            let imgEl = el.querySelector('img') || el.parentElement?.querySelector('img');
+            
+            if (imgEl) {
+                let src = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.getAttribute('srcset') || imgEl.getAttribute('data-lazy-src') || '';
                 if (src.startsWith('//')) src = 'https:' + src;
                 if (src && (src.includes('alicdn.com') || src.includes('.jpg') || src.includes('.webp') || src.includes('.png'))) {
-                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo') && !src.includes('icon') && !src.includes('flag')) {
+                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo') && !src.includes('icon')) {
                         img = src.split(' ')[0].split(',')[0];
-                        break;
                     }
                 }
             }
             
-            if (!img && link.parentElement) {
-                const parentImg = link.parentElement.querySelector('img[src*="alicdn"], img[data-src*="alicdn"]');
-                if (parentImg) {
-                    img = parentImg.getAttribute('src') || parentImg.getAttribute('data-src');
-                    if (img && img.startsWith('//')) img = 'https:' + img;
+            // إذا لم توجد صورة، قد تكون خلفية CSS
+            if (!img) {
+                const bgDiv = el.querySelector('[style*="background-image"]') || el.parentElement?.querySelector('[style*="background-image"]');
+                if (bgDiv) {
+                    const bgMatch = (bgDiv.getAttribute('style') || '').match(/url\(["']?([^"')]+)["']?\)/);
+                    if (bgMatch && bgMatch[1]) img = bgMatch[1].startsWith('//') ? 'https:' + bgMatch[1] : bgMatch[1];
                 }
             }
             if (!img) continue;
 
-            let title = link.getAttribute('title') || '';
-            if (!title) {
-                const titleEl = link.querySelector('h3, h2, [class*="title"], [class*="name"], [class*="Title"], [class*="Name"]');
-                if (titleEl) title = titleEl.innerText || titleEl.textContent;
+            // استخراج العنوان
+            let title = el.getAttribute('title') || '';
+            if (!title && el.innerText) {
+                title = el.innerText.split('\n').find(line => line.trim().length > 10) || '';
             }
             if (!title) {
-                const imgAlt = link.querySelector('img')?.getAttribute('alt');
-                if (imgAlt) title = imgAlt;
+                title = el.querySelector('img')?.getAttribute('alt') || '';
             }
-            if (!title) {
-                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
-            }
-            if (!title) continue;
+            if (!title || title.length < 5) continue;
             title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
+            // استخراج السعر
             let price = '—';
-            const text = link.innerText;
-            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"], [class*="Price"]');
+            const text = el.innerText || el.parentElement?.innerText || '';
+            const priceEl = el.querySelector('[class*="price"], [class*="Price"]') || el.parentElement?.querySelector('[class*="price"], [class*="Price"]');
             if (priceEl) {
                 const pText = priceEl.innerText.trim().split('\n')[0];
                 if (pText.match(/\d/)) price = pText;
@@ -159,10 +162,9 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                 if (priceMatch) price = priceMatch[0];
             }
 
+            // استخراج المبيعات
             let soldCount = 0;
-            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kKmM]?)\s*\+?\s*(?:sold|vendus|vendido|مباع|продано|verkauft|venduti|vendidos|pedidos|ventas)/i) 
-                || text.match(/\((\d+(?:[.,]\d+)?[kKmM]?)\s*[+-]?\)/);
-            
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kKmM]?)\s*\+?\s*(?:sold|vendus|vendido|مباع|продано|verkauft|venduti|vendidos|pedidos|ventas)/i);
             if (soldMatch) {
                 let numStr = soldMatch[1].toLowerCase().replace(',', '.');
                 if (numStr.includes('k')) soldCount = parseFloat(numStr) * 1000;
@@ -171,6 +173,9 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
             }
 
             const isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費|envio gratis/i.test(text);
+
+            // إنشاء رابط المنتج في حال كان الـ href فارغاً
+            const finalUrl = href || `https://www.aliexpress.com/item/${pid}.html`;
 
             seen.add(pid);
             products.push({
@@ -182,7 +187,7 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                 trade: { realTradeCount: soldCount },
                 _isLocal: true,
                 _isFreeShipping: isFreeShipping,
-                url: href
+                url: finalUrl
             });
         } catch (e) {
             console.warn("Nezzer: Skipped a product due to parsing error", e);
@@ -446,47 +451,49 @@ function injectWidget() {
 
                     togglePanel(true);
 
-                    try {
-                        if (sortValue === 'betterAlternatives') {
-                            if (isFetchingAlternatives) return;
+                    setTimeout(() => {
+                        try {
+                            if (sortValue === 'betterAlternatives') {
+                                if (isFetchingAlternatives) return;
 
-                            const scraped = scanPageForProducts(false, true);
-                            if (scraped === 'CAPTCHA') {
-                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                            } else if (scraped.length === 0) {
-                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
-                            } else {
-                                isFetchingAlternatives = true;
-                                alternativesBuffer = [];
-                                alternativesDelivered = 0;
-                                currentRoundDelivered = 0;
-                                currentRoundTarget = FIRST_ROUND_SIZE;
-                                window._nezzerPendingRequest = false;
-                                try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
-                                
-                                const top21 = scraped.slice(0, 21);
-                                const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
-                                
-                                chrome.runtime.sendMessage({ 
-                                    action: 'FETCH_ALTERNATIVES', 
-                                    products: top21,
-                                    domain: domain
-                                });
-                            }
-                        } else {
-                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                        }
-
-                        if (chrome.runtime && chrome.runtime.id) {
-                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                                if (chrome.runtime.lastError) return;
-                                if (!result || !result.nezzer_disclaimer_accepted) {
-                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                                const scraped = scanPageForProducts(false, true);
+                                if (scraped === 'CAPTCHA') {
+                                    try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
+                                } else if (scraped.length === 0) {
+                                    try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
+                                } else {
+                                    isFetchingAlternatives = true;
+                                    alternativesBuffer = [];
+                                    alternativesDelivered = 0;
+                                    currentRoundDelivered = 0;
+                                    currentRoundTarget = FIRST_ROUND_SIZE;
+                                    window._nezzerPendingRequest = false;
+                                    try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
+                                    
+                                    const top21 = scraped.slice(0, 21);
+                                    const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
+                                    
+                                    chrome.runtime.sendMessage({ 
+                                        action: 'FETCH_ALTERNATIVES', 
+                                        products: top21,
+                                        domain: domain
+                                    });
                                 }
-                            });
+                            } else {
+                                try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
+                            }
+                        } catch(err) {
+                            console.error("Nezzer Scan Error:", err);
                         }
-                    } catch(err) {
-                        console.error("Nezzer Scan Error:", err);
+                    }, 300);
+
+                    if (chrome.runtime && chrome.runtime.id) {
+                        chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
+                            if (chrome.runtime.lastError) return;
+                            if (!result || !result.nezzer_disclaimer_accepted) {
+                                setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
+                            }
+                        });
                     }
                 }
             };
