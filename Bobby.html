@@ -13,9 +13,8 @@ const FIRST_ROUND_SIZE = 12;
 const NEXT_ROUND_SIZE = 6;
 const STEP_SIZE = 3;
 
-// ذاكرة لحفظ المنتجات التي تظهر أثناء التصفح
+// الذاكرة التي ستحفظ المنتجات بمجرد ظهورها
 let pageProductsCache = new Map();
-let collectTimeout = null;
 
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
@@ -93,32 +92,19 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة جمع المنتجات في الذاكرة
+// دالة الكشط التي تعمل في الخلفية وتلتقط المنتجات فور ظهورها
 function collectPageProducts() {
-    const pageTitle = document.title.toLowerCase();
-    if (pageTitle.includes('security') || pageTitle.includes('captcha')) return;
+    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return;
 
     const links = document.querySelectorAll('a[href*="/item/"]');
-    
     for (const link of links) {
         try {
             const match = link.href.match(/\/item\/(\d+)\.html/);
-            if (!match) continue;
-            const pid = match[1];
-            
-            if (!pageProductsCache.has(pid)) {
-                let img = '';
-                const imgEl = link.querySelector('img');
-                if (imgEl) {
-                    let src = imgEl.src || imgEl.getAttribute('data-src') || '';
-                    if (src.startsWith('//')) src = 'https:' + src;
-                    if (src && !src.includes('tps') && !src.includes('banner')) img = src;
-                }
-
-                pageProductsCache.set(pid, {
-                    productId: pid,
+            if (match && !pageProductsCache.has(match[1])) {
+                pageProductsCache.set(match[1], {
+                    productId: match[1],
                     title: { displayTitle: '' },
-                    image: { imgUrl: img },
+                    image: { imgUrl: '' },
                     prices: { salePrice: { formattedPrice: '' } },
                     evaluation: { starRating: 0 },
                     trade: { realTradeCount: 0 },
@@ -386,11 +372,11 @@ function injectWidget() {
 
                             try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                            collectPageProducts();
+                            collectPageProducts(); // تحديث فوري
                             let scraped = Array.from(pageProductsCache.values());
 
                             if (scraped.length === 0) {
-                                await new Promise(r => setTimeout(r, 1500));
+                                await new Promise(r => setTimeout(r, 1000));
                                 collectPageProducts();
                                 scraped = Array.from(pageProductsCache.values());
                             }
@@ -543,13 +529,12 @@ function injectWidget() {
 
 injectWidget();
 
-// كشط أولي بمجرد تحميل الصفحة
+// التشغيل الفوري للكشط عند تحميل الصفحة (مثل الاضافة التجريبية)
 collectPageProducts();
 
-// مراقبة التغييرات أثناء التمرير
+// مراقبة مستمرة لالتقاط المنتجات فور ظهورها
 const pageObserver = new MutationObserver(() => {
-    clearTimeout(collectTimeout);
-    collectTimeout = setTimeout(collectPageProducts, 500);
+    collectPageProducts();
 });
 pageObserver.observe(document.body, { childList: true, subtree: true });
 
