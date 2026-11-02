@@ -100,9 +100,10 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
     for (const link of allLinks) {
         try {
             const href = link.href || '';
+            if (!href) continue;
             
             let pid = null;
-            const match = href.match(/(?:\/item\/|\/i\/|productId=)(\d+)/);
+            const match = href.match(/(?:\/item\/|\/i\/|productId=|itemId=)(\d{8,})/i);
             if (match) pid = match[1];
             
             if (!pid) continue;
@@ -121,18 +122,18 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
                 }
             }
             
-            if (!img) {
-                const bgDiv = link.querySelector('[style*="background-image"]');
-                if (bgDiv) {
-                    const bgMatch = (bgDiv.getAttribute('style') || '').match(/url\(["']?([^"')]+)["']?\)/);
-                    if (bgMatch && bgMatch[1]) img = bgMatch[1].startsWith('//') ? 'https:' + bgMatch[1] : bgMatch[1];
+            if (!img && link.parentElement) {
+                const parentImg = link.parentElement.querySelector('img[src*="alicdn"], img[data-src*="alicdn"]');
+                if (parentImg) {
+                    img = parentImg.getAttribute('src') || parentImg.getAttribute('data-src');
+                    if (img && img.startsWith('//')) img = 'https:' + img;
                 }
             }
             if (!img) continue;
 
             let title = link.getAttribute('title') || '';
             if (!title) {
-                const titleEl = link.querySelector('h3, h2, [class*="title"], [class*="name"], [class*="Title"]');
+                const titleEl = link.querySelector('h3, h2, [class*="title"], [class*="name"], [class*="Title"], [class*="Name"]');
                 if (titleEl) title = titleEl.innerText || titleEl.textContent;
             }
             if (!title) {
@@ -146,20 +147,20 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
             title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
             let price = '—';
+            const text = link.innerText;
             const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"], [class*="Price"]');
             if (priceEl) {
                 const pText = priceEl.innerText.trim().split('\n')[0];
                 if (pText.match(/\d/)) price = pText;
             }
             if (price === '—') {
-                const priceMatch = link.innerText.match(/(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)\s*(\d+(?:[.,]\d+)?)/i) 
-                    || link.innerText.match(/(\d+(?:[.,]\d+)?)\s*(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)/i);
+                const priceMatch = text.match(/(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)\s*(\d+(?:[.,]\d+)?)/i) 
+                    || text.match(/(\d+(?:[.,]\d+)?)\s*(?:NT\$|US\s*\$|EUR|USD|RUB|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥|MX\$|BRL)/i);
                 if (priceMatch) price = priceMatch[0];
             }
 
             let soldCount = 0;
-            const text = link.innerText;
-            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kKmM]?)\s*\+?\s*(?:sold|vendus|vendido|مباع|продано|verkauft|venduti|vendidos|pedidos|ventas|commands)/i) 
+            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kKmM]?)\s*\+?\s*(?:sold|vendus|vendido|مباع|продано|verkauft|venduti|vendidos|pedidos|ventas)/i) 
                 || text.match(/\((\d+(?:[.,]\d+)?[kKmM]?)\s*[+-]?\)/);
             
             if (soldMatch) {
