@@ -71,26 +71,6 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
-// دالة مساعدة لاستخراج التقييم بدقة وتجنب الخلط مع السعر
-function extractValidRating(text) {
-    const matches = text.match(/([0-5][.,]\d)/g);
-    if (!matches) return 0;
-    
-    for (let match of matches) {
-        const index = text.indexOf(match);
-        const before = text.substring(Math.max(0, index - 10), index);
-        const after = text.substring(index + match.length, Math.min(text.length, index + match.length + 10));
-        
-        // إذا كان الرقم يسبق أو يتبع رمز عملة، فهو سعر وليس تقييم.
-        const isPrice = /NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥/.test(before) || /NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥/.test(after);
-        
-        if (!isPrice) {
-            return parseFloat(match.replace(',', '.'));
-        }
-    }
-    return 0;
-}
-
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
 
@@ -146,56 +126,31 @@ function scanPageForProducts(sortByPopular = false) {
             if (priceMatch) price = priceMatch[0];
         }
 
-        // 4. التقييم (نظام بحث متعدد المستويات)
+        // 4. التقييم (الحل الجذري: قراءة aria-label من multi--starList--)
         let rating = 0;
-        
-        const ratingEl = link.querySelector('[class*="evaluation"], [class*="star"], [class*="rating"]');
-        if (ratingEl) {
-            const aria = ratingEl.getAttribute('aria-label') || link.querySelector('[aria-label*="star"]')?.getAttribute('aria-label');
+        const starListEl = link.querySelector('[class*="multi--starList--"]');
+        if (starListEl) {
+            const aria = starListEl.getAttribute('aria-label');
             if (aria) {
-                let m = aria.match(/([0-5][.,]\d)/);
+                const m = aria.match(/([0-5][.,]\d)/);
                 if (m) rating = parseFloat(m[1].replace(',', '.'));
-                else {
-                    m = aria.match(/([1-5])\s*stars?/i);
-                    if (m) rating = parseFloat(m[1]);
-                }
-            }
-            if (rating === 0) {
-                let txt = ratingEl.innerText.trim();
-                let m = txt.match(/([0-5][.,]\d)/);
-                if (m) rating = parseFloat(m[1].replace(',', '.'));
-                else if (/^[1-5]$/.test(txt)) rating = parseFloat(txt);
             }
         }
-
+        // احتياطي: أي عنصر يحتوي على aria-label وفيه كلمة star
         if (rating === 0) {
-            const starImgs = link.querySelectorAll('img');
-            for (const img of starImgs) {
-                if ((img.src || '').includes('star') || img.alt === 'star') {
-                    const m = (img.src || '').match(/star[_-]?(\d)(?:[_-](\d))?/i) || (img.alt || '').match(/(\d)(?:[_-](\d))?/i);
-                    if (m) {
-                        let val = parseFloat(m[1] + (m[2] ? '.' + m[2] : ''));
-                        if (val > 0 && val <= 5) { rating = val; break; }
-                    }
+            const ariaEls = link.querySelectorAll('[aria-label*="star"]');
+            for (const el of ariaEls) {
+                const aria = el.getAttribute('aria-label');
+                if (aria) {
+                    const m = aria.match(/([0-5][.,]\d)/);
+                    if (m) { rating = parseFloat(m[1].replace(',', '.')); break; }
                 }
             }
         }
-
+        // احتياطي أخير: البحث عن نص يحتوي على "out of 5" أو "stars"
         if (rating === 0) {
-            rating = extractValidRating(link.innerText);
-        }
-
-        if (rating === 0) {
-            const starSvgs = link.querySelectorAll('svg[class*="star"], [class*="star"] svg');
-            let filled = 0;
-            for (const s of starSvgs) {
-                // إصلاح: استخدام getAttribute بدلاً من className لأنها عناصر SVG
-                const sClass = s.getAttribute('class') || '';
-                if (sClass.includes('full') || sClass.includes('filled')) {
-                    filled++;
-                }
-            }
-            if (filled > 0 && filled <= 5) rating = filled;
+            const m = link.innerText.match(/([0-5][.,]\d)\s*(?:out of 5|stars?|★)/i);
+            if (m) rating = parseFloat(m[1].replace(',', '.'));
         }
 
         // 5. المبيعات
@@ -454,7 +409,6 @@ function injectWidget() {
 
                     togglePanel(true);
 
-                    // تم وضع الكود داخل Try-Catch لمنع انهيار النافذة
                     try {
                         if (sortValue === 'thisPage' || sortValue === 'popularLocal') {
                             const scraped = scanPageForProducts(sortValue === 'popularLocal');
