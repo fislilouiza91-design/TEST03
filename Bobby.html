@@ -1,515 +1,247 @@
-let widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
-let darkModeQueryRef = null;
-let darkModeListenerRef = null;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const randomDelay = () => sleep(400 + Math.random() * 600);
 
-const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page' },
-    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado', thisPage: '🛍️ Esta página' },
-    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado', thisPage: '🛍️ Esta página' },
-    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг', thisPage: '🛍️ Эта страница' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet', thisPage: '🛍️ Diese Seite' },
-    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato', thisPage: '🛍️ Questa pagina' },
-    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan', thisPage: '🛍️ Bu Sayfa' },
-    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld', thisPage: '🛍️ Deze pagina' },
-    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane', thisPage: '🛍️ Ta strona' },
-    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점', thisPage: '🛍️ 이 페이지' },
-    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価', thisPage: '🛍️ このページ' },
-    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高', thisPage: '🛍️ 本页' },
-    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高', thisPage: '🛍️ 本頁' },
-    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất', thisPage: '🛍️ Trang này' },
-    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi', thisPage: '🛍️ Halaman Ini' },
-    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด', thisPage: '🛍️ หน้านี้' },
-    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר', thisPage: '🛍️ דף זה' },
-    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg', thisPage: '🛍️ Denna sida' },
-    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt', thisPage: '🛍️ Denne side' },
-    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu', thisPage: '🛍️ Tämä sivu' },
-    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert', thisPage: '🛍️ Denne siden' },
-    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené', thisPage: '🛍️ Tato stránka' },
-    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate', thisPage: '🛍️ Această pagină' },
-    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt', thisPage: '🛍️ Ez az oldal' },
-    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα', thisPage: '🛍️ Αυτή η σελίδα' },
-    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг', thisPage: '🛍️ Ця сторінка' },
-    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik', thisPage: '🛍️ Halaman Ini' },
-    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating', thisPage: '🛍️ Pahinang Ito' },
-    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड', thisPage: '🛍️ यह पृष्ठ' },
-    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени', thisPage: '🛍️ Тази страница' }
-};
+async function ensureToken(tabId, domain) {
+    let token = null;
 
-function getSiteLang() {
-    try {
-        let lang = document.documentElement.lang || '';
-        if (!lang) {
-            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
-            if (match) {
-                const cookieStr = decodeURIComponent(match[1]);
-                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
-                if (localeMatch) lang = localeMatch[1];
-            }
-        }
-        let lowerLang = String(lang).toLowerCase();
-        if (lowerLang.includes('zh-cn')) return 'zh_CN';
-        if (!lang) {
-            if (location.href.includes('aliexpress.ru')) lang = 'ru';
-            else if (location.href.includes('aliexpress.us')) lang = 'en';
-            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
-            else lang = 'en';
-        }
-        lang = lowerLang.split('-')[0].split('_')[0];
-        return SITE_TRANSLATIONS[lang] ? lang : 'en';
-    } catch(e) { return 'en'; }
-}
+    if (domain === 'ru') {
+        const url = `https://recom-acs.aliexpress.com/h5/mtop.relationrecommend.aliexpressrecommend.recommend/1.0/?jsv=2.5.1&appKey=24815441&t=${Date.now()}&sign=mockSignKey&api=mtop.relationrecommend.AliExpressRecommend.recommend&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
 
-const t = (key) => {
-    try {
-        const lang = getSiteLang();
-        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
-    } catch(e) { return key; }
-};
-
-function scanPageForProducts(sortByPopular = false) {
-    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
-
-    let products = [];
-    const seen = new Set();
-    const links = document.querySelectorAll('a[href*="/item/"]');
-
-    for (const link of links) {
-        try {
-            const match = link.href.match(/\/item\/(\d+)\.html/);
-            if (!match) continue;
-            const pid = match[1];
-            if (seen.has(pid)) continue;
-
-            // 1. جلب الصورة
-            let img = '';
-            const imgEls = link.querySelectorAll('img');
-            for (let el of imgEls) {
-                let src = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('srcset') || '';
-                if (src.startsWith('//')) src = 'https:' + src;
-                if (src && (src.includes('ae01.alicdn.com') || src.includes('ae04.alicdn.com') || src.includes('.jpg') || src.includes('.webp'))) {
-                    if (!src.includes('tps') && !src.includes('banner') && !src.includes('logo')) {
-                        img = src.split(' ')[0].split(',')[0];
-                        break;
-                    }
-                }
-            }
-            if (!img) {
-                const firstImg = link.querySelector('img');
-                if (firstImg) {
-                    img = firstImg.src || firstImg.getAttribute('data-src') || '';
-                    if (img.startsWith('//')) img = 'https:' + img;
-                }
-            }
-            if (!img) continue;
-
-            // 2. العنوان
-            let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
-            if (!title || title.length < 5) {
-                title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
-            }
-            if (!title) continue;
-            title = title.replace(/\n/g, ' ').trim().substring(0, 80);
-
-            // 3. السعر
-            let price = '—';
-            const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
-            if (priceEl) {
-                const pText = priceEl.innerText.trim().split('\n')[0];
-                if (pText.match(/\d/)) price = pText;
-            }
-            if (price === '—') {
-                const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
-                if (priceMatch) price = priceMatch[0];
-            }
-
-            // 4. المبيعات (بدون نجوم)
-            let soldCount = 0;
-            const text = link.innerText;
-            const soldMatch = text.match(/(\d+(?:[.,]\d+)?[kK]?)\s*\+?\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i) || text.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
-            if (soldMatch) {
-                let numStr = soldMatch[1].toLowerCase().replace(',', '.');
-                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-            } else {
-                const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
-                if (tradeEl) {
-                    const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
-                    if (sMatch) {
-                        let numStr = sMatch[1].toLowerCase().replace(',', '.');
-                        soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-                    }
-                }
-            }
-
-            // 5. الشحن المجاني
-            let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(text);
-
-            seen.add(pid);
-            products.push({
-                productId: pid,
-                title: { displayTitle: title },
-                image: { imgUrl: img },
-                prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 }, // تم تثبيت التقييم على 0 لتجنب الأخطاء
-                trade: { realTradeCount: soldCount },
-                _isLocal: true,
-                _isFreeShipping: isFreeShipping,
-                url: link.href
-            });
-        } catch (e) {
-            console.warn("Nezzer: Skipped a product due to parsing error", e);
-        }
-    }
-
-    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
-    return products.slice(0, 20);
-}
-
-function removeWidget() {
-    if (widgetWrapper) {
-        if (darkModeQueryRef && darkModeListenerRef) {
-            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
-            else darkModeQueryRef.removeListener(darkModeListenerRef);
-        }
-        darkModeQueryRef = null;
-        darkModeListenerRef = null;
-        widgetWrapper.remove();
-        widgetWrapper = null;
-        iframeContainer = null;
-        iframe = null;
-        sidebar = null;
-    }
-}
-
-function injectWidget() {
-    try {
-        if (widgetWrapper) return;
-
-        const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
-
-        const nezzerStyleId = 'nezzer-theme-styles';
-        if (!document.getElementById(nezzerStyleId)) {
-            const styleEl = document.createElement('style');
-            styleEl.id = nezzerStyleId;
-            styleEl.textContent = `
-                #nezzer-widget-wrapper {
-                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
-                    --nezzer-pill-border: #f1f5f9;
-                    --nezzer-btn-color: #64748b;
-                    --nezzer-drag-color: #64748b;
-                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
-                    --nezzer-drag-color-hover: #475569;
-                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
-                    --nezzer-iframe-bg: #ffffff;
-                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
-                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
-                }
-                #nezzer-widget-wrapper.nezzer-dark {
-                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
-                    --nezzer-pill-border: #2a2a33;
-                    --nezzer-btn-color: #94a3b8;
-                    --nezzer-drag-color: #94a3b8;
-                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
-                    --nezzer-drag-color-hover: #cbd5e1;
-                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
-                    --nezzer-iframe-bg: #16161c;
-                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
-                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
-                }
-                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
-                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
-                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
-            `;
-            document.head.appendChild(styleEl);
-        }
-
-        let isOpen = false;
-        let currentSide = 'left';
-        let activeSort = isProductPage ? 'popular' : 'thisPage';
-        let disclaimerEl = null;
-
-        widgetWrapper = document.createElement('div');
-        widgetWrapper.id = 'nezzer-widget-wrapper';
-        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
-
-        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
-        darkModeListenerRef = () => {
-            if (!widgetWrapper) return;
-            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
-        };
-        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
-        else darkModeQueryRef.addListener(darkModeListenerRef);
-        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
-
-        sidebar = document.createElement('div');
-        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
-
-        const pillContainer = document.createElement('div');
-        pillContainer.style.cssText = `
-            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
-            padding: 20px 6px; border-radius: 0 40px 40px 0;
-            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
-            display: flex; flex-direction: column; align-items: center; gap: 15px;
-            pointer-events: auto; transition: all 0.3s ease;
-            border: 1px solid var(--nezzer-pill-border); border-left: none;
-        `;
-
-        iframeContainer = document.createElement('div');
-        iframeContainer.style.cssText = `
-            position: absolute; top: 50%; left: 60px;
-            width: 620px; max-width: 90vw; height: 98vh;
-            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
-            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
-            transform: translateY(-50%) translateX(-105%);
-            opacity: 0; pointer-events: none; visibility: hidden;
-            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
-            display: flex; overflow: hidden; z-index: 5;
-        `;
-
-        const siteLang = getSiteLang();
-
-        iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
-        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
-        iframeContainer.appendChild(iframe);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.id = 'nezzer-drag-handle';
-        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
-        dragHandle.innerHTML = '⋮⋮';
-
-        function hideDisclaimer() {
-            if (!disclaimerEl) return;
-            const el = disclaimerEl;
-            el.style.opacity = '0';
-            setTimeout(() => {
-                if (el && el.parentNode) el.remove();
-                if (disclaimerEl === el) disclaimerEl = null;
-            }, 300);
-        }
-
-        function togglePanel(forceOpen = null) {
-            if (forceOpen === true) isOpen = true;
-            else if (forceOpen === false) isOpen = false;
-            else isOpen = !isOpen;
-
-            if (isOpen) {
-                iframeContainer.style.visibility = 'visible';
-                iframeContainer.style.opacity = '1';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-                iframeContainer.style.pointerEvents = 'auto';
-            } else {
-                iframeContainer.style.opacity = '0';
-                iframeContainer.style.pointerEvents = 'none';
-                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
-                hideDisclaimer();
-            }
-        }
-
-        function showDisclaimer() {
-            if (disclaimerEl || !widgetWrapper) return;
-            const lang = getSiteLang();
-            const translations = window.NEZZER_DISCLAIMER_TRANSLATIONS || { 'en': { title: 'Nezzer is completely free!', body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links...', button: 'Got it, thanks' } };
-            const dis = translations[lang] || translations['en'];
-            const rtlLangs = ['ar', 'he', 'fa', 'ur'];
-            const isRtlLang = rtlLangs.includes(lang);
-            const isLeft = currentSide === 'left';
-
-            disclaimerEl = document.createElement('div');
-            disclaimerEl.id = 'nezzer-disclaimer';
-            disclaimerEl.setAttribute('dir', isRtlLang ? 'rtl' : 'ltr');
-            disclaimerEl.style.cssText = `position: absolute; top: 50%; ${isLeft ? 'left: 60px;' : 'right: 60px;'} width: 620px; max-width: 90vw; height: 98vh; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); border-radius: 16px; overflow: hidden; opacity: 0; transition: opacity 0.4s ease-out; pointer-events: auto; z-index: 20; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;`;
-            const card = document.createElement('div');
-            card.style.cssText = `width: 100%; max-width: 360px; background: var(--nezzer-pill-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); border: 1px solid var(--nezzer-pill-border); padding: 26px 22px; transform: scale(0.92); transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);`;
-            card.innerHTML = `
-                <div style="display: flex; justify-content: center; margin-bottom: 16px;">
-                    <div style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 8px 20px rgba(255,107,53,0.45);">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                    </div>
-                </div>
-                <div style="font-size: 16px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 10px; text-align: center; line-height: 1.3;">${dis.title}</div>
-                <div style="font-size: 13px; line-height: 1.6; color: var(--nezzer-btn-color); margin-bottom: 22px; text-align: center;">${dis.body}</div>
-                <button id="nezzer-disclaimer-btn" style="width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #ff6b35, #ff4747); color: white; border: none; border-radius: 12px; font-weight: 700; font-size: 13px; letter-spacing: 0.3px; cursor: pointer; transition: opacity 0.15s ease, transform 0.15s ease; font-family: inherit; box-shadow: 0 6px 16px rgba(255,107,53,0.35);">${dis.button}</button>
-            `;
-            disclaimerEl.appendChild(card);
-            widgetWrapper.appendChild(disclaimerEl);
-
-            requestAnimationFrame(() => { if (disclaimerEl) { disclaimerEl.style.opacity = '1'; card.style.transform = 'scale(1)'; } });
-            const btn = card.querySelector('#nezzer-disclaimer-btn');
-            if (btn) {
-                btn.onmouseenter = () => { btn.style.opacity = '0.92'; btn.style.transform = 'translateY(-1px)'; };
-                btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
-                btn.onclick = (ev) => {
-                    ev.stopPropagation();
-                    try { chrome.storage.local.set({ nezzer_disclaimer_accepted: true }); } catch(e) {}
-                    hideDisclaimer();
-                };
-            }
-        }
-
-        const createSortBtn = (text, sortValue) => {
-            const btn = document.createElement('div');
-            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
-            btn.className = 'nezzer-sort-btn';
-            btn.innerText = text;
-            btn.setAttribute('data-sort', sortValue);
-            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
-
-            btn.onmouseenter = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid #ff6b35'; btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)'; btn.style.color = '#ff6b35';
-                } else btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-            };
-            btn.onmouseleave = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid transparent'; btn.style.boxShadow = 'none'; btn.style.color = '';
-                } else btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-            };
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                if (activeSort === sortValue && isOpen) {
-                    togglePanel(false);
-                } else {
-                    activeSort = sortValue;
-                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
-                    });
-                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                    btn.style.color = 'white';
-                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
-
-                    togglePanel(true);
-
-                    try {
-                        if (sortValue === 'thisPage' || sortValue === 'popularLocal') {
-                            const scraped = scanPageForProducts(sortValue === 'popularLocal');
-                            if (scraped === 'CAPTCHA') {
-                                try { iframe.contentWindow.postMessage({ action: 'CAPTCHA_FOUND' }, '*'); } catch(e) {}
-                            } else {
-                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
-                            }
-                        } else {
-                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                        }
-
-                        if (chrome.runtime && chrome.runtime.id) {
-                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                                if (chrome.runtime.lastError) return;
-                                if (!result || !result.nezzer_disclaimer_accepted) {
-                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
-                                }
-                            });
-                        }
-                    } catch(err) {
-                        console.error("Nezzer Scan Error:", err);
-                    }
-                }
-            };
-            return btn;
-        };
-
-        let btnTop, btnMiddle, btnBottom;
-        if (isProductPage) {
-            btnTop = createSortBtn(t('rating'), 'rating');
-            btnMiddle = createSortBtn(t('popular'), 'popular');
-            btnBottom = createSortBtn(t('cheapest'), 'cheapest');
-            activeSort = 'popular';
-            btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
-        } else {
-            btnTop = createSortBtn(t('thisPage'), 'thisPage');
-            btnMiddle = createSortBtn(t('popular'), 'popularLocal');
-            btnBottom = null;
-            activeSort = 'thisPage';
-            btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnTop.style.color = 'white'; btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
-        }
-
-        pillContainer.appendChild(dragHandle);
-        pillContainer.appendChild(btnTop);
-        pillContainer.appendChild(btnMiddle);
-        if (btnBottom) pillContainer.appendChild(btnBottom);
-
-        sidebar.appendChild(pillContainer);
-        widgetWrapper.appendChild(sidebar);
-        widgetWrapper.appendChild(iframeContainer);
-        document.body.appendChild(widgetWrapper);
-
-        if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-
-        window.addEventListener('mousedown', (e) => {
-            if (!isOpen) return;
-            if (e.button !== 0) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
-            if (disclaimerEl && disclaimerEl.contains(e.target)) return;
-            togglePanel(false);
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: async (u) => {
+                try {
+                    const fd = new FormData(); fd.append("data", "");
+                    await fetch(u, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fd), credentials: "include" });
+                } catch (e) {}
+            },
+            args: [url],
         });
 
-        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen) togglePanel(false); });
+        let cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
+        if (cookie) token = cookie.value.split('_')[0];
 
-        let scrollAccumulated = 0;
-        let scrollResetTimer = null;
-        window.addEventListener('wheel', (e) => {
-            if (!isOpen) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            if (disclaimerEl && disclaimerEl.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            scrollAccumulated += Math.abs(e.deltaY);
-            clearTimeout(scrollResetTimer);
-            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
-            if (scrollAccumulated >= 150) { togglePanel(false); scrollAccumulated = 0; clearTimeout(scrollResetTimer); }
-        }, { passive: true });
-
-        function setSide(side) {
-            currentSide = side;
-            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
-                if (side === 'left') btn.style.transform = 'rotate(180deg)';
-                else btn.style.transform = 'rotate(0deg)';
-            });
-            if (side === 'right') {
-                sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '40px 0 0 40px';
-                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                if (disclaimerEl) { disclaimerEl.style.left = 'auto'; disclaimerEl.style.right = '60px'; }
-            } else {
-                sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 40px 40px 0';
-                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                if (disclaimerEl) { disclaimerEl.style.right = 'auto'; disclaimerEl.style.left = '60px'; }
-            }
+    } else {
+        let cookie = await chrome.cookies.get({ url: `https://www.aliexpress.${domain}/`, name: "_m_h5_tk" });
+        if (!cookie) {
+            cookie = await chrome.cookies.get({ url: "https://www.aliexpress.com/", name: "_m_h5_tk" });
         }
-
-        let isDragging = false;
-        dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); }
-            else { if (currentSide !== 'right') setSide('right'); }
-        });
-        window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
-
-    } catch(err) {
-        console.error("Nezzer Error:", err);
+        if (cookie) token = cookie.value.split('_')[0];
     }
+
+    return token;
 }
 
-injectWidget();
-
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
+async function scraperInPage({ productId, page, streamId, initialToken, domain, targetImage }) {
+  function md5(e) {
+    function t(e, t) { return e << t | e >>> 32 - t; }
+    function r(e, t) {
+        var r, o, a, n, i;
+        return a = 2147483648 & e, n = 2147483648 & t, i = (1073741823 & e) + (1073741823 & t),
+        (r = 1073741824 & e) & (o = 1073741824 & t) ? 2147483648 ^ i ^ a ^ n : r | o ? 1073741824 & i ? 3221225472 ^ i ^ a ^ n : 1073741824 ^ i ^ a ^ n : i ^ a ^ n;
     }
-}).observe(document, {subtree: true, childList: true});
+    function o(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & t | ~e & r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function a(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e & r | t & ~r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function n(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return e ^ t ^ r; }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function i(e, o, a, n, i, c, s) {
+        return e = r(e, r(r(function(e, t, r) { return t ^ (e | ~r); }(o, a, n), i), s)), r(t(e, c), o);
+    }
+    function c(e) {
+        var t, r = "", o = "";
+        for (t = 0; 3 >= t; t++) r += (o = "0" + (e >>> 8 * t & 255).toString(16)).substr(o.length - 2, 2);
+        return r;
+    }
+    var s, p, u, d, m, l, f, g, h, y;
+    for (y = function(e) {
+        for (var t, r = e.length, o = r + 8, a = 16 * ((o - o % 64) / 64 + 1), n = new Array(a - 1), i = 0, c = 0; r > c;)
+            i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | e.charCodeAt(c) << i, c++;
+        return i = c % 4 * 8, n[t = (c - c % 4) / 4] = n[t] | 128 << i, n[a - 2] = r << 3, n[a - 1] = r >>> 29, n;
+    }(e = function(e) {
+        e = e.replace(/\r\n/g, "\n");
+        for (var t = "", r = 0; r < e.length; r++) {
+            var o = e.charCodeAt(r);
+            128 > o ? t += String.fromCharCode(o) : o > 127 && 2048 > o ? (t += String.fromCharCode(o >> 6 | 192), t += String.fromCharCode(63 & o | 128)) : (t += String.fromCharCode(o >> 12 | 224), t += String.fromCharCode(o >> 6 & 63 | 128), t += String.fromCharCode(63 & o | 128));
+        }
+        return t;
+    }(e)), l = 1732584193, f = 4023233417, g = 2562383102, h = 271733878, s = 0; s < y.length; s += 16)
+        p = l, u = f, d = g, m = h,
+        l = o(l, f, g, h, y[s + 0], 7, 3614090360), h = o(h, l, f, g, y[s + 1], 12, 3905402710), g = o(g, h, l, f, y[s + 2], 17, 606105819), f = o(f, g, h, l, y[s + 3], 22, 3250441966),
+        l = o(l, f, g, h, y[s + 4], 7, 4118548399), h = o(h, l, f, g, y[s + 5], 12, 1200080426), g = o(g, h, l, f, y[s + 6], 17, 2821735955), f = o(f, g, h, l, y[s + 7], 22, 4249261313),
+        l = o(l, f, g, h, y[s + 8], 7, 1770035416), h = o(h, l, f, g, y[s + 9], 12, 2336552879), g = o(g, h, l, f, y[s + 10], 17, 4294925233), f = o(f, g, h, l, y[s + 11], 22, 2304563134),
+        l = o(l, f, g, h, y[s + 12], 7, 1804603682), h = o(h, l, f, g, y[s + 13], 12, 4254626195), g = o(g, h, l, f, y[s + 14], 17, 2792965006), l = a(l, f = o(f, g, h, l, y[s + 15], 22, 1236535329), g, h, y[s + 1], 5, 4129170786),
+        h = a(h, l, f, g, y[s + 6], 9, 3225465664), g = a(g, h, l, f, y[s + 11], 14, 643717713), f = a(f, g, h, l, y[s + 0], 20, 3921069994),
+        l = a(l, f, g, h, y[s + 5], 5, 3593408605), h = a(h, l, f, g, y[s + 10], 9, 38016083), g = a(g, h, l, f, y[s + 15], 14, 3634488961), f = a(f, g, h, l, y[s + 4], 20, 3889429448),
+        l = a(l, f, g, h, y[s + 9], 5, 568446438), h = a(h, l, f, g, y[s + 14], 9, 3275163606), g = a(g, h, l, f, y[s + 3], 14, 4107603335), f = a(f, g, h, l, y[s + 8], 20, 1163531501),
+        l = a(l, f, g, h, y[s + 13], 5, 2850285829), h = a(h, l, f, g, y[s + 2], 9, 4243563512), g = a(g, h, l, f, y[s + 7], 14, 1735328473), l = n(l, f = a(f, g, h, l, y[s + 12], 20, 2368359562), g, h, y[s + 5], 4, 4294588738),
+        h = n(h, l, f, g, y[s + 8], 11, 2272392833), g = n(g, h, l, f, y[s + 11], 16, 1839030562), f = n(f, g, h, l, y[s + 14], 23, 4259657740),
+        l = n(l, f, g, h, y[s + 1], 4, 2763975236), h = n(h, l, f, g, y[s + 4], 11, 1272893353), g = n(g, h, l, f, y[s + 7], 16, 4139469664), f = n(f, g, h, l, y[s + 10], 23, 3200236656),
+        l = n(l, f, g, h, y[s + 13], 4, 681279174), h = n(h, l, f, g, y[s + 0], 11, 3936430074), g = n(g, h, l, f, y[s + 3], 16, 3572445317), f = n(f, g, h, l, y[s + 6], 23, 76029189),
+        l = n(l, f, g, h, y[s + 9], 4, 3654602809), h = n(h, l, f, g, y[s + 12], 11, 3873151461), g = n(g, h, l, f, y[s + 15], 16, 530742520), l = i(l, f = n(f, g, h, l, y[s + 2], 23, 3299628645), g, h, y[s + 0], 6, 4096336452),
+        h = i(h, l, f, g, y[s + 7], 10, 1126891415), g = i(g, h, l, f, y[s + 14], 15, 2878612391), f = i(f, g, h, l, y[s + 5], 21, 4237533241),
+        l = i(l, f, g, h, y[s + 12], 6, 1700485571), h = i(h, l, f, g, y[s + 3], 10, 2399980690), g = i(g, h, l, f, y[s + 10], 15, 4293915773), f = i(f, g, h, l, y[s + 1], 21, 2240044497),
+        l = i(l, f, g, h, y[s + 8], 6, 1873313359), h = i(h, l, f, g, y[s + 15], 10, 4264355552), g = i(g, h, l, f, y[s + 6], 15, 2734768916), f = i(f, g, h, l, y[s + 13], 21, 1309151649),
+        l = i(l, f, g, h, y[s + 4], 6, 4149444226), h = i(h, l, f, g, y[s + 11], 10, 3174756917), g = i(g, h, l, f, y[s + 2], 15, 718787259), f = i(f, g, h, l, y[s + 9], 21, 3951481745),
+        l = r(l, p), f = r(f, u), g = r(g, d), h = r(h, m);
+    return (c(l) + c(f) + c(g) + c(h)).toLowerCase();
+  }
+
+  const token = initialToken || document.cookie?.split("_m_h5_tk=")[1]?.split("_")[0];
+  if (!token) return { error: 'NO_TOKEN' };
+
+  const cna = document.cookie?.split("cna=")[1]?.split(";")[0];
+  const xman = decodeURIComponent(document.cookie?.split("xman_us_f=")[1]?.split(";")[0] || '');
+  const acsRt = xman?.split("acs_rt=")[1];
+
+  const locale = xman?.split("x_locale=")[1]?.split("&")[0] ?? (domain === 'ru' ? "ru_RU" : "en_US");
+  const aep = document.cookie?.split("aep_usuc_f=")[1]?.split(";")[0] || '';
+  const currency = aep?.split("c_tp=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RUB" : "USD");
+  const region = aep?.split("region=")[1]?.split("&")[0] ?? (domain === 'ru' ? "RU" : "US");
+
+  const pageId = document.querySelector("a[st_page_id]")?.getAttribute("st_page_id") ?? "fzbibbqcaqusrdsw19535be6a08245a2f104889c2f";
+
+  const getImage = (dom) => {
+    if (targetImage) return targetImage + "_";
+    if (dom === "ru") {
+      return document.querySelector('meta[property="og:image"]')?.content + "_";
+    }
+    const img = document.querySelector('div[class^="image-view--previewWrap"] img[src^="https://ae-pic-"]');
+    if (img) return img.src;
+    const video = document.querySelector('div[class^="image-view--previewWrap"] video[poster^="https://ae-pic-"]');
+    if (video) return video.poster;
+    return document.querySelector('meta[property="og:image"]')?.content;
+  };
+
+  const y = {
+    DEBUG_: false, buyerAliId: "", clientType: "pc", cookieId: cna, currency: currency,
+    image: getImage(domain)?.split("_")[0], isNewImageSearch: true, lang: locale, locale: locale,
+    osf: "detail_bigimg", page: page, pageSize: 20, platform: "pc", productId: productId,
+    recommendInfo: JSON.stringify({ cna: cna, foreverRandomToken: acsRt, pageId: pageId }),
+    searchBizScene: "imageSearch", selectedStyleTab: 0, shipToCountry: region, shpt_co: region,
+    sortOrder: "default", sortType: "default", sversion: 10000, visitorId: cna,
+    "x-appKey": 24815441,
+    "x-reqbiz-ext": "affi_params%3D%2Cae_u_p_s%3D2%2Cglobal_abtest%3D%257B%2522global_union_ab_exp_4%2522%253A%25220%2522%252C%2522st_SE_1736852788277%2522%253A%2522stg_4159%2522%257D",
+    _city: "", _currency: currency, _state: ""
+  };
+
+  if (streamId) { y.streamId = streamId; y.realReffer = ""; }
+
+  const dataString = JSON.stringify({ appId: "19587", params: JSON.stringify(y) });
+  const timestamp = Date.now();
+  const sign = md5(`${token}&${timestamp}&24815441&${dataString}`).toLowerCase();
+
+  const apiDomain = domain === "ru" ? "com" : domain;
+  const apiName = "mtop.relationrecommend.AliExpressRecommend.recommend";
+  const url = `https://recom-acs.aliexpress.${apiDomain}/h5/${apiName.toLowerCase()}/1.0/?jsv=2.5.1&appKey=24815441&t=${timestamp}&sign=${sign}&api=${apiName}&v=1.0&timeout=10000&type=originaljson&dataType=jsonp`;
+
+  try {
+    const fd = new FormData();
+    fd.append("data", dataString);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fd),
+      credentials: "include"
+    });
+    const json = await response.json();
+    return {
+      products: json?.data?.mods?.itemList?.content ?? [],
+      streamId: json?.data?.pageInfo?.streamId,
+      ret: json?.ret?.[0],
+      host: location.host
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function fetchSimilarProductsForProduct({ tabId, productId, imageUrl, domain, page = 1, streamId = null }) {
+  const initialToken = await ensureToken(tabId, domain);
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        world: 'MAIN',
+        func: scraperInPage,
+        args: [{ productId, page, streamId, initialToken, domain, targetImage: imageUrl }],
+      });
+
+      const data = result?.result;
+      if (!data) throw new Error('EMPTY_RESULT');
+      if (data.error) throw new Error(data.error);
+      if (data.ret && !data.ret.startsWith('SUCCESS')) throw new Error('API_' + data.ret);
+
+      return data;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Nezzer] Attempt ${attempt} failed for ${productId}:`, err.message);
+      if (attempt < 3) await randomDelay();
+    }
+  }
+  throw lastError;
+}
+
+async function fetchSimilarProducts({ page = 1, streamId = null }) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.url?.match(/\/item\/(\d+)\.htm/)) return { error: 'NOT_PRODUCT_PAGE' };
+
+  const productId = tab.url.match(/\/item\/(\d+)\.htm/)[1];
+  const domain = tab.url.includes('aliexpress.ru') ? 'ru' : (tab.url.includes('aliexpress.us') ? 'us' : 'com');
+
+  return fetchSimilarProductsForProduct({ tabId: tab.id, productId, domain, page, streamId });
+}
+
+async function fetchAlternatives(products, domain) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab) return { error: 'NO_TAB' };
+  const tabId = tab.id;
+
+  const groups = [];
+  for (const p of products) {
+    try {
+      const res = await fetchSimilarProductsForProduct({
+        tabId,
+        productId: p.productId,
+        imageUrl: p.image?.imgUrl || '',
+        domain: domain,
+        page: 1,
+        streamId: null
+      });
+      
+      if (res && res.products && res.products.length > 0) {
+        const alts = res.products.slice(0, 3);
+        groups.push({
+          originalTitle: p.title?.displayTitle || 'Product',
+          alternatives: alts
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to fetch alternatives for", p.productId, e);
+    }
+    await sleep(1200 + Math.random() * 800);
+  }
+  return { groups };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'FETCH_SIMILAR') {
+    fetchSimilarProducts({ page: msg.page || 1, streamId: msg.streamId || null })
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (msg.action === 'FETCH_ALTERNATIVES') {
+    fetchAlternatives(msg.products, msg.domain)
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+});
