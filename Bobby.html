@@ -71,6 +71,26 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
+// دالة مساعدة لاستخراج التقييم بدقة وتجنب الخلط مع السعر
+function extractValidRating(text) {
+    const matches = text.match(/([0-5][.,]\d)/g);
+    if (!matches) return 0;
+    
+    for (let match of matches) {
+        const index = text.indexOf(match);
+        const before = text.substring(Math.max(0, index - 10), index);
+        const after = text.substring(index + match.length, Math.min(text.length, index + match.length + 10));
+        
+        // إذا كان الرقم يسبق أو يتبع رمز عملة، فهو سعر وليس تقييم.
+        const isPrice = /NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥/.test(before) || /NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥/.test(after);
+        
+        if (!isPrice) {
+            return parseFloat(match.replace(',', '.'));
+        }
+    }
+    return 0;
+}
+
 function scanPageForProducts(sortByPopular = false) {
     if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return 'CAPTCHA';
 
@@ -84,7 +104,7 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. الصورة
+        // 1. جلب الصورة
         let img = '';
         const imgEls = link.querySelectorAll('img');
         for (let el of imgEls) {
@@ -114,7 +134,7 @@ function scanPageForProducts(sortByPopular = false) {
         if (!title) continue;
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
-        // 3. السعر (البحث عن الكلاس المخصص أولاً)
+        // 3. السعر
         let price = '—';
         const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
         if (priceEl) {
@@ -126,37 +146,59 @@ function scanPageForProducts(sortByPopular = false) {
             if (priceMatch) price = priceMatch[0];
         }
 
-        // 4. التقييم (استهداف كلاسات النجوم بدقة)
+        // 4. التقييم (نظام بحث متعدد المستويات للنجوم)
         let rating = 0;
+        
+        // المستوى 1: البحث في العناصر المخصصة للتقييم
         const ratingEl = link.querySelector('[class*="evaluation"], [class*="star"], [class*="rating"]');
         if (ratingEl) {
-            // البحث في aria-label
-            let aria = ratingEl.getAttribute('aria-label');
+            const aria = ratingEl.getAttribute('aria-label') || link.querySelector('[aria-label*="star"]')?.getAttribute('aria-label');
             if (aria) {
                 let m = aria.match(/([0-5][.,]\d)/);
                 if (m) rating = parseFloat(m[1].replace(',', '.'));
+                else {
+                    m = aria.match(/([1-5])\s*stars?/i);
+                    if (m) rating = parseFloat(m[1]);
+                }
             }
-            // البحث في النص
             if (rating === 0) {
-                let m = ratingEl.innerText.match(/([0-5][.,]\d)/);
+                let txt = ratingEl.innerText.trim();
+                let m = txt.match(/([0-5][.,]\d)/);
                 if (m) rating = parseFloat(m[1].replace(',', '.'));
+                else if (/^[1-5]$/.test(txt)) rating = parseFloat(txt);
             }
-            // البحث في صور النجوم
-            if (rating === 0) {
-                let sImg = ratingEl.querySelector('img') || (ratingEl.tagName === 'IMG' ? ratingEl : null);
-                if (sImg) {
-                    let m = (sImg.src || '').match(/star[_-]?(\d)[_-]?(\d)?/i);
-                    if (m) rating = parseFloat(m[1] + (m[2] ? '.' + m[2] : ''));
+        }
+
+        // المستوى 2: البحث عن صور النجوم داخل البطاقة
+        if (rating === 0) {
+            const starImgs = link.querySelectorAll('img');
+            for (const img of starImgs) {
+                if ((img.src || '').includes('star') || img.alt === 'star') {
+                    const m = (img.src || '').match(/star[_-]?(\d)(?:[_-](\d))?/i) || (img.alt || '').match(/(\d)(?:[_-](\d))?/i);
+                    if (m) {
+                        let val = parseFloat(m[1] + (m[2] ? '.' + m[2] : ''));
+                        if (val > 0 && val <= 5) { rating = val; break; }
+                    }
                 }
             }
         }
-        // كحل أخير: البحث عن "4.5" بشرط ألا تكون جزءاً من السعر
+
+        // المستوى 3: استخراج التقييم من النص الكامل بذكاء (استبعاد الأسعار)
         if (rating === 0) {
-            let m = link.innerText.match(/([0-5][.,]\d)\s*(?:out of 5|★|stars?)/i) || link.innerText.match(/★+\s*([0-5][.,]\d)/);
-            if (m) rating = parseFloat(m[1].replace(',', '.'));
+            rating = extractValidRating(link.innerText);
         }
 
-        // 5. المبيعات (التقاط صيغة الأقواس مثل (1000+) بدقة)
+        // المستوى 4: إذا كان هناك نجوم مرسومة (SVG) بدون رقم، نقوم بعدّها
+        if (rating === 0) {
+            const starSvgs = link.querySelectorAll('svg[class*="star"], [class*="star"] svg');
+            let filled = 0;
+            for (const s of starSvgs) {
+                if (s.className.includes('full') || s.className.includes('filled') || s.innerHTML.includes('fill')) filled++;
+            }
+            if (filled > 0 && filled <= 5) rating = filled;
+        }
+
+        // 5. المبيعات (التقاط صيغة الأقواس مثل (1000+) أو (500-))
         let soldCount = 0;
         const soldMatch = link.innerText.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
         if (soldMatch) {
