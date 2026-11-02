@@ -84,7 +84,7 @@ function scanPageForProducts(sortByPopular = false) {
         const pid = match[1];
         if (seen.has(pid)) continue;
 
-        // 1. جلب الصورة
+        // 1. الصورة
         let img = '';
         const imgEls = link.querySelectorAll('img');
         for (let el of imgEls) {
@@ -106,68 +106,75 @@ function scanPageForProducts(sortByPopular = false) {
         }
         if (!img) continue;
 
-        // 2. استخراج النصوص
-        let fullText = link.innerText || '';
-        let textLines = fullText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-        // 3. العنوان
-        let title = link.getAttribute('title') || link.querySelector('[class*="title"]')?.innerText || '';
+        // 2. العنوان
+        let title = link.getAttribute('title') || link.querySelector('h3, [class*="title"]')?.innerText || '';
         if (!title || title.length < 5) {
-            title = textLines.reduce((a, b) => a.length > b.length ? a : b, '');
+            title = link.innerText.split('\n').find(line => line.trim().length > 10) || '';
         }
         if (!title) continue;
         title = title.replace(/\n/g, ' ').trim().substring(0, 80);
 
-        // 4. السعر
+        // 3. السعر (البحث عن الكلاس المخصص أولاً)
         let price = '—';
-        const priceEl = link.querySelector('[class*="price"], [class*="Price"]');
-        if (priceEl && priceEl.innerText.match(/\d/)) {
-            price = priceEl.innerText.trim().split('\n')[0];
-        } else {
-            const priceMatch = fullText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || fullText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
+        const priceEl = link.querySelector('[class*="price--current"], [class*="price--original"], [class*="price"]');
+        if (priceEl) {
+            const pText = priceEl.innerText.trim().split('\n')[0];
+            if (pText.match(/\d/)) price = pText;
+        }
+        if (price === '—') {
+            const priceMatch = link.innerText.match(/(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)\s*(\d+[.,]?\d*)/i) || link.innerText.match(/(\d+[.,]?\d*)\s*(NT\$|US \$|\$|€|£|د\.ج|DA|SAR|AED|руб|zł|kr|CHF|¥)/i);
             if (priceMatch) price = priceMatch[0];
         }
 
-        // 5. عدد المبيعات (يدعم (1000-) أو (500+) أو كلمة sold)
+        // 4. التقييم (استهداف كلاسات النجوم بدقة)
+        let rating = 0;
+        const ratingEl = link.querySelector('[class*="evaluation"], [class*="star"], [class*="rating"]');
+        if (ratingEl) {
+            // البحث في aria-label
+            let aria = ratingEl.getAttribute('aria-label');
+            if (aria) {
+                let m = aria.match(/([0-5][.,]\d)/);
+                if (m) rating = parseFloat(m[1].replace(',', '.'));
+            }
+            // البحث في النص
+            if (rating === 0) {
+                let m = ratingEl.innerText.match(/([0-5][.,]\d)/);
+                if (m) rating = parseFloat(m[1].replace(',', '.'));
+            }
+            // البحث في صور النجوم
+            if (rating === 0) {
+                let sImg = ratingEl.querySelector('img') || (ratingEl.tagName === 'IMG' ? ratingEl : null);
+                if (sImg) {
+                    let m = (sImg.src || '').match(/star[_-]?(\d)[_-]?(\d)?/i);
+                    if (m) rating = parseFloat(m[1] + (m[2] ? '.' + m[2] : ''));
+                }
+            }
+        }
+        // كحل أخير: البحث عن "4.5" بشرط ألا تكون جزءاً من السعر
+        if (rating === 0) {
+            let m = link.innerText.match(/([0-5][.,]\d)\s*(?:out of 5|★|stars?)/i) || link.innerText.match(/★+\s*([0-5][.,]\d)/);
+            if (m) rating = parseFloat(m[1].replace(',', '.'));
+        }
+
+        // 5. المبيعات (التقاط صيغة الأقواس مثل (1000+) بدقة)
         let soldCount = 0;
-        const soldRegex = /\((\d+(?:[.,]\d+)?[kK]?)[^\)]*\)/;
-        let soldMatch = fullText.match(soldRegex);
-        
+        const soldMatch = link.innerText.match(/\((\d+(?:[.,]\d+)?[kK]?)\s*[+-]?\)/);
         if (soldMatch) {
             let numStr = soldMatch[1].toLowerCase().replace(',', '.');
             soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
         } else {
-            const soldTextRegex = /(\d+(?:[.,]\d+)?[kK]?)\s*(?:sold|vendus|مباع|продано|verkauft|venduti|vendidos)/i;
-            let soldTextMatch = fullText.match(soldTextRegex);
-            if (soldTextMatch) {
-                let numStr = soldTextMatch[1].toLowerCase().replace(',', '.');
-                soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
-            }
-        }
-
-        // 6. التقييم (أرقام أو صور نجوم)
-        let rating = 0;
-        const ratingTextRegex = /([0-5][.,]\d)/;
-        let ratingTextMatch = fullText.match(ratingTextRegex);
-        if (ratingTextMatch) {
-            if (!new RegExp(`([a-zA-Z$€£])\\s*${ratingTextMatch[1]}`).test(fullText)) {
-                rating = parseFloat(ratingTextMatch[1].replace(',', '.'));
-            }
-        }
-        
-        if (rating === 0) {
-            const starImg = link.querySelector('img[src*="star"], [class*="star"] img');
-            if (starImg) {
-                const src = starImg.src || '';
-                const starMatch = src.match(/star[_-]?(\d)[_-]?(\d)?/i);
-                if (starMatch) {
-                    rating = parseFloat(starMatch[1] + (starMatch[2] ? '.' + starMatch[2] : ''));
+            const tradeEl = link.querySelector('[class*="trade"], [class*="sold"]');
+            if (tradeEl) {
+                const sMatch = tradeEl.innerText.match(/(\d+(?:[.,]\d+)?[kK]?)/i);
+                if (sMatch) {
+                    let numStr = sMatch[1].toLowerCase().replace(',', '.');
+                    soldCount = numStr.includes('k') ? parseFloat(numStr) * 1000 : parseFloat(numStr);
                 }
             }
         }
 
-        // 7. الشحن المجاني
-        let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(fullText);
+        // 6. الشحن المجاني
+        let isFreeShipping = /free shipping|livraison gratuite|envío gratis|شحن مجاني|spedizione gratuita|kostenloser versand|免运费|免運費/i.test(link.innerText);
 
         seen.add(pid);
         products.push({
