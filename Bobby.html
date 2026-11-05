@@ -1,604 +1,134 @@
-let widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
-let darkModeQueryRef = null;
-let darkModeListenerRef = null;
-let isFetchingAlternatives = false;
-let alternativesBuffer = [];
-let alternativesDelivered = 0;
-let currentRoundDelivered = 0;
-let currentRoundTarget = 12;
-const FIRST_ROUND_SIZE = 12;
-const NEXT_ROUND_SIZE = 6;
-const STEP_SIZE = 3;
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Carrefour Electronique</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --primary-color: #e30613; --dark-color: #1a1a1a; }
+        body { font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
+        .navbar { background-color: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 10px 0; }
+        .logo-img { height: 40px; width: auto; border-radius: 5px; }
+        .brand-text { font-size: 1.2rem; white-space: nowrap; }
+        .nav-link { font-weight: 600; color: var(--dark-color) !important; transition: 0.3s; padding: 10px 15px !important; }
+        .nav-link:hover { color: var(--primary-color) !important; }
+        .dropdown-menu.mega-menu { border: none; box-shadow: 0 10px 20px rgba(0,0,0,0.1); background-color: #f9f9f9; padding: 15px; border-radius: 0; border-top: 3px solid var(--primary-color); }
+        .mega-menu ul { list-style: none; padding: 0; }
+        .mega-menu ul li a { color: #333; text-decoration: none; display: block; padding: 8px 10px; font-size: 0.9rem; border-bottom: 1px solid #eee; }
+        .mega-menu ul li a:hover { color: var(--primary-color); background-color: #fff; }
+        .carousel-item { height: 60vh; min-height: 400px; background-size: cover; background-position: center; }
+        .carousel-overlay { background: rgba(26, 26, 26, 0.8); height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; text-align: center; padding: 0 20px; }
+        .carousel-overlay h1 { font-size: 3rem; font-weight: bold; margin-bottom: 20px; }
+        .btn-custom { background-color: var(--primary-color); color: white; border: none; }
+        .btn-custom:hover { background-color: #b3050e; color: white; }
+        .service-card { background: #fff; border-radius: 10px; padding: 30px 20px; text-align: center; transition: all 0.3s ease; border-bottom: 4px solid transparent; box-shadow: 0 5px 15px rgba(0,0,0,0.05); height: 100%; }
+        .service-card:hover { transform: translateY(-10px); border-bottom: 4px solid var(--primary-color); box-shadow: 0 15px 30px rgba(0,0,0,0.1); }
+        .service-icon { font-size: 2.5rem; color: var(--primary-color); margin-bottom: 20px; background: #ffe6e8; width: 80px; height: 80px; line-height: 80px; border-radius: 50%; margin: 0 auto 20px auto; }
+        .service-card h4 { font-size: 1.2rem; font-weight: bold; color: var(--dark-color); margin-bottom: 15px; }
+        .product-card { transition: 0.3s; border: none; box-shadow: 0 5px 15px rgba(0,0,0,0.05); }
+        .product-card:hover { transform: translateY(-10px); box-shadow: 0 15px 30px rgba(0,0,0,0.1); border-top: 3px solid var(--primary-color); }
+        .product-card img { height: 200px; object-fit: cover; }
+        .btn-outline-custom { border-color: var(--primary-color); color: var(--primary-color); }
+        .btn-outline-custom:hover { background-color: var(--primary-color); color: white; }
+        footer { background-color: var(--dark-color); color: white; padding: 40px 0; margin-top: 50px; }
+        @media (min-width: 992px) { .navbar-toggler { display: none !important; } .navbar-collapse { display: flex !important; } .dropdown-mega { position: static !important; } .dropdown-menu.mega-menu { width: 100%; left: 0; right: 0; margin-top: 0; } }
+        @media (max-width: 991px) { .logo-img { height: 35px; } .brand-text { font-size: 1rem; } .navbar-collapse { background-color: #fff; width: 100%; margin-top: 10px; border-top: 1px solid #eee; } .nav-link { border-bottom: 1px solid #f1f1f1; padding: 12px 10px !important; text-align: left !important; } .dropdown-menu.mega-menu { box-shadow: none; background-color: #f9f9f9; border: none; padding-left: 15px; } .carousel-overlay h1 { font-size: 2rem; } }
+    </style>
+</head>
+<body>
+    <div class="text-white py-2 d-none d-md-block" style="background-color: var(--dark-color);">
+        <div class="container d-flex justify-content-between small">
+            <span><i class="fas fa-phone text-danger"></i> Service Client : 044 95 17 44</span>
+            <span><i class="fas fa-envelope text-danger"></i> contact@carrefourelectronique.com</span>
+        </div>
+    </div>
 
-let pageProductsCache = new Map();
+    <nav class="navbar navbar-expand-lg sticky-top">
+        <div class="container d-flex justify-content-between align-items-center flex-wrap">
+            <a class="navbar-brand d-flex align-items-center gap-2 m-0" href="index.html">
+                <img src="logo.png" alt="Logo" class="logo-img" onerror="this.src='https://via.placeholder.com/40x40?text=CE'">
+                <div class="brand-text"><span style="color: var(--primary-color); font-weight: 900;">Carrefour</span> <span style="color: var(--dark-color); font-weight: 700;">Electronique</span></div>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" style="border: 1px solid #ccc; padding: 5px 10px; box-shadow: none;"><span class="navbar-toggler-icon" style="width: 1.2em; height: 1.2em;"></span></button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link" href="index.html">Accueil</a></li>
+                    <li class="nav-item dropdown dropdown-mega">
+                        <a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown">Nos Services</a>
+                        <div class="dropdown-menu mega-menu">
+                            <div class="container">
+                                <div class="row">
+                                    <div class="col-md-4 col-6">
+                                        <ul>
+                                            <li><a href="videosurveillance.html"><i class="fas fa-video text-danger me-2"></i> Vidéosurveillance</a></li>
+                                            <li><a href="incendie.html"><i class="fas fa-fire-extinguisher text-danger me-2"></i> Détection Incendie</a></li>
+                                            <li><a href="reseau.html"><i class="fas fa-network-wired text-danger me-2"></i> Réseau Info & Tél</a></li>
+                                        </ul>
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <ul>
+                                            <li><a href="intrusion.html"><i class="fas fa-shield-alt text-danger me-2"></i> Anti-Intrusion</a></li>
+                                            <li><a href="agression.html"><i class="fas fa-user-shield text-danger me-2"></i> Anti-Agression</a></li>
+                                            <li><a href="sonorisation.html"><i class="fas fa-volume-up text-danger me-2"></i> Sonorisation</a></li>
+                                        </ul>
+                                    </div>
+                                    <div class="col-md-4 col-12">
+                                        <ul>
+                                            <li><a href="teledistribution.html"><i class="fas fa-satellite-dish text-danger me-2"></i> Télédistribution</a></li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="nav-item"><a class="nav-link" href="contact.html">Contact</a></li>
+                </ul>
+            </div>
+        </div>
+    </nav>
 
-const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ بدائل أفضل' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page', betterAlternatives: '✨ Meilleures alternatives' },
-    'es': { cheapest: 'Más barato', popular: 'Más vendido', rating: 'Mejor valorado', thisPage: '🛍️ Esta página', betterAlternatives: '✨ Mejores alternativas' },
-    'pt': { cheapest: 'Mais barato', popular: 'Mais vendido', rating: 'Melhor avaliado', thisPage: '🛍️ Esta página', betterAlternatives: '✨ Melhores alternativas' },
-    'ru': { cheapest: 'Самые дешевые', popular: 'Бестселлеры', rating: 'Лучший рейтинг', thisPage: '🛍️ Эта страница', betterAlternatives: '✨ Лучшие альтернативы' },
-    'de': { cheapest: 'Günstigste', popular: 'Bestseller', rating: 'Am besten bewertet', thisPage: '🛍️ Diese Seite', betterAlternatives: '✨ Bessere Alternativen' },
-    'it': { cheapest: 'Più economico', popular: 'Più venduto', rating: 'Più votato', thisPage: '🛍️ Questa pagina', betterAlternatives: '✨ Alternative migliori' },
-    'tr': { cheapest: 'En Ucuz', popular: 'En Çok Satan', rating: 'En İyi Puan', thisPage: '🛍️ Bu Sayfa', betterAlternatives: '✨ Daha İyi Alternatifler' },
-    'nl': { cheapest: 'Goedkoopste', popular: 'Best verkocht', rating: 'Best beoordeeld', thisPage: '🛍️ Deze pagina', betterAlternatives: '✨ Betere alternatieven' },
-    'pl': { cheapest: 'Najtańsze', popular: 'Bestsellery', rating: 'Najwyżej oceniane', thisPage: '🛍️ Ta strona', betterAlternatives: '✨ Lepsze alternatywy' },
-    'ko': { cheapest: '가장 저렴한', popular: '베스트셀러', rating: '최고 평점', thisPage: '🛍️ 이 페이지', betterAlternatives: '✨ 더 나은 대안' },
-    'ja': { cheapest: '最も安い', popular: 'ベストセラー', rating: '最高評価', thisPage: '🛍️ このページ', betterAlternatives: '✨ より良い代替品' },
-    'zh_CN': { cheapest: '最便宜', popular: '最畅销', rating: '评分最高', thisPage: '🛍️ 本页', betterAlternatives: '✨ 更好的替代品' },
-    'zh_TW': { cheapest: '最便宜', popular: '最暢銷', rating: '評分最高', thisPage: '🛍️ 本頁', betterAlternatives: '✨ 更好的替代品' },
-    'vi': { cheapest: 'Rẻ nhất', popular: 'Bán chạy nhất', rating: 'Đánh giá tốt nhất', thisPage: '🛍️ Trang này', betterAlternatives: '✨ Lựa chọn tốt hơn' },
-    'id': { cheapest: 'Termurah', popular: 'Terlaris', rating: 'Rating Tertinggi', thisPage: '🛍️ Halaman Ini', betterAlternatives: '✨ Alternatif Lebih Baik' },
-    'th': { cheapest: 'ถูกที่สุด', popular: 'ขายดีที่สุด', rating: 'คะแนนสูงสุด', thisPage: '🛍️ หน้านี้', betterAlternatives: '✨ ทางเลือกที่ดีกว่า' },
-    'he': { cheapest: 'הזול ביותר', popular: 'הנמכר ביותר', rating: 'המדורג הגבוה ביותר', thisPage: '🛍️ דף זה', betterAlternatives: '✨ חלופות טובות יותר' },
-    'sv': { cheapest: 'Billigast', popular: 'Bästsäljare', rating: 'Bäst betyg', thisPage: '🛍️ Denna sida', betterAlternatives: '✨ Bättre alternativ' },
-    'da': { cheapest: 'Billigste', popular: 'Bedst sælgende', rating: 'Bedst bedømt', thisPage: '🛍️ Denne side', betterAlternatives: '✨ Bedre alternativer' },
-    'fi': { cheapest: 'Halvin', popular: 'Myydyin', rating: 'Parhaiten arvosteltu', thisPage: '🛍️ Tämä sivu', betterAlternatives: '✨ Parempia vaihtoehtoja' },
-    'no': { cheapest: 'Billigst', popular: 'Bestselger', rating: 'Best vurdert', thisPage: '🛍️ Denne siden', betterAlternatives: '✨ Bedre alternativer' },
-    'cs': { cheapest: 'Nejlevnější', popular: 'Nejprodávanější', rating: 'Nejlépe hodnocené', thisPage: '🛍️ Tato stránka', betterAlternatives: '✨ Lepší alternativy' },
-    'ro': { cheapest: 'Cel mai ieftin', popular: 'Cele mai vândute', rating: 'Cele mai bine evaluate', thisPage: '🛍️ Această pagină', betterAlternatives: '✨ Alternative mai bune' },
-    'hu': { cheapest: 'Legolcsóbb', popular: 'Legkelendőbb', rating: 'Legjobbra értékelt', thisPage: '🛍️ Ez az oldal', betterAlternatives: '✨ Jobb alternatívák' },
-    'el': { cheapest: 'Φθηνότερα', popular: 'Δημοφιλέστερα', rating: 'Καλύτερα αξιολογημένα', thisPage: '🛍️ Αυτή η σελίδα', betterAlternatives: '✨ Καλύτερες εναλλακτικές' },
-    'uk': { cheapest: 'Найдешевші', popular: 'Бестселери', rating: 'Найвищий рейтинг', thisPage: '🛍️ Ця сторінка', betterAlternatives: '✨ Кращі альтернативи' },
-    'ms': { cheapest: 'Paling Murah', popular: 'Paling Laris', rating: 'Penilaian Terbaik', thisPage: '🛍️ Halaman Ini', betterAlternatives: '✨ Alternatif Lebih Baik' },
-    'tl': { cheapest: 'Pinakamura', popular: 'Pinakamabenta', rating: 'Pinakamataas na rating', thisPage: '🛍️ Pahinang Ito', betterAlternatives: '✨ Mas Magandang Alternatibo' },
-    'hi': { cheapest: 'सबसे सस्ता', popular: 'सर्वाधिक बिकने वाला', rating: 'सर्वोच्च रेटेड', thisPage: '🛍️ यह पृष्ठ', betterAlternatives: '✨ बेहतर विकल्प' },
-    'bg': { cheapest: 'Най-евтини', popular: 'Най-продавани', rating: 'Най-високо оценени', thisPage: '🛍️ Тази страница', betterAlternatives: '✨ По-добри алтернативи' }
-};
+    <div id="heroCarousel" class="carousel slide" data-bs-ride="carousel">
+        <div class="carousel-inner">
+            <div class="carousel-item active" style="background-image: url('https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1920&auto=format&fit=crop');">
+                <div class="carousel-overlay"><h1>Sécurité Électronique</h1><p class="lead mb-4 d-none d-md-block">Protégez ce qui compte le plus.</p><a href="videosurveillance.html" class="btn btn-custom btn-lg">Découvrir nos services</a></div>
+            </div>
+            <div class="carousel-item" style="background-image: url('https://images.unsplash.com/photo-1497215728101-856f4ea42174?q=80&w=1920&auto=format&fit=crop');">
+                <div class="carousel-overlay"><h1>Matériel Informatique</h1><p class="lead mb-4 d-none d-md-block">Ordinateurs et réseaux professionnels.</p><a href="contact.html" class="btn btn-custom btn-lg">Contactez-nous</a></div>
+            </div>
+        </div>
+        <button class="carousel-control-prev" type="button" data-bs-target="#heroCarousel" data-bs-slide="prev"><span class="carousel-control-prev-icon"></span></button>
+        <button class="carousel-control-next" type="button" data-bs-target="#heroCarousel" data-bs-slide="next"><span class="carousel-control-next-icon"></span></button>
+    </div>
 
-function getSiteLang() {
-    try {
-        let lang = document.documentElement.lang || '';
-        if (!lang) {
-            const match = document.cookie.match(/(?:^|;\s*)(?:aep_usuc_f|xman_us_f)=([^;]*)/);
-            if (match) {
-                const cookieStr = decodeURIComponent(match[1]);
-                const localeMatch = cookieStr.match(/b_locale=([^&]+)/) || cookieStr.match(/x_locale=([^&]+)/);
-                if (localeMatch) lang = localeMatch[1];
-            }
-        }
-        let lowerLang = String(lang).toLowerCase();
-        if (lowerLang.includes('zh-cn')) return 'zh_CN';
-        if (!lang) {
-            if (location.href.includes('aliexpress.ru')) lang = 'ru';
-            else if (location.href.includes('aliexpress.us')) lang = 'en';
-            else if (location.href.includes('fr.aliexpress.com')) lang = 'fr';
-            else lang = 'en';
-        }
-        lang = lowerLang.split('-')[0].split('_')[0];
-        return SITE_TRANSLATIONS[lang] ? lang : 'en';
-    } catch(e) { return 'en'; }
-}
+    <section id="services" class="py-5 bg-light">
+        <div class="container">
+            <div class="text-center mb-5"><h2 class="fw-bold" style="color: var(--dark-color);">Les Services Que Nous Offrons</h2></div>
+            <div class="row g-4">
+                <div class="col-md-6 col-lg-4"><a href="videosurveillance.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-video"></i></div><h4>Vidéosurveillance</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="incendie.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-fire-extinguisher"></i></div><h4>Détection Incendie</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="reseau.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-network-wired"></i></div><h4>Réseau Info & Tél</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="intrusion.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-shield-alt"></i></div><h4>Anti-Intrusion</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="agression.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-user-shield"></i></div><h4>Anti-Agression</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="sonorisation.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-volume-up"></i></div><h4>Sonorisation</h4></div></a></div>
+                <div class="col-md-6 col-lg-4"><a href="teledistribution.html" class="text-decoration-none"><div class="service-card"><div class="service-icon"><i class="fas fa-satellite-dish"></i></div><h4>Télédistribution</h4></div></a></div>
+            </div>
+        </div>
+    </section>
 
-const t = (key) => {
-    try {
-        const lang = getSiteLang();
-        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
-    } catch(e) { return key; }
-};
+    <div class="container my-5">
+        <h2 class="text-center mb-5" style="color: var(--dark-color); font-weight: bold;">Nos Meilleures Ventes</h2>
+        <div class="row g-4">
+            <div class="col-12 col-md-6 col-lg-4"><div class="card product-card h-100"><img src="https://images.unsplash.com/photo-1557804506-669a67965ba0?q=80&w=600&auto=format&fit=crop" class="card-img-top" alt="Caméra"><div class="card-body text-center"><h5 class="card-title">Caméra DAHUA 4K</h5><p class="card-text text-muted">Caméra extérieure haute résolution.</p><a href="contact.html" class="btn btn-outline-custom w-100">Voir détails</a></div></div></div>
+            <div class="col-12 col-md-6 col-lg-4"><div class="card product-card h-100"><img src="https://images.unsplash.com/photo-1555617981-dac3880eac6e?q=80&w=600&auto=format&fit=crop" class="card-img-top" alt="ZKTeco"><div class="card-body text-center"><h5 class="card-title">ZKTeco Contrôle d'Accès</h5><p class="card-text text-muted">Système biométrique professionnel.</p><a href="contact.html" class="btn btn-outline-custom w-100">Voir détails</a></div></div></div>
+            <div class="col-12 col-md-6 col-lg-4"><div class="card product-card h-100"><img src="https://images.unsplash.com/photo-1593640408182-31c70c8268f5?q=80&w=600&auto=format&fit=crop" class="card-img-top" alt="HP"><div class="card-body text-center"><h5 class="card-title">PC de Bureau HP</h5><p class="card-text text-muted">Ordinateur performant pour bureautique.</p><a href="contact.html" class="btn btn-outline-custom w-100">Voir détails</a></div></div></div>
+        </div>
+    </div>
 
-function shuffleArray(array) {
-    let currentIndex = array.length, randomIndex;
-    while (currentIndex != 0) {
-        randomIndex = Math.floor(Math.random() * currentIndex);
-        currentIndex--;
-        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
-    }
-    return array;
-}
-
-// هذا هو "السر" من الإضافة التجريبية: قراءة الأرقام من النصوص والـ DOM
-function collectPageProducts() {
-    if (document.title.toLowerCase().includes('security') || document.title.toLowerCase().includes('captcha')) return;
-
-    // 1. مسح الروابط التقليدية
-    const links = document.querySelectorAll('a[href*="/item/"]');
-    for (const link of links) {
-        try {
-            const match = link.href.match(/\/item\/(\d+)\.html/);
-            if (match && !pageProductsCache.has(match[1])) {
-                let img = '';
-                const imgEl = link.querySelector('img');
-                if (imgEl) {
-                    let src = imgEl.src || imgEl.getAttribute('data-src') || '';
-                    if (src.startsWith('//')) src = 'https:' + src;
-                    if (src && !src.includes('tps') && !src.includes('banner')) img = src;
-                }
-
-                pageProductsCache.set(match[1], {
-                    productId: match[1],
-                    title: { displayTitle: '' },
-                    image: { imgUrl: img },
-                    prices: { salePrice: { formattedPrice: '' } },
-                    evaluation: { starRating: 0 },
-                    trade: { realTradeCount: 0 },
-                    _isLocal: true,
-                    _isFreeShipping: false,
-                    url: link.href
-                });
-            }
-        } catch (e) {}
-    }
-
-    // 2. مسح كود HTML بالكامل (للبحث عن أرقام المنتجات في أي مكان)
-    const htmlContent = document.body.innerHTML;
-    const regex = /(\d{12,15})/g; // أرقام المنتجات عادة بين 12 و 15 رقماً
-    let match;
-    while ((match = regex.exec(htmlContent)) !== null) {
-        const pid = match[1];
-        if (!pageProductsCache.has(pid)) {
-            pageProductsCache.set(pid, {
-                productId: pid,
-                title: { displayTitle: '' },
-                image: { imgUrl: '' },
-                prices: { salePrice: { formattedPrice: '' } },
-                evaluation: { starRating: 0 },
-                trade: { realTradeCount: 0 },
-                _isLocal: true,
-                _isFreeShipping: false,
-                url: `https://www.aliexpress.com/item/${pid}.html`
-            });
-        }
-    }
-}
-
-function removeWidget() {
-    if (widgetWrapper) {
-        if (darkModeQueryRef && darkModeListenerRef) {
-            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
-            else darkModeQueryRef.removeListener(darkModeListenerRef);
-        }
-        darkModeQueryRef = null;
-        darkModeListenerRef = null;
-        widgetWrapper.remove();
-        widgetWrapper = null;
-        iframeContainer = null;
-        iframe = null;
-        sidebar = null;
-        alternativesBuffer = [];
-        alternativesDelivered = 0;
-        currentRoundDelivered = 0;
-        currentRoundTarget = FIRST_ROUND_SIZE;
-        isFetchingAlternatives = false;
-        window._nezzerPendingRequest = false;
-    }
-}
-
-function deliverNextStep() {
-    if (!iframe || !iframe.contentWindow) return;
-    
-    if (currentRoundDelivered >= currentRoundTarget) return;
-    if (alternativesDelivered >= alternativesBuffer.length) return;
-    
-    const remainingInRound = currentRoundTarget - currentRoundDelivered;
-    const stepSize = Math.min(STEP_SIZE, remainingInRound);
-    const nextBatch = alternativesBuffer.slice(alternativesDelivered, alternativesDelivered + stepSize);
-    
-    if (nextBatch.length === 0) return;
-    
-    alternativesDelivered += nextBatch.length;
-    currentRoundDelivered += nextBatch.length;
-    
-    const hasMore = alternativesDelivered < alternativesBuffer.length || isFetchingAlternatives;
-    try { 
-        iframe.contentWindow.postMessage({ 
-            action: 'APPEND_LOCAL', 
-            products: nextBatch, 
-            hasMore: hasMore
-        }, '*'); 
-    } catch(e) {}
-}
-
-function injectWidget() {
-    try {
-        if (widgetWrapper) return;
-
-        const isProductPage = window.location.href.match(/\/item\/(\d+)\.htm/);
-
-        const nezzerStyleId = 'nezzer-theme-styles';
-        if (!document.getElementById(nezzerStyleId)) {
-            const styleEl = document.createElement('style');
-            styleEl.id = nezzerStyleId;
-            styleEl.textContent = `
-                #nezzer-widget-wrapper {
-                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
-                    --nezzer-pill-border: #f1f5f9;
-                    --nezzer-btn-color: #64748b;
-                    --nezzer-drag-color: #64748b;
-                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
-                    --nezzer-drag-color-hover: #475569;
-                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
-                    --nezzer-iframe-bg: #ffffff;
-                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
-                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
-                }
-                #nezzer-widget-wrapper.nezzer-dark {
-                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
-                    --nezzer-pill-border: #2a2a33;
-                    --nezzer-btn-color: #94a3b8;
-                    --nezzer-drag-color: #94a3b8;
-                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
-                    --nezzer-drag-color-hover: #cbd5e1;
-                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
-                    --nezzer-iframe-bg: #16161c;
-                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
-                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
-                }
-                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
-                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
-                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
-            `;
-            document.head.appendChild(styleEl);
-        }
-
-        let isOpen = false;
-        let currentSide = 'left';
-        let activeSort = isProductPage ? 'popular' : 'betterAlternatives';
-        let disclaimerEl = null;
-
-        widgetWrapper = document.createElement('div');
-        widgetWrapper.id = 'nezzer-widget-wrapper';
-        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
-
-        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
-        darkModeListenerRef = () => {
-            if (!widgetWrapper) return;
-            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
-        };
-        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
-        else darkModeQueryRef.addListener(darkModeListenerRef);
-        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
-
-        sidebar = document.createElement('div');
-        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
-
-        const pillContainer = document.createElement('div');
-        pillContainer.style.cssText = `
-            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
-            padding: 20px 6px; border-radius: 0 40px 40px 0;
-            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
-            display: flex; flex-direction: column; align-items: center; gap: 15px;
-            pointer-events: auto; transition: all 0.3s ease;
-            border: 1px solid var(--nezzer-pill-border); border-left: none;
-        `;
-
-        iframeContainer = document.createElement('div');
-        iframeContainer.style.cssText = `
-            position: absolute; top: 50%; left: 60px;
-            width: 620px; max-width: 90vw; height: 98vh;
-            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
-            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
-            transform: translateY(-50%) translateX(-105%);
-            opacity: 0; pointer-events: none; visibility: hidden;
-            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
-            display: flex; overflow: hidden; z-index: 5;
-        `;
-
-        const siteLang = getSiteLang();
-
-        iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
-        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
-        iframeContainer.appendChild(iframe);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.id = 'nezzer-drag-handle';
-        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
-        dragHandle.innerHTML = '⋮⋮';
-
-        function hideDisclaimer() {
-            if (!disclaimerEl) return;
-            const el = disclaimerEl;
-            el.style.opacity = '0';
-            setTimeout(() => {
-                if (el && el.parentNode) el.remove();
-                if (disclaimerEl === el) disclaimerEl = null;
-            }, 300);
-        }
-
-        function togglePanel(forceOpen = null) {
-            if (forceOpen === true) isOpen = true;
-            else if (forceOpen === false) isOpen = false;
-            else isOpen = !isOpen;
-
-            if (isOpen) {
-                iframeContainer.style.visibility = 'visible';
-                iframeContainer.style.opacity = '1';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-                iframeContainer.style.pointerEvents = 'auto';
-            } else {
-                iframeContainer.style.opacity = '0';
-                iframeContainer.style.pointerEvents = 'none';
-                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
-                hideDisclaimer();
-            }
-        }
-
-        function showDisclaimer() {
-            if (disclaimerEl || !widgetWrapper) return;
-            const lang = getSiteLang();
-            const translations = window.NEZZER_DISCLAIMER_TRANSLATIONS || { 'en': { title: 'Nezzer is completely free!', body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links...', button: 'Got it, thanks' } };
-            const dis = translations[lang] || translations['en'];
-            const rtlLangs = ['ar', 'he', 'fa', 'ur'];
-            const isRtlLang = rtlLangs.includes(lang);
-            const isLeft = currentSide === 'left';
-
-            disclaimerEl = document.createElement('div');
-            disclaimerEl.id = 'nezzer-disclaimer';
-            disclaimerEl.setAttribute('dir', isRtlLang ? 'rtl' : 'ltr');
-            disclaimerEl.style.cssText = `position: absolute; top: 50%; ${isLeft ? 'left: 60px;' : 'right: 60px;'} width: 620px; max-width: 90vw; height: 98vh; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); border-radius: 16px; overflow: hidden; opacity: 0; transition: opacity 0.4s ease-out; pointer-events: auto; z-index: 20; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;`;
-            const card = document.createElement('div');
-            card.style.cssText = `width: 100%; max-width: 360px; background: var(--nezzer-pill-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 20px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); border: 1px solid var(--nezzer-pill-border); padding: 26px 22px; transform: scale(0.92); transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);`;
-            card.innerHTML = `
-                <div style="display: flex; justify-content: center; margin-bottom: 16px;">
-                    <div style="width: 50px; height: 50px; border-radius: 50%; background: linear-gradient(135deg, #ff6b35, #ff4747); display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 8px 20px rgba(255,107,53,0.45);">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                    </div>
-                </div>
-                <div style="font-size: 16px; font-weight: 700; color: var(--nezzer-drag-color-hover); margin-bottom: 10px; text-align: center; line-height: 1.3;">${dis.title}</div>
-                <div style="font-size: 13px; line-height: 1.6; color: var(--nezzer-btn-color); margin-bottom: 22px; text-align: center;">${dis.body}</div>
-                <button id="nezzer-disclaimer-btn" style="width: 100%; padding: 12px 16px; background: linear-gradient(135deg, #ff6b35, #ff4747); color: white; border: none; border-radius: 12px; font-weight: 700; font-size: 13px; letter-spacing: 0.3px; cursor: pointer; transition: opacity 0.15s ease, transform 0.15s ease; font-family: inherit; box-shadow: 0 6px 16px rgba(255,107,53,0.35);">${dis.button}</button>
-            `;
-            disclaimerEl.appendChild(card);
-            widgetWrapper.appendChild(disclaimerEl);
-
-            requestAnimationFrame(() => { if (disclaimerEl) { disclaimerEl.style.opacity = '1'; card.style.transform = 'scale(1)'; } });
-            const btn = card.querySelector('#nezzer-disclaimer-btn');
-            if (btn) {
-                btn.onmouseenter = () => { btn.style.opacity = '0.92'; btn.style.transform = 'translateY(-1px)'; };
-                btn.onmouseleave = () => { btn.style.opacity = '1'; btn.style.transform = 'translateY(0)'; };
-                btn.onclick = (ev) => {
-                    ev.stopPropagation();
-                    try { chrome.storage.local.set({ nezzer_disclaimer_accepted: true }); } catch(e) {}
-                    hideDisclaimer();
-                };
-            }
-        }
-
-        const createSortBtn = (text, sortValue) => {
-            const btn = document.createElement('div');
-            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
-            btn.className = 'nezzer-sort-btn';
-            btn.innerText = text;
-            btn.setAttribute('data-sort', sortValue);
-            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
-
-            btn.onmouseenter = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid #ff6b35'; btn.style.boxShadow = '0 0 10px rgba(255, 107, 53, 0.4)'; btn.style.color = '#ff6b35';
-                } else btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-            };
-            btn.onmouseleave = () => {
-                if (activeSort !== sortValue) {
-                    btn.style.border = '1px solid transparent'; btn.style.boxShadow = 'none'; btn.style.color = '';
-                } else btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)';
-            };
-            btn.onclick = async (e) => {
-                e.stopPropagation();
-                if (activeSort === sortValue && isOpen) {
-                    togglePanel(false);
-                } else {
-                    activeSort = sortValue;
-                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
-                    });
-                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                    btn.style.color = 'white';
-                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
-
-                    togglePanel(true);
-
-                    try {
-                        if (sortValue === 'betterAlternatives') {
-                            if (isFetchingAlternatives) return;
-
-                            try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
-
-                            collectPageProducts();
-                            let scraped = Array.from(pageProductsCache.values());
-
-                            if (scraped.length === 0) {
-                                await new Promise(r => setTimeout(r, 1500));
-                                collectPageProducts();
-                                scraped = Array.from(pageProductsCache.values());
-                            }
-
-                            if (scraped.length === 0) {
-                                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
-                            } else {
-                                isFetchingAlternatives = true;
-                                alternativesBuffer = [];
-                                alternativesDelivered = 0;
-                                currentRoundDelivered = 0;
-                                currentRoundTarget = FIRST_ROUND_SIZE;
-                                window._nezzerPendingRequest = false;
-                                
-                                const top21 = shuffleArray(scraped).slice(0, 21);
-                                const domain = location.href.includes('aliexpress.ru') ? 'ru' : (location.href.includes('aliexpress.us') ? 'us' : 'com');
-                                
-                                chrome.runtime.sendMessage({ 
-                                    action: 'FETCH_ALTERNATIVES', 
-                                    products: top21,
-                                    domain: domain
-                                });
-                            }
-                        } else {
-                            try { iframe.contentWindow.postMessage({ action: 'SORT', sort: sortValue }, '*'); } catch(e) {}
-                        }
-
-                        if (chrome.runtime && chrome.runtime.id) {
-                            chrome.storage.local.get(['nezzer_disclaimer_accepted'], (result) => {
-                                if (chrome.runtime.lastError) return;
-                                if (!result || !result.nezzer_disclaimer_accepted) {
-                                    setTimeout(() => { if (!disclaimerEl && widgetWrapper && isOpen) showDisclaimer(); }, 450);
-                                }
-                            });
-                        }
-                    } catch(err) {
-                        console.error("Nezzer Scan Error:", err);
-                    }
-                }
-            };
-            return btn;
-        };
-
-        let btnTop, btnMiddle, btnBottom;
-        if (isProductPage) {
-            btnTop = createSortBtn(t('rating'), 'rating');
-            btnMiddle = createSortBtn(t('popular'), 'popular');
-            btnBottom = createSortBtn(t('cheapest'), 'cheapest');
-            activeSort = 'popular';
-            btnMiddle.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnMiddle.style.color = 'white'; btnMiddle.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnMiddle.style.border = '1px solid rgba(255,107,53,0.5)';
-        } else {
-            btnTop = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
-            btnMiddle = null;
-            btnBottom = null;
-            activeSort = 'betterAlternatives';
-            btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btnTop.style.color = 'white'; btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
-        }
-
-        pillContainer.appendChild(dragHandle);
-        pillContainer.appendChild(btnTop);
-        if (btnMiddle) pillContainer.appendChild(btnMiddle);
-        if (btnBottom) pillContainer.appendChild(btnBottom);
-
-        sidebar.appendChild(pillContainer);
-        widgetWrapper.appendChild(sidebar);
-        widgetWrapper.appendChild(iframeContainer);
-        document.body.appendChild(widgetWrapper);
-
-        if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-
-        window.addEventListener('mousedown', (e) => {
-            if (!isOpen) return;
-            if (e.button !== 0) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
-            if (disclaimerEl && disclaimerEl.contains(e.target)) return;
-            togglePanel(false);
-        });
-
-        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen) togglePanel(false); });
-
-        let scrollAccumulated = 0;
-        let scrollResetTimer = null;
-        window.addEventListener('wheel', (e) => {
-            if (!isOpen) return;
-            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            if (disclaimerEl && disclaimerEl.contains(e.target)) { scrollAccumulated = 0; clearTimeout(scrollResetTimer); return; }
-            scrollAccumulated += Math.abs(e.deltaY);
-            clearTimeout(scrollResetTimer);
-            scrollResetTimer = setTimeout(() => { scrollAccumulated = 0; }, 150);
-            if (scrollAccumulated >= 150) { togglePanel(false); scrollAccumulated = 0; clearTimeout(scrollResetTimer); }
-        }, { passive: true });
-
-        window.addEventListener('message', (event) => {
-            if (!event.data) return;
-            
-            if (event.data.action === 'REQUEST_MORE_ALTERNATIVES') {
-                if (currentRoundDelivered >= currentRoundTarget) {
-                    currentRoundDelivered = 0;
-                    currentRoundTarget = NEXT_ROUND_SIZE;
-                }
-                
-                if (alternativesDelivered < alternativesBuffer.length) {
-                    deliverNextStep();
-                } else if (!isFetchingAlternatives) {
-                    try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {}
-                } else {
-                    window._nezzerPendingRequest = true;
-                }
-            }
-        });
-
-        function setSide(side) {
-            currentSide = side;
-            pillContainer.querySelectorAll('div[data-sort]').forEach(btn => {
-                if (side === 'left') btn.style.transform = 'rotate(180deg)';
-                else btn.style.transform = 'rotate(0deg)';
-            });
-            if (side === 'right') {
-                sidebar.style.right = '0'; sidebar.style.left = 'auto';
-                pillContainer.style.borderRadius = '40px 0 0 40px';
-                pillContainer.style.boxShadow = '-5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderRight = 'none'; pillContainer.style.borderLeft = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.right = '60px'; iframeContainer.style.left = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
-                if (disclaimerEl) { disclaimerEl.style.left = 'auto'; disclaimerEl.style.right = '60px'; }
-            } else {
-                sidebar.style.left = '0'; sidebar.style.right = 'auto';
-                pillContainer.style.borderRadius = '0 40px 40px 0';
-                pillContainer.style.boxShadow = '5px 0 20px var(--nezzer-side-shadow)';
-                pillContainer.style.borderLeft = 'none'; pillContainer.style.borderRight = '1px solid var(--nezzer-pill-border)';
-                iframeContainer.style.left = '60px'; iframeContainer.style.right = 'auto';
-                if (!isOpen) iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                if (disclaimerEl) { disclaimerEl.style.right = 'auto'; disclaimerEl.style.left = '60px'; }
-            }
-        }
-
-        let isDragging = false;
-        dragHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); isDragging = true; dragHandle.style.cursor = 'grabbing'; iframe.style.pointerEvents = 'none'; });
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            if (e.clientX < window.innerWidth / 2) { if (currentSide !== 'left') setSide('left'); }
-            else { if (currentSide !== 'right') setSide('right'); }
-        });
-        window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; dragHandle.style.cursor = 'grab'; iframe.style.pointerEvents = 'auto'; });
-
-    } catch(err) {
-        console.error("Nezzer Error:", err);
-    }
-}
-
-injectWidget();
-
-// كشط أولي بمجرد تحميل الصفحة
-collectPageProducts();
-
-// مراقبة التغييرات أثناء التمرير
-const pageObserver = new MutationObserver(() => {
-    clearTimeout(collectTimeout);
-    collectTimeout = setTimeout(collectPageProducts, 500);
-});
-pageObserver.observe(document.body, { childList: true, subtree: true });
-
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        pageProductsCache.clear();
-        removeWidget();
-        setTimeout(injectWidget, 1000);
-        setTimeout(collectPageProducts, 1500);
-    }
-}).observe(document, {subtree: true, childList: true});
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.action === 'ALTERNATIVE_PROGRESS') {
-        try { if (iframe && iframe.contentWindow) iframe.contentWindow.postMessage({ action: 'UPDATE_PROGRESS', current: msg.current, total: msg.total }, '*'); } catch(e) {}
-    }
-    if (msg.action === 'ALTERNATIVE_BATCH') {
-        alternativesBuffer = alternativesBuffer.concat(msg.alternatives || []);
-        deliverNextStep();
-    }
-    if (msg.action === 'ALTERNATIVES_FINISHED') {
-        isFetchingAlternatives = false;
-        
-        if (window._nezzerPendingRequest) {
-            window._nezzerPendingRequest = false;
-            if (alternativesDelivered < alternativesBuffer.length) {
-                deliverNextStep();
-            } else {
-                try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {}
-            }
-        } else {
-            try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: alternativesBuffer.length - alternativesDelivered }, '*'); } catch(e) {}
-        }
-    }
-});
+    <footer class="text-center">
+        <div class="container"><h4 class="mb-3" style="color: var(--primary-color);">Carrefour Electronique</h4><p class="mb-0">© 2024 Tous droits réservés.</p></div>
+    </footer>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
