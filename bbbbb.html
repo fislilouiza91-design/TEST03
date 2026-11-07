@@ -1,0 +1,138 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:provider/provider.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:flutter_gen/gen_l10n/app_localizations.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+import 'data/models/share_payload.dart';
+import 'data/services/hidden_browser.dart';
+import 'state/app_state.dart';
+import 'state/settings_state.dart';
+import 'ui/screens/home_screen.dart';
+import 'ui/screens/results_screen.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final settings = SettingsState();
+  await settings.load();
+  runApp(NezzerApp(initialSettings: settings));
+}
+
+class NezzerApp extends StatefulWidget {
+  final SettingsState initialSettings;
+  const NezzerApp({super.key, required this.initialSettings});
+
+  @override
+  State<NezzerApp> createState() => _NezzerAppState();
+}
+
+class _NezzerAppState extends State<NezzerApp> {
+  StreamSubscription? _intentSub;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _initSharing();
+  }
+
+  void _initSharing() {
+    ReceiveSharingIntent.instance.getInitialMedia().then((value) {
+      if (value.isNotEmpty) {
+        _handleSharedText(value.first.path);
+        ReceiveSharingIntent.instance.reset();
+      }
+    });
+
+    _intentSub = ReceiveSharingIntent.instance.getMediaStream().listen(
+      (value) {
+        if (value.isNotEmpty) {
+          _handleSharedText(value.first.path);
+        }
+      },
+      onError: (err) => debugPrint("Share error: $err"),
+    );
+  }
+
+  void _handleSharedText(String text) {
+    final payload = SharePayload.parse(text);
+    if (payload != null) {
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (!mounted) return;
+        final context = _navigatorKey.currentContext;
+        if (context != null) {
+          context.read<AppState>().startSearch(payload);
+          _navigatorKey.currentState?.push(
+            MaterialPageRoute(builder: (_) => const ResultsScreen()),
+          );
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _intentSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider<SettingsState>.value(value: widget.initialSettings),
+        ChangeNotifierProvider<HiddenBrowser>(create: (_) => HiddenBrowser()),
+        ChangeNotifierProxyProvider2<HiddenBrowser, SettingsState, AppState>(
+          create: (ctx) => AppState(ctx.read<HiddenBrowser>(), ctx.read<SettingsState>()),
+          update: (_, browser, settings, prev) => prev ?? AppState(browser, settings),
+        ),
+      ],
+      child: Consumer<SettingsState>(
+        builder: (context, settings, _) {
+          return MaterialApp(
+            navigatorKey: _navigatorKey,
+            onGenerateTitle: (context) => AppLocalizations.of(context)!.appTitle,
+            debugShowCheckedModeBanner: false,
+            locale: settings.effectiveLocale,
+            supportedLocales: const [Locale('ar'), Locale('en'), Locale('fr')],
+            localizationsDelegates: const [
+              AppLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            theme: ThemeData(
+              colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFFF4747)),
+              useMaterial3: true,
+            ),
+            home: Stack(
+              children: [
+                const HomeScreen(),
+                // 💡 إظهار المتصفح للتصحيح (بحجم 150x150)
+                Positioned(
+                  left: 10,
+                  bottom: 10,
+                  child: Container(
+                    width: 150,
+                    height: 150,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.red, width: 3),
+                      color: Colors.white,
+                    ),
+                    child: Consumer<HiddenBrowser>(
+                      builder: (context, browser, child) {
+                        return WebViewWidget(controller: browser.controller);
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
