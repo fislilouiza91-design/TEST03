@@ -44,93 +44,96 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج المطورة
+// دالة الاستخراج الجديدة (تقرأ البيانات من الأكواد المخفية)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    const images = Array.from(doc.querySelectorAll('img'));
-    let validCount = 0;
-
-    for (const img of images) {
-        try {
-            let src = img.src || img.getAttribute('data-src') || '';
-            if (!src.includes('kwcdn')) continue;
-
-            let title = img.alt || '';
-            if (!title || title.trim().length < 10) continue; 
-
-            // 1. البحث عن الرابط الحقيقي
-            let container = img.closest('a');
-            let href = container ? container.href : '';
+    
+    // 1. الطريقة الأولى (الأقوى): قراءة الأكواد المخفية (Scripts)
+    const html = doc.documentElement.innerHTML;
+    const regex = /"goods_id"\s*:\s*"?(\d+)"?([\s\S]{0,2000})/g;
+    let match;
+    
+    while ((match = regex.exec(html)) !== null) {
+        const pid = match[1];
+        const block = match[2];
+        if (seen.has(pid)) continue;
+        
+        // استخراج الاسم من الكود
+        const titleMatch = block.match(/"title"\s*:\s*"([^"]+)"/) || block.match(/"goods_name"\s*:\s*"([^"]+)"/);
+        // استخراج الصورة من الكود
+        const imgMatch = block.match(/"image_url"\s*:\s*"([^"]+)"/) || block.match(/"thumb_url"\s*:\s*"([^"]+)"/) || block.match(/"main_image"\s*:\s*"([^"]+)"/);
+        
+        if (titleMatch && imgMatch) {
+            let title = titleMatch[1].replace(/\\u[\dA-F]{4}/gi, m => String.fromCharCode(parseInt(m.replace(/\\u/g, ''), 16)));
+            let img = imgMatch[1];
+            if (img.startsWith('//')) img = 'https:' + img;
             
-            // إذا لم نجد رابطاً، نبحث عن رابط داخل الحاوية الأب
-            if (!href || (!href.includes('/g-') && !href.includes('goods_id'))) {
-                const parent = img.parentElement?.parentElement;
-                if (parent) {
-                    const linkEl = parent.querySelector('a');
-                    if (linkEl && (linkEl.href.includes('/g-') || linkEl.href.includes('goods_id'))) {
-                        href = linkEl.href;
-                        container = parent;
-                    }
-                }
-            }
-
-            // إذا لم نجد رابط منتج حقيقي، نتجاهل هذه الصورة (للتخلص من الإعلانات)
-            if (!href || (!href.includes('/g-') && !href.includes('goods_id'))) continue;
-
-            // 2. البحث عن السعر
-            let price = '—';
-            let textToSearch = (container ? container.innerText : '') + ' ' + (img.parentElement ? img.parentElement.innerText : '');
+            // استخراج السعر من الكود
+            const priceMatch = block.match(/"price"\s*:\s*"?(\d+(?:\.\d+)?)"?/) || block.match(/"sale_price"\s*:\s*"?(\d+(?:\.\d+)?)"?/);
+            let price = priceMatch ? priceMatch[1] : '—';
             
-            // نمط يبحث عن السعر (مثل 1,160 DA أو 824 DA)
-            const priceMatch = textToSearch.match(/(\d+[.,]?\d*)\s*(DA|DZD|€|\$|£)/i) || textToSearch.match(/(DA|DZD|€|\$|£)\s*(\d+[.,]?\d*)/i);
+            // تنسيق السعر (إذا كان بالسنت، نقسم على 100)
+            if (price !== '—' && price.length > 4) price = (parseFloat(price)/100).toFixed(2);
+            if (price !== '—') price += ' DA'; // يمكن تغيير العملة حسب الحاجة
             
-            if (priceMatch) {
-                price = priceMatch[0].trim();
-            } else {
-                // إذا لم نجد السعر، نتجاهل المنتج (لأننا نريد منتجات حقيقية فقط)
-                continue;
-            }
-
-            validCount++;
-
-            let pid = href.match(/(\d{10,})/)?.[1] || src;
-            if (seen.has(pid)) continue;
-
-            if (src.startsWith('//')) src = 'https:' + src;
-            src = src.split('?')[0];
-
             seen.add(pid);
             products.push({
                 productId: pid,
-                title: { displayTitle: title.substring(0, 100) },
-                image: { imgUrl: src },
+                title: { displayTitle: title },
+                image: { imgUrl: img.split('?')[0] },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 }, 
-                trade: { realTradeCount: 0 }, 
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: 0 },
                 _isLocal: true,
-                url: href
+                url: `https://www.temu.com/g-${pid}.html`
             });
-        } catch (e) {}
+        }
     }
-    
-    console.log(`Nezzer: Found ${validCount} valid products with prices and links.`);
+
+    // 2. الطريقة الثانية (خطة بديلة): البحث في الصور المرئية إذا فشلت الطريقة الأولى
+    if (products.length === 0) {
+        const images = Array.from(doc.querySelectorAll('img[src*="kwcdn"]'));
+        for (const img of images) {
+            let title = img.alt;
+            if (!title || title.length < 5) continue;
+            let src = img.src || img.getAttribute('data-src');
+            if (!src) continue;
+            
+            let pid = src.split('/').pop().split('.')[0] || Math.random().toString(36).substring(7);
+            if (seen.has(pid)) continue;
+            seen.add(pid);
+            
+            products.push({
+                productId: pid,
+                title: { displayTitle: title.substring(0, 100) },
+                image: { imgUrl: src.split('?')[0] },
+                prices: { salePrice: { formattedPrice: '—' } },
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: 0 },
+                _isLocal: true,
+                url: `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0,20))}`
+            });
+        }
+    }
+
+    console.log(`Nezzer: Extracted ${products.length} products from hidden data.`);
     return products;
 }
 
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
-    console.log("Nezzer: Scrolling to load products...");
+    console.log("Nezzer: Scrolling to load data...");
     
-    // تمرير أكثر (5 مرات) لجلب منتجات إضافية
-    for (let i = 0; i < 5; i++) {
+    // تمرير سريع لتحفيز تحميل البيانات
+    for (let i = 0; i < 3; i++) {
         window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 2000)); 
+        await new Promise(r => setTimeout(r, 1000)); 
     }
 
     let products = extractProductsFromDOM(document);
     
-    // استبعاد المنتج الحالي
+    // استبعاد المنتج الأساسي
     const currentUrl = window.location.href;
     const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
