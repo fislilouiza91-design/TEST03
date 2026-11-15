@@ -1,1 +1,34 @@
-https://www.temu.com/dz-fr/montre-%C3%A0-quartz-de-luxe-pour-homme-1-pi%C3%A8ce--rond-style-professionnel--parfait-pour-un-port--et-les-occasions-de-cadeaux-un--cadeau-pour-les-anniversaires-et-les-f%C3%AAtes--d-ann%C3%A9e-un--parfait-pour--les-p%C3%A8res-les--les--les--g-606761553623672.html?_oak_mp_inf=EPj09%2FaK%2B4kBGiBjMjFhOGEwYTczNWQ0NDg1YTI0MGNmMGFkYTNlMTAxNSD9x%2Bf2nTQ%3D&top_gallery_url=https%3A%2F%2Fimg.kwcdn.com%2Fproduct%2Ffancy%2F76127935-dada-41ef-8592-df9a37b0ce61.jpg&spec_gallery_id=47914984452&refer_page_sn=10005&freesia_scene=1&_oak_freesia_scene=1&_oak_rec_ext_1=NDgzMDA&_oak_gallery_order=105455479%2C4777812%2C1042094217%2C1533755342%2C1078669714&refer_page_el_sn=200024&refer_page_name=home&refer_page_id=10005_1794740181375_k6lsl4ljip&_x_sessn_id=20yqfdgxdn
+{
+  "manifest_version": 3,
+  "name": "Nezzer for Temu",
+  "description": "Sort Temu products by cheapest, best selling, and best rated.",
+  "default_locale": "en",
+  "version": "1.0.0",
+  "minimum_chrome_version": "102",
+  "permissions": ["storage", "scripting", "tabs", "cookies"],
+  "host_permissions": [
+    "*://*.temu.com/*"
+  ],
+  "background": {
+    "service_worker": "background/engine.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.temu.com/*"],
+      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["panel/panel.html", "panel/panel.js"],
+      "matches": ["*://*.temu.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": { "128": "assets/icons/icon128.png" }
+  },
+  "icons": { "128": "assets/icons/icon128.png" }
+}
