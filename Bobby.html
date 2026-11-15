@@ -10,8 +10,8 @@ let alternativesDelivered = 0;
 let currentRoundDelivered = 0;
 let currentRoundTarget = 12;
 const FIRST_ROUND_SIZE = 12;
-const NEXT_ROUND_SIZE = 6;
-const STEP_SIZE = 3;
+const NEXT_ROUND_SIZE = 12; // زيادة العدد في التمرير التالي
+const STEP_SIZE = 12; // إرسال 12 منتج دفعة واحدة
 
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Similar Products' },
@@ -44,52 +44,54 @@ function shuffleArray(array) {
     return array;
 }
 
-// العودة لمنطق البحث الذي نجح سابقاً، مع إضافة فلتر الحظر
+// دالة استخراج محسنة: تصعد من الصورة للبحث عن السعر والعنوان
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
+    const images = Array.from(doc.querySelectorAll('img[src*="kwcdn"], img[data-src*="kwcdn"]'));
     
-    // البحث في جميع الحاويات (Divs) كما فعلنا في الكود الناجح
-    const allElements = Array.from(doc.querySelectorAll('div'));
-    let potentialCards = 0;
-
-    // قائمة الكلمات الممنوعة (للتخلص من الإعلانات)
     const blacklist = ['garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 'compte', 'télécharger', 'app', 'service client', 'panier'];
 
-    for (const el of allElements) {
+    for (const img of images) {
         try {
-            const text = el.innerText;
-            if (!text || text.length > 500 || text.length < 5) continue;
-
-            // 1. يجب أن يحتوي العنصر على سعر
-            const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
-            if (!priceMatch) continue;
-
-            // 2. يجب أن يحتوي على صورة
-            const img = el.querySelector('img');
-            if (!img) continue;
-
             let src = img.src || img.getAttribute('data-src') || '';
-            if (!src.includes('kwcdn')) continue;
+            
+            // الصعود لأعلى للبحث عن الحاوية التي تحتوي على سعر
+            let container = img.closest('a') || img.parentElement;
+            let price = '—';
+            let priceMatch = null;
+            let text = '';
 
-            // 3. استخراج العنوان
+            // نصعد 5 مستويات كحد أقصى للبحث عن السعر
+            let current = container;
+            for(let i=0; i<5; i++) {
+                if (!current) break;
+                text = current.innerText || '';
+                priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
+                if (priceMatch) {
+                    price = priceMatch[0].trim();
+                    break;
+                }
+                current = current.parentElement;
+            }
+
+            if (price === '—') continue;
+
+            // استخراج العنوان
             let title = img.alt || '';
-            if (!title || title.length < 5 || title.toLowerCase() === 'image') {
-                title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
+            if (title.includes("photo de l'article") || title.length < 10) {
+                // إذا كان العنوان وهمياً، نبحث في النص عن سطر طويل لا يحتوي على سعر
+                const texts = text.split('\n').map(t => t.trim()).filter(t => t.length > 10 && !t.includes('DA') && !t.includes('$'));
+                if (texts.length > 0) title = texts[0];
             }
+            
+            if (!title || title.length < 5) continue;
 
-            // 4. تطبيق فلتر الحظر (تجاهل الإعلانات)
             const lowerTitle = title.toLowerCase();
-            if (blacklist.some(word => lowerTitle.includes(word))) {
-                console.log("Nezzer: Skipped Ad ->", title);
-                continue; 
-            }
+            if (blacklist.some(word => lowerTitle.includes(word))) continue;
 
-            potentialCards++;
-
-            // 5. الرابط (إذا لم يوجد، نضع رابط بحث)
-            let link = el.querySelector('a');
-            let href = link ? link.href : '';
+            let linkEl = current.tagName === 'A' ? current : current.querySelector('a');
+            let href = linkEl ? linkEl.href : '';
 
             if (!href || !href.includes('http')) {
                 href = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0, 20))}`;
@@ -107,7 +109,7 @@ function extractProductsFromDOM(doc) {
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
                 image: { imgUrl: src },
-                prices: { salePrice: { formattedPrice: priceMatch[0].trim() } },
+                prices: { salePrice: { formattedPrice: price } },
                 evaluation: { starRating: 0 }, 
                 trade: { realTradeCount: 0 }, 
                 _isLocal: true,
@@ -116,7 +118,7 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer Debug: Found ${potentialCards} valid cards. Extracted ${products.length} products after ad filter.`);
+    console.log(`Nezzer Debug: Extracted ${products.length} valid products.`);
     return products;
 }
 
@@ -126,12 +128,11 @@ async function getSimilarProductsFromCurrentPage() {
     
     for (let i = 0; i < 5; i++) {
         window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 2000)); 
+        await new Promise(r => setTimeout(r, 1500)); 
     }
 
     let products = extractProductsFromDOM(document);
     
-    // استبعاد المنتج الأساسي
     const currentUrl = window.location.href;
     const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
