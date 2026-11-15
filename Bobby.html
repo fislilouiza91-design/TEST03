@@ -8,10 +8,10 @@ let isFetchingAlternatives = false;
 let alternativesBuffer = [];
 let alternativesDelivered = 0;
 let currentRoundDelivered = 0;
-let currentRoundTarget = 20; // تم التعديل إلى 20
-const FIRST_ROUND_SIZE = 20; // تم التعديل إلى 20
-const NEXT_ROUND_SIZE = 20;  // تم التعديل إلى 20
-const STEP_SIZE = 20;        // تم التعديل إلى 20 (إرسال 20 منتج دفعة واحدة)
+let currentRoundTarget = 20; 
+const FIRST_ROUND_SIZE = 20; 
+const NEXT_ROUND_SIZE = 20;  
+const STEP_SIZE = 20;        
 
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Similar Products' },
@@ -44,7 +44,7 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة البحث التي نجحت معك
+// دالة الاستخراج المحسنة (تنظيف العناوين وتجاهل الكتل الضخمة)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
@@ -57,7 +57,8 @@ function extractProductsFromDOM(doc) {
     for (const el of allElements) {
         try {
             const text = el.innerText;
-            if (!text || text.length > 500 || text.length < 5) continue;
+            // تجاهل الكتل الفارغة أو الضخمة جداً (التي قد تحتوي على أسعار إعلانات)
+            if (!text || text.length > 200 || text.length < 5) continue;
 
             const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
             if (!priceMatch) continue;
@@ -68,10 +69,18 @@ function extractProductsFromDOM(doc) {
             let src = img.src || img.getAttribute('data-src') || '';
             if (!src.includes('kwcdn')) continue;
 
+            // 1. تنظيف العنوان (إزالة "photo de l'article")
             let title = img.alt || '';
+            title = title.replace(/photo de l'article\s*/i, '').replace(/photo de l’article\s*/i, '').trim();
+            
             if (!title || title.length < 5 || title.toLowerCase() === 'image') {
                 title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
+                // تنظيف إضافي إذا تم أخذه من النص
+                title = title.replace(/photo de l'article\s*/i, '').trim();
             }
+            
+            if (title.length < 5) continue;
+            title = title.charAt(0).toUpperCase() + title.slice(1);
 
             const lowerTitle = title.toLowerCase();
             if (blacklist.some(word => lowerTitle.includes(word))) {
@@ -88,7 +97,6 @@ function extractProductsFromDOM(doc) {
             }
 
             if (src.startsWith('//')) src = 'https:' + src;
-            src = src.split('?')[0];
 
             let pid = href.match(/(\d{10,})/)?.[1] || src;
 
@@ -98,7 +106,7 @@ function extractProductsFromDOM(doc) {
             products.push({
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
-                image: { imgUrl: src },
+                image: { imgUrl: src }, 
                 prices: { salePrice: { formattedPrice: priceMatch[0].trim() } },
                 evaluation: { starRating: 0 }, 
                 trade: { realTradeCount: 0 }, 
@@ -108,18 +116,20 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer Debug: Found ${potentialCards} valid cards. Extracted ${products.length} products.`);
+    console.log(`Nezzer Debug: Found ${potentialCards} valid cards. Extracted ${products.length} clean products.`);
     return products;
 }
 
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
-    console.log("Nezzer: Scrolling to load products...");
+    console.log("Nezzer: Deep scrolling to load 20+ products...");
     
-    for (let i = 0; i < 5; i++) {
-        window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 2000)); 
+    for (let i = 0; i < 8; i++) {
+        window.scrollBy(0, 1000);
+        await new Promise(r => setTimeout(r, 1000)); 
     }
+    
+    await new Promise(r => setTimeout(r, 2000));
 
     let products = extractProductsFromDOM(document);
     
@@ -130,7 +140,6 @@ async function getSimilarProductsFromCurrentPage() {
     products = products.filter(p => p.productId !== currentPid);
     window.scrollTo(0, originalScroll);
     
-    // إرجاع حتى 40 منتجاً في الذاكرة
     return shuffleArray(products).slice(0, 40);
 }
 
