@@ -49,45 +49,48 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج المطورة: تبحث عن أي صورة من سيرفر تيمو
+// دالة استخراج صارمة جداً
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
+    const currentUrl = window.location.href;
     
-    // نبحث عن جميع الروابط التي تحتوي على صور
+    // البحث عن جميع الروابط التي تحتوي على صور
     const anchors = doc.querySelectorAll('a');
     
     for (const anchor of anchors) {
         try {
+            const href = anchor.href;
+            // شرط صارم: الرابط يجب أن يكون رابط منتج حقيقي
+            if (!href || (!href.includes('-g-') && !href.includes('goods_id='))) continue;
+            
+            // تجاهل المنتج الحالي (حتى لا يظهر في البدائل)
+            if (currentUrl.includes(href)) continue;
+
             const imgEl = anchor.querySelector('img');
             if (!imgEl) continue;
             
             let img = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
-            // التأكد من أن الصورة تابعة لتيمو
-            if (!img || !img.includes('kwcdn')) continue; 
+            // التأكد من أن الصورة تابعة لتيمو وأنها ليست شعار متجر
+            if (!img || !img.includes('kwcdn') || img.includes('avatar') || img.includes('logo')) continue; 
             
             if (img.startsWith('//')) img = 'https:' + img;
             img = img.split('?')[0]; 
             
-            const href = anchor.href;
-            if (!href) continue;
-
-            // معرف فريد للمنتج
             let pid = '';
             const pidMatch = href.match(/-g-(\d+)\.html/) || href.match(/goods_id=(\d+)/);
-            if (pidMatch) {
-                pid = pidMatch[1];
-            } else {
-                // إذا لم نجد المعرف في الرابط، نستخدم جزء من رابط الصورة
-                pid = img.split('/').pop().split('.')[0] || Math.random().toString(36).substring(7);
-            }
+            if (pidMatch) pid = pidMatch[1];
+            else continue;
 
             if (seen.has(pid)) continue;
 
             let title = imgEl.getAttribute('alt') || '';
-            if (!title || title.length < 5) {
-                title = anchor.innerText.split('\n').find(line => line.trim().length > 10) || 'Product';
+            // إذا كان النص قصير جداً (مثل اسم المتجر) نتجاهله
+            if (!title || title.length < 15) {
+                title = anchor.innerText.split('\n').find(line => line.trim().length > 15) || '';
             }
+            if (!title) continue;
+
             title = title.replace(/\n/g, ' ').trim().substring(0, 100);
 
             let price = '—';
@@ -111,24 +114,20 @@ function extractProductsFromDOM(doc) {
     return products;
 }
 
-// دالة تمرير الصفحة لجلب المنتجات
+// دالة تمرير الصفحة ببطء
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     
-    // التمرير للأسفل ببطء لتحفيز تحميل المنتجات
-    window.scrollBy(0, 1500);
-    await new Promise(r => setTimeout(r, 2000)); 
-    window.scrollBy(0, 1500);
-    await new Promise(r => setTimeout(r, 2000)); 
+    // التمرير التدريجي لأسفل لجذب انتباه تيمو وتحميل المنتجات
+    for (let i = 0; i < 3; i++) {
+        window.scrollBy(0, 800);
+        await new Promise(r => setTimeout(r, 1000)); 
+    }
 
     let products = extractProductsFromDOM(document);
 
     // العودة لمكانك الأصلي
     window.scrollTo(0, originalScroll);
-
-    // استبعاد المنتج الأساسي (حتى لا يظهر مع البدائل)
-    const currentUrl = window.location.href;
-    products = products.filter(p => !currentUrl.includes(p.productId));
 
     console.log("Nezzer: Found similar products in DOM:", products.length);
     return shuffleArray(products).slice(0, 40);
