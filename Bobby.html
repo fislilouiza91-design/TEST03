@@ -49,86 +49,78 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة استخراج مرنة جداً
+// دالة الاستخراج الجديدة: تعتمد على الصور والنصوص بدلاً من الروابط
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
     const anchors = Array.from(doc.querySelectorAll('a'));
-    let loggedCount = 0;
+    let logCount = 0;
 
     for (const anchor of anchors) {
         try {
-            const href = anchor.href;
-            if (!href) continue;
-
-            // نقبل أي رابط يحتوي على -g- أو goods_id (روابط منتجات تيمو)
-            if (!href.includes('-g-') && !href.includes('goods_id')) continue;
-
             const imgEl = anchor.querySelector('img');
             if (!imgEl) continue;
 
-            let img = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.src || '';
-            if (!img || img.length < 10) continue;
+            // الشرط الأول: يجب أن تحتوي الصورة على نص بديل (alt) لأنه عنوان المنتج
+            let title = imgEl.getAttribute('alt') || '';
+            // إذا كان النص قصيراً جداً، فهو غالباً شعار أو أيقونة وليس منتجاً
+            if (!title || title.trim().length < 10) continue; 
 
-            if (img.startsWith('//')) img = 'https:' + img;
+            let imgSrc = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.src || '';
+            if (!imgSrc || imgSrc.length < 20) continue;
+            if (imgSrc.startsWith('//')) imgSrc = 'https:' + imgSrc;
 
-            let pid = href;
-            const pidMatch = href.match(/-g-(\d+)\.html/) || href.match(/goods_id=(\d+)/);
+            // استخراج رقم المنتج من الرابط (أي رقم طويل)
+            let pid = anchor.href;
+            const pidMatch = anchor.href.match(/(\d{10,})/); 
             if (pidMatch) pid = pidMatch[1];
 
             if (seen.has(pid)) continue;
 
-            // طباعة أول 3 منتجات يتم العثور عليها للتشخيص
-            if (loggedCount < 3) {
-                console.log("✅ Nezzer Found Product Link:", href);
-                loggedCount++;
-            }
-
-            let title = imgEl.getAttribute('alt') || '';
-            if (!title || title.trim().length < 5) {
-                const texts = anchor.innerText.split('\n').map(t => t.trim()).filter(t => t.length > 5);
-                title = texts.length > 0 ? texts[0] : 'Product';
-            }
-
+            // استخراج السعر
             let price = '—';
-            const text = anchor.innerText || '';
-            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|ر\.س|DH)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|ر\.س|DH)/i);
+            const text = anchor.innerText || anchor.parentElement?.innerText || '';
+            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH)/i);
             if (priceMatch) price = priceMatch[0].trim();
+
+            // طباعة في الكونسول لنعرف أن الكود يعمل
+            if (logCount < 3) {
+                console.log("✅ Nezzer Found Product:", title.substring(0, 30), "| Price:", price);
+                logCount++;
+            }
 
             seen.add(pid);
             products.push({
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
-                image: { imgUrl: img },
+                image: { imgUrl: imgSrc },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 }, 
-                trade: { realTradeCount: 0 }, 
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: 0 },
                 _isLocal: true,
-                url: href
+                url: anchor.href
             });
         } catch (e) {}
     }
     return products;
 }
 
-// دالة تمرير أطول وأكثر ذكاءً
+// دالة تمرير الصفحة
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
-    console.log("Nezzer: Starting to scroll down to load similar products...");
+    console.log("Nezzer: Scrolling down to load products...");
     
-    // نمرر الصفحة للأسفل 4 مرات، وننتظر ثانيتين في كل مرة لتحميل المنتجات
-    for (let i = 0; i < 4; i++) {
-        window.scrollBy(0, 1000);
-        await new Promise(r => setTimeout(r, 2000)); 
+    for (let i = 0; i < 3; i++) {
+        window.scrollBy(0, 1500);
+        await new Promise(r => setTimeout(r, 1500)); 
     }
 
-    console.log("Nezzer: Scrolling finished. Extracting products...");
     let products = extractProductsFromDOM(document);
-    console.log(`Nezzer: Total products found in DOM: ${products.length}`);
+    console.log(`Nezzer: Total valid products extracted: ${products.length}`);
 
     // استبعاد المنتج الحالي
     const currentUrl = window.location.href;
-    const currentPidMatch = currentUrl.match(/-g-(\d+)\.html/) || currentUrl.match(/goods_id=(\d+)/);
+    const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
 
     products = products.filter(p => p.productId !== currentPid);
@@ -175,7 +167,7 @@ function injectWidget() {
     try {
         if (widgetWrapper) return;
 
-        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=');
+        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=') || window.location.href.match(/\d{10,}/);
         if (!isProductPage) return; 
 
         const nezzerStyleId = 'nezzer-theme-styles';
