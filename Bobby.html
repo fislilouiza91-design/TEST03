@@ -44,7 +44,7 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج المحسنة (تنظيف العناوين وتجاهل الكتل الضخمة)
+// دالة الاستخراج النهائية (دقيقة جداً)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
@@ -52,40 +52,48 @@ function extractProductsFromDOM(doc) {
     const allElements = Array.from(doc.querySelectorAll('div'));
     let potentialCards = 0;
 
-    const blacklist = ['garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 'compte', 'télécharger', 'app', 'service client', 'panier', 'vendeur vedette', 'pet home'];
+    // قائمة حظر قوية جداً
+    const blacklist = [
+        'garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 
+        'compte', 'télécharger', 'app', 'service client', 'panier', 'vendeur vedette', 
+        'pet home', 'vérifié', 'check', 'authentique'
+    ];
 
     for (const el of allElements) {
         try {
             const text = el.innerText;
-            // تجاهل الكتل الفارغة أو الضخمة جداً (التي قد تحتوي على أسعار إعلانات)
-            if (!text || text.length > 200 || text.length < 5) continue;
+            // تجاهل الكتل الفارغة أو الضخمة جداً
+            if (!text || text.length > 400 || text.length < 5) continue;
 
+            // 1. البحث عن السعر
             const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
             if (!priceMatch) continue;
 
+            // 2. البحث عن صورة
             const img = el.querySelector('img');
             if (!img) continue;
 
             let src = img.src || img.getAttribute('data-src') || '';
             if (!src.includes('kwcdn')) continue;
 
-            // 1. تنظيف العنوان (إزالة "photo de l'article")
+            // 3. تنظيف العنوان
             let title = img.alt || '';
             title = title.replace(/photo de l'article\s*/i, '').replace(/photo de l’article\s*/i, '').trim();
             
-            if (!title || title.length < 5 || title.toLowerCase() === 'image') {
-                title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
-                // تنظيف إضافي إذا تم أخذه من النص
+            // إذا كان العنوان فارغاً أو وهمياً، نبحث في النص
+            if (!title || title.length < 5 || title.toLowerCase() === 'image' || title.toLowerCase() === 'product') {
+                title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA') && !line.includes('$')) || '';
                 title = title.replace(/photo de l'article\s*/i, '').trim();
             }
-            
-            if (title.length < 5) continue;
+
+            // إذا لم نجد عنواناً حقيقياً، نتجاهل هذا العنصر (لتجنب أيقونات الصح والاستفهام)
+            if (!title || title.length < 5 || title.toLowerCase() === 'product') continue;
+
             title = title.charAt(0).toUpperCase() + title.slice(1);
 
+            // 4. تطبيق فلتر الحظر
             const lowerTitle = title.toLowerCase();
-            if (blacklist.some(word => lowerTitle.includes(word))) {
-                continue; 
-            }
+            if (blacklist.some(word => lowerTitle.includes(word))) continue;
 
             potentialCards++;
 
