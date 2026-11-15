@@ -1,1 +1,326 @@
-console.log(document.documentElement.innerHTML.match(/goods_id/g)?.length || 0, document.documentElement.innerHTML.match(/kwcdn/g)?.length || 0, document.documentElement.innerHTML.match(/price/g)?.length || 0)
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+let darkModeQueryRef = null;
+let darkModeListenerRef = null;
+let isFetchingAlternatives = false;
+let alternativesBuffer = [];
+let alternativesDelivered = 0;
+let currentRoundDelivered = 0;
+let currentRoundTarget = 12;
+const FIRST_ROUND_SIZE = 12;
+const NEXT_ROUND_SIZE = 6;
+const STEP_SIZE = 3;
+
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Similar Products' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ منتجات مشابهة' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page', betterAlternatives: '✨ Produits similaires' }
+};
+
+function getSiteLang() {
+    try {
+        const pathMatch = location.pathname.match(/^\/([a-z]{2})\//);
+        let lang = pathMatch ? pathMatch[1] : 'en';
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function shuffleArray(array) {
+    let currentIndex = array.length, randomIndex;
+    while (currentIndex != 0) {
+        randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+    }
+    return array;
+}
+
+// دالة الاستخراج الجديدة والمرنة جداً
+function extractProductsFromDOM(doc) {
+    let products = [];
+    const seen = new Set();
+    
+    // نجلب جميع الصور في الصفحة
+    const images = Array.from(doc.querySelectorAll('img'));
+    let validImages = 0;
+
+    for (const img of images) {
+        try {
+            let src = img.src || img.getAttribute('data-src') || '';
+            if (!src.includes('kwcdn')) continue; // نبحث فقط عن صور تيمو
+
+            let title = img.alt || '';
+            if (!title || title.trim().length < 5) continue; // نرفض الصور بدون عنوان
+
+            validImages++;
+
+            // نبحث عن أي حاوية قريبة (سواء كانت رابط a أو div)
+            let container = img.closest('a') || img.closest('div');
+            
+            // إذا لم نجد حاوية، نأخذ الأب المباشر
+            if (!container) container = img.parentElement;
+            if (!container) continue;
+
+            // نبحث عن السعر في النص المحيط بالصورة
+            let text = container.innerText || '';
+            // نمط يبحث عن الأرقام متبوعة بـ DA أو DZD أو أي عملة
+            let priceMatch = text.match(/(\d+[.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[.,]?\d*)/i);
+            
+            let price = '—';
+            if (priceMatch) {
+                price = priceMatch[0].trim();
+            } else {
+                // محاولة أخيرة: إذا وجدنا أي رقم بجانب الصورة، نعتبره سعراً
+                let numMatch = text.match(/\b\d{2,5}[.,]?\d{0,2}\b/);
+                if (numMatch) price = numMatch[0] + ' DA';
+            }
+
+            // إنشاء رابط المنتج (نستخدم رابط البحث إذا لم نجد رابطاً مباشراً)
+            let href = container.href || (container.querySelector('a') ? container.querySelector('a').href : '');
+            if (!href || href === window.location.href) {
+                href = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0, 20))}`;
+            }
+
+            // إنشاء معرف فريد
+            let pid = href.match(/(\d{10,})/)?.[1] || src;
+
+            if (seen.has(pid)) continue;
+
+            if (src.startsWith('//')) src = 'https:' + src;
+            src = src.split('?')[0]; // تنظيف رابط الصورة
+
+            seen.add(pid);
+            products.push({
+                productId: pid,
+                title: { displayTitle: title.substring(0, 100) },
+                image: { imgUrl: src },
+                prices: { salePrice: { formattedPrice: price } },
+                evaluation: { starRating: 0 }, 
+                trade: { realTradeCount: 0 }, 
+                _isLocal: true,
+                url: href
+            });
+        } catch (e) {}
+    }
+    
+    console.log(`Nezzer: Found ${validImages} images, extracted ${products.length} valid products.`);
+    return products;
+}
+
+async function getSimilarProductsFromCurrentPage() {
+    let originalScroll = window.scrollY;
+    console.log("Nezzer: Scrolling to load products...");
+    
+    for (let i = 0; i < 4; i++) {
+        window.scrollBy(0, 1500);
+        await new Promise(r => setTimeout(r, 2000)); 
+    }
+
+    let products = extractProductsFromDOM(document);
+    
+    // استبعاد المنتج الأساسي
+    const currentUrl = window.location.href;
+    const currentPidMatch = currentUrl.match(/(\d{10,})/);
+    const currentPid = currentPidMatch ? currentPidMatch[1] : null;
+
+    products = products.filter(p => p.productId !== currentPid);
+    window.scrollTo(0, originalScroll);
+    
+    return shuffleArray(products).slice(0, 40);
+}
+
+function removeWidget() {
+    if (widgetWrapper) {
+        if (darkModeQueryRef && darkModeListenerRef) {
+            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
+            else darkModeQueryRef.removeListener(darkModeListenerRef);
+        }
+        widgetWrapper.remove();
+        widgetWrapper = null; iframeContainer = null; iframe = null; sidebar = null;
+        alternativesBuffer = []; alternativesDelivered = 0; currentRoundDelivered = 0;
+        currentRoundTarget = FIRST_ROUND_SIZE; isFetchingAlternatives = false;
+        window._nezzerPendingRequest = false;
+    }
+}
+
+function deliverNextStep() {
+    if (!iframe || !iframe.contentWindow) return;
+    if (currentRoundDelivered >= currentRoundTarget) return;
+    if (alternativesDelivered >= alternativesBuffer.length) return;
+    
+    const remainingInRound = currentRoundTarget - currentRoundDelivered;
+    const stepSize = Math.min(STEP_SIZE, remainingInRound);
+    const nextBatch = alternativesBuffer.slice(alternativesDelivered, alternativesDelivered + stepSize);
+    
+    if (nextBatch.length === 0) return;
+    
+    alternativesDelivered += nextBatch.length;
+    currentRoundDelivered += nextBatch.length;
+    
+    const hasMore = alternativesDelivered < alternativesBuffer.length;
+    try { 
+        iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: nextBatch, hasMore: hasMore }, '*'); 
+    } catch(e) {}
+}
+
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+
+        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=') || window.location.href.match(/\d{10,}/);
+        if (!isProductPage) return; 
+
+        const nezzerStyleId = 'nezzer-theme-styles';
+        if (!document.getElementById(nezzerStyleId)) {
+            const styleEl = document.createElement('style');
+            styleEl.id = nezzerStyleId;
+            styleEl.textContent = `
+                #nezzer-widget-wrapper { --nezzer-pill-bg: rgba(255, 255, 255, 0.95); --nezzer-pill-border: #f1f5f9; --nezzer-btn-color: #64748b; --nezzer-drag-color: #64748b; --nezzer-drag-bg: rgba(100, 116, 139, 0.08); --nezzer-drag-color-hover: #475569; --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18); --nezzer-iframe-bg: #ffffff; --nezzer-side-shadow: rgba(0, 0, 0, 0.1); --nezzer-panel-shadow: rgba(15, 23, 42, 0.15); }
+                #nezzer-widget-wrapper.nezzer-dark { --nezzer-pill-bg: rgba(22, 22, 28, 0.92); --nezzer-pill-border: #2a2a33; --nezzer-btn-color: #94a3b8; --nezzer-drag-color: #94a3b8; --nezzer-drag-bg: rgba(148, 163, 184, 0.1); --nezzer-drag-color-hover: #cbd5e1; --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22); --nezzer-iframe-bg: #16161c; --nezzer-side-shadow: rgba(0, 0, 0, 0.5); --nezzer-panel-shadow: rgba(0, 0, 0, 0.6); }
+                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
+                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
+                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
+            `;
+            document.head.appendChild(styleEl);
+        }
+
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = 'betterAlternatives';
+        let disclaimerEl = null;
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `background: var(--nezzer-pill-bg); backdrop-filter: blur(10px); padding: 20px 6px; border-radius: 0 40px 40px 0; box-shadow: 5px 0 20px var(--nezzer-side-shadow); display: flex; flex-direction: column; align-items: center; gap: 15px; pointer-events: auto; transition: all 0.3s ease; border: 1px solid var(--nezzer-pill-border); border-left: none;`;
+        
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `position: absolute; top: 50%; left: 60px; width: 620px; max-width: 90vw; height: 98vh; background: var(--nezzer-iframe-bg) !important; border-radius: 16px; box-shadow: 12px 0 40px var(--nezzer-panel-shadow); transform: translateY(-50%) translateX(-105%); opacity: 0; pointer-events: none; visibility: hidden; transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s; display: flex; overflow: hidden; z-index: 5;`;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.id = 'nezzer-drag-handle';
+        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
+        dragHandle.innerHTML = '⋮⋮';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible'; iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)'; iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0'; iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
+            btn.className = 'nezzer-sort-btn'; btn.innerText = text; btn.setAttribute('data-sort', sortValue);
+            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+            
+            if (activeSort === sortValue) {
+                btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                btn.style.color = 'white'; btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btn.style.border = '1px solid rgba(255,107,53,0.5)';
+            }
+
+            btn.onclick = async (e) => {
+                e.stopPropagation();
+                if (activeSort === sortValue && isOpen) { togglePanel(false); return; }
+                
+                activeSort = sortValue;
+                pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                    b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent';
+                });
+                btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; btn.style.color = 'white';
+                btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)'; btn.style.border = '1px solid rgba(255,107,53,0.5)';
+
+                togglePanel(true);
+
+                if (sortValue === 'betterAlternatives') {
+                    if (isFetchingAlternatives) return;
+                    isFetchingAlternatives = true;
+                    alternativesBuffer = []; alternativesDelivered = 0; currentRoundDelivered = 0; currentRoundTarget = FIRST_ROUND_SIZE;
+                    
+                    try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
+
+                    const topProducts = await getSimilarProductsFromCurrentPage();
+                    
+                    if (topProducts.length === 0) {
+                        try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: 0 }, '*'); } catch(e) {}
+                        isFetchingAlternatives = false;
+                    } else {
+                        alternativesBuffer = topProducts;
+                        isFetchingAlternatives = false; 
+                        deliverNextStep();
+                        setTimeout(() => {
+                            try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: alternativesBuffer.length - alternativesDelivered }, '*'); } catch(e) {}
+                        }, 500);
+                    }
+                }
+            };
+            return btn;
+        };
+
+        const btnAlternatives = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+        
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnAlternatives);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            togglePanel(false);
+        });
+
+        window.addEventListener('message', (event) => {
+            if (!event.data) return;
+            if (event.data.action === 'REQUEST_MORE_ALTERNATIVES') {
+                if (currentRoundDelivered >= currentRoundTarget) { currentRoundDelivered = 0; currentRoundTarget = NEXT_ROUND_SIZE; }
+                if (alternativesDelivered < alternativesBuffer.length) deliverNextStep();
+                else { try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {} }
+            }
+        });
+
+    } catch(err) { console.error("Nezzer Error:", err); }
+}
+
+injectWidget();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1500); 
+    }
+}).observe(document, {subtree: true, childList: true});
