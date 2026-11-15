@@ -49,84 +49,89 @@ function shuffleArray(array) {
     return array;
 }
 
-// استراتيجية الصيد الجديدة: البحث عن صور تيمو (kwcdn)
+// دالة استخراج صارمة جداً (تتجاهل الإعلانات واللافتات)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    // نبحث عن جميع الصور في الصفحة
-    const images = Array.from(doc.querySelectorAll('img'));
-    let validImagesCount = 0;
+    const anchors = Array.from(doc.querySelectorAll('a'));
+    let logCount = 0;
 
-    for (const img of images) {
+    for (const anchor of anchors) {
         try {
-            let src = img.getAttribute('src') || img.getAttribute('data-src') || img.src || '';
-            
-            // الشرط الأول: يجب أن تكون الصورة من سيرفر تيمو
-            if (!src.includes('kwcdn')) continue;
-            validImagesCount++;
+            const href = anchor.href || '';
+            // 1. الرابط يجب أن يكون رابط منتج حقيقي (يحتوي على -g- أو goods_id)
+            if (!href.includes('-g-') && !href.includes('goods_id=')) continue;
 
-            // البحث عن الرابط الأب (المنتج)
-            let anchor = img.closest('a');
-            if (!anchor || !anchor.href) continue;
+            // تجاهل الروابط التي تحتوي على كلمات غير مرغوب فيها
+            const blacklist = ['/app', 'download', 'privacy', 'policy', 'login', 'cart', 'help', 'about'];
+            if (blacklist.some(word => href.toLowerCase().includes(word))) continue;
 
-            let href = anchor.href;
+            const imgEl = anchor.querySelector('img');
+            if (!imgEl) continue;
+
+            let title = imgEl.getAttribute('alt') || '';
+            // 2. يجب أن يكون للصورة عنوان (alt) طويل، وإلا فهي أيقونة
+            if (!title || title.trim().length < 15) continue; 
+
+            let imgSrc = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.src || '';
+            if (!imgSrc || imgSrc.length < 20) continue;
+            if (imgSrc.startsWith('//')) imgSrc = 'https:' + imgSrc;
+
+            // 3. البحث عن السعر (شرط أساسي: المنتجات الحقيقية لها سعر)
+            let price = '—';
+            const text = anchor.innerText || anchor.parentElement?.innerText || '';
+            // نبحث عن أي عملة متبوعة بأرقام
+            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH|ر\.س)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH|ر\.س)/i);
             
-            // استخراج العنوان من alt أو من النص المحيط
-            let title = img.alt || '';
-            if (!title || title.trim().length < 10) {
-                const textNode = anchor.innerText || anchor.parentElement?.innerText || '';
-                title = textNode.split('\n').find(line => line.trim().length > 10) || '';
+            if (priceMatch) {
+                price = priceMatch[0].trim();
+            } else {
+                // إذا لم يجد سعراً، نتجاهل هذا العنصر لأنه غالباً لافتة إعلانية
+                continue; 
             }
-            
-            // إذا لم نجد عنواناً، نتجاهل هذه الصورة (غالباً أيقونة أو شعار)
-            if (!title) continue;
 
             let pid = href;
-            const pidMatch = href.match(/(\d{10,})/);
+            const pidMatch = href.match(/-g-(\d+)\.html/) || href.match(/goods_id=(\d+)/);
             if (pidMatch) pid = pidMatch[1];
 
             if (seen.has(pid)) continue;
 
-            // استخراج السعر
-            let price = '—';
-            const text = anchor.innerText || anchor.parentElement?.innerText || '';
-            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH)/i);
-            if (priceMatch) price = priceMatch[0].trim();
-
-            if (src.startsWith('//')) src = 'https:' + src;
+            if (logCount < 3) {
+                console.log("✅ Nezzer Found Product:", title.substring(0, 30), "| Price:", price);
+                logCount++;
+            }
 
             seen.add(pid);
             products.push({
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
-                image: { imgUrl: src.split('?')[0] },
+                image: { imgUrl: imgSrc.split('?')[0] },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 }, 
-                trade: { realTradeCount: 0 }, 
+                evaluation: { starRating: 0 },
+                trade: { realTradeCount: 0 },
                 _isLocal: true,
                 url: href
             });
         } catch (e) {}
     }
-    
-    console.log(`Nezzer Debug: Found ${validImagesCount} Temu images, extracted ${products.length} products.`);
     return products;
 }
 
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
-    console.log("Nezzer: Starting deep scroll...");
+    console.log("Nezzer: Scrolling to load products...");
     
-    // تمرير قوي جداً (5 مرات) لإجبار الموقع على تحميل كل شيء
-    for (let i = 0; i < 5; i++) {
-        window.scrollBy(0, 2000);
+    // التمرير لأسفل 4 مرات لجلب المنتجات
+    for (let i = 0; i < 4; i++) {
+        window.scrollBy(0, 1500);
         await new Promise(r => setTimeout(r, 2000)); 
     }
 
     let products = extractProductsFromDOM(document);
+    console.log(`Nezzer: Total valid products extracted: ${products.length}`);
 
     const currentUrl = window.location.href;
-    const currentPidMatch = currentUrl.match(/(\d{10,})/);
+    const currentPidMatch = currentUrl.match(/-g-(\d+)\.html/) || currentUrl.match(/goods_id=(\d+)/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
 
     products = products.filter(p => p.productId !== currentPid);
@@ -173,7 +178,7 @@ function injectWidget() {
     try {
         if (widgetWrapper) return;
 
-        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=') || window.location.href.match(/\d{10,}/);
+        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=');
         if (!isProductPage) return; 
 
         const nezzerStyleId = 'nezzer-theme-styles';
