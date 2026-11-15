@@ -8,10 +8,10 @@ let isFetchingAlternatives = false;
 let alternativesBuffer = [];
 let alternativesDelivered = 0;
 let currentRoundDelivered = 0;
-let currentRoundTarget = 12;
-const FIRST_ROUND_SIZE = 12;
-const NEXT_ROUND_SIZE = 6;
-const STEP_SIZE = 3;
+let currentRoundTarget = 20; // تم التعديل إلى 20
+const FIRST_ROUND_SIZE = 20; // تم التعديل إلى 20
+const NEXT_ROUND_SIZE = 20;  // تم التعديل إلى 20
+const STEP_SIZE = 20;        // تم التعديل إلى 20 (إرسال 20 منتج دفعة واحدة)
 
 const SITE_TRANSLATIONS = {
     'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Similar Products' },
@@ -44,50 +44,42 @@ function shuffleArray(array) {
     return array;
 }
 
-// العودة لمنطق البحث الذي نجح سابقاً، مع إضافة فلتر الحظر
+// دالة البحث التي نجحت معك
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
     
-    // البحث في جميع الحاويات (Divs) كما فعلنا في الكود الناجح
     const allElements = Array.from(doc.querySelectorAll('div'));
     let potentialCards = 0;
 
-    // قائمة الكلمات الممنوعة (للتخلص من الإعلانات)
-    const blacklist = ['garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 'compte', 'télécharger', 'app', 'service client', 'panier'];
+    const blacklist = ['garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 'compte', 'télécharger', 'app', 'service client', 'panier', 'vendeur vedette', 'pet home'];
 
     for (const el of allElements) {
         try {
             const text = el.innerText;
             if (!text || text.length > 500 || text.length < 5) continue;
 
-            // 1. يجب أن يحتوي العنصر على سعر
             const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
             if (!priceMatch) continue;
 
-            // 2. يجب أن يحتوي على صورة
             const img = el.querySelector('img');
             if (!img) continue;
 
             let src = img.src || img.getAttribute('data-src') || '';
             if (!src.includes('kwcdn')) continue;
 
-            // 3. استخراج العنوان
             let title = img.alt || '';
             if (!title || title.length < 5 || title.toLowerCase() === 'image') {
                 title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
             }
 
-            // 4. تطبيق فلتر الحظر (تجاهل الإعلانات)
             const lowerTitle = title.toLowerCase();
             if (blacklist.some(word => lowerTitle.includes(word))) {
-                console.log("Nezzer: Skipped Ad ->", title);
                 continue; 
             }
 
             potentialCards++;
 
-            // 5. الرابط (إذا لم يوجد، نضع رابط بحث)
             let link = el.querySelector('a');
             let href = link ? link.href : '';
 
@@ -116,7 +108,7 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer Debug: Found ${potentialCards} valid cards. Extracted ${products.length} products after ad filter.`);
+    console.log(`Nezzer Debug: Found ${potentialCards} valid cards. Extracted ${products.length} products.`);
     return products;
 }
 
@@ -131,7 +123,6 @@ async function getSimilarProductsFromCurrentPage() {
 
     let products = extractProductsFromDOM(document);
     
-    // استبعاد المنتج الأساسي
     const currentUrl = window.location.href;
     const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
@@ -139,6 +130,7 @@ async function getSimilarProductsFromCurrentPage() {
     products = products.filter(p => p.productId !== currentPid);
     window.scrollTo(0, originalScroll);
     
+    // إرجاع حتى 40 منتجاً في الذاكرة
     return shuffleArray(products).slice(0, 40);
 }
 
