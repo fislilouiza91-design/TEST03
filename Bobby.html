@@ -49,46 +49,31 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة استخراج صارمة جداً (تتجاهل الإعلانات واللافتات)
+// دالة استخراج المنتجات من صفحة البحث (مرنة جداً)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
     const anchors = Array.from(doc.querySelectorAll('a'));
-    let logCount = 0;
 
     for (const anchor of anchors) {
         try {
-            const href = anchor.href || '';
-            // 1. الرابط يجب أن يكون رابط منتج حقيقي (يحتوي على -g- أو goods_id)
-            if (!href.includes('-g-') && !href.includes('goods_id=')) continue;
-
-            // تجاهل الروابط التي تحتوي على كلمات غير مرغوب فيها
-            const blacklist = ['/app', 'download', 'privacy', 'policy', 'login', 'cart', 'help', 'about'];
-            if (blacklist.some(word => href.toLowerCase().includes(word))) continue;
+            const href = anchor.href;
+            if (!href || (!href.includes('goods_id') && !href.includes('-g-'))) continue;
 
             const imgEl = anchor.querySelector('img');
             if (!imgEl) continue;
 
-            let title = imgEl.getAttribute('alt') || '';
-            // 2. يجب أن يكون للصورة عنوان (alt) طويل، وإلا فهي أيقونة
-            if (!title || title.trim().length < 15) continue; 
+            let title = imgEl.getAttribute('alt') || anchor.innerText.split('\n')[0] || 'Product';
+            if (title.length < 5) continue;
 
-            let imgSrc = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.src || '';
-            if (!imgSrc || imgSrc.length < 20) continue;
+            let imgSrc = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
+            if (!imgSrc || !imgSrc.includes('kwcdn')) continue;
             if (imgSrc.startsWith('//')) imgSrc = 'https:' + imgSrc;
 
-            // 3. البحث عن السعر (شرط أساسي: المنتجات الحقيقية لها سعر)
             let price = '—';
-            const text = anchor.innerText || anchor.parentElement?.innerText || '';
-            // نبحث عن أي عملة متبوعة بأرقام
-            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH|ر\.س)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH|ر\.س)/i);
-            
-            if (priceMatch) {
-                price = priceMatch[0].trim();
-            } else {
-                // إذا لم يجد سعراً، نتجاهل هذا العنصر لأنه غالباً لافتة إعلانية
-                continue; 
-            }
+            const text = anchor.innerText || '';
+            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH)/i);
+            if (priceMatch) price = priceMatch[0].trim();
 
             let pid = href;
             const pidMatch = href.match(/-g-(\d+)\.html/) || href.match(/goods_id=(\d+)/);
@@ -96,19 +81,14 @@ function extractProductsFromDOM(doc) {
 
             if (seen.has(pid)) continue;
 
-            if (logCount < 3) {
-                console.log("✅ Nezzer Found Product:", title.substring(0, 30), "| Price:", price);
-                logCount++;
-            }
-
             seen.add(pid);
             products.push({
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
                 image: { imgUrl: imgSrc.split('?')[0] },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 },
-                trade: { realTradeCount: 0 },
+                evaluation: { starRating: 0 }, 
+                trade: { realTradeCount: 0 }, 
                 _isLocal: true,
                 url: href
             });
@@ -117,27 +97,44 @@ function extractProductsFromDOM(doc) {
     return products;
 }
 
-async function getSimilarProductsFromCurrentPage() {
-    let originalScroll = window.scrollY;
-    console.log("Nezzer: Scrolling to load products...");
-    
-    // التمرير لأسفل 4 مرات لجلب المنتجات
-    for (let i = 0; i < 4; i++) {
-        window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 2000)); 
-    }
+// الحل الجديد: جلب المنتجات عبر إطار خفي (iframe) لخداع حماية تيمو
+async function fetchSimilarProductsUsingHiddenIframe() {
+    return new Promise((resolve) => {
+        // 1. استخراج اسم المنتج من الصفحة
+        let title = document.querySelector('h1')?.innerText || document.title.split('|')[0].split('-')[0].trim();
+        let searchQuery = title.split(' ').slice(0, 4).join(' ');
+        if (!searchQuery) searchQuery = 'product';
 
-    let products = extractProductsFromDOM(document);
-    console.log(`Nezzer: Total valid products extracted: ${products.length}`);
+        console.log("Nezzer: Searching in hidden iframe for:", searchQuery);
 
-    const currentUrl = window.location.href;
-    const currentPidMatch = currentUrl.match(/-g-(\d+)\.html/) || currentUrl.match(/goods_id=(\d+)/);
-    const currentPid = currentPidMatch ? currentPidMatch[1] : null;
+        // 2. إنشاء إطار خفي
+        const hiddenIframe = document.createElement('iframe');
+        hiddenIframe.style.cssText = 'width: 1024px; height: 768px; position: absolute; left: -9999px; top: -9999px; opacity: 0;';
+        
+        // رابط البحث في تيمو
+        const searchUrl = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(searchQuery)}`;
+        hiddenIframe.src = searchUrl;
+        
+        document.body.appendChild(hiddenIframe);
 
-    products = products.filter(p => p.productId !== currentPid);
-
-    window.scrollTo(0, originalScroll);
-    return shuffleArray(products).slice(0, 40);
+        // 3. الانتظار 3.5 ثانية حتى يقوم تيمو بتحميل المنتجات داخل الإطار
+        setTimeout(() => {
+            try {
+                const iframeDoc = hiddenIframe.contentDocument || hiddenIframe.contentWindow.document;
+                let products = extractProductsFromDOM(iframeDoc);
+                
+                console.log(`Nezzer: Extracted ${products.length} products from hidden iframe.`);
+                
+                // تنظيف: إزالة الإطار بعد الانتهاء
+                hiddenIframe.remove();
+                resolve(shuffleArray(products).slice(0, 40));
+            } catch (error) {
+                console.error("Nezzer: Iframe scraping error", error);
+                hiddenIframe.remove();
+                resolve([]); // إرجاع فارغ في حال حدوث خطأ
+            }
+        }, 3500); 
+    });
 }
 
 function removeWidget() {
@@ -270,7 +267,8 @@ function injectWidget() {
                     
                     try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                    const topProducts = await getSimilarProductsFromCurrentPage();
+                    // استخدام الدالة الجديدة التي تعتمد على الـ iframe
+                    const topProducts = await fetchSimilarProductsUsingHiddenIframe();
                     
                     if (topProducts.length === 0) {
                         try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: 0 }, '*'); } catch(e) {}
