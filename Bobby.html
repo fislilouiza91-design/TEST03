@@ -49,32 +49,42 @@ function shuffleArray(array) {
     return array;
 }
 
-// استخراج المنتجات من DOM الحالي
+// دالة الاستخراج المطورة: تبحث عن أي صورة من سيرفر تيمو
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    // البحث عن روابط المنتجات في تيمو
-    const links = doc.querySelectorAll('a[href*="-g-"], a[href*="goods_id="]');
-
-    for (const anchor of links) {
+    
+    // نبحث عن جميع الروابط التي تحتوي على صور
+    const anchors = doc.querySelectorAll('a');
+    
+    for (const anchor of anchors) {
         try {
+            const imgEl = anchor.querySelector('img');
+            if (!imgEl) continue;
+            
+            let img = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
+            // التأكد من أن الصورة تابعة لتيمو
+            if (!img || !img.includes('kwcdn')) continue; 
+            
+            if (img.startsWith('//')) img = 'https:' + img;
+            img = img.split('?')[0]; 
+            
             const href = anchor.href;
             if (!href) continue;
-            
+
+            // معرف فريد للمنتج
+            let pid = '';
             const pidMatch = href.match(/-g-(\d+)\.html/) || href.match(/goods_id=(\d+)/);
-            const pid = pidMatch ? pidMatch[1] : href; 
+            if (pidMatch) {
+                pid = pidMatch[1];
+            } else {
+                // إذا لم نجد المعرف في الرابط، نستخدم جزء من رابط الصورة
+                pid = img.split('/').pop().split('.')[0] || Math.random().toString(36).substring(7);
+            }
+
             if (seen.has(pid)) continue;
 
-            let img = '';
-            const imgEl = anchor.querySelector('img');
-            if (imgEl) {
-                img = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || '';
-                if (img.startsWith('//')) img = 'https:' + img;
-                img = img.split('?')[0]; 
-            }
-            if (!img) continue;
-
-            let title = imgEl ? imgEl.getAttribute('alt') : '';
+            let title = imgEl.getAttribute('alt') || '';
             if (!title || title.length < 5) {
                 title = anchor.innerText.split('\n').find(line => line.trim().length > 10) || 'Product';
             }
@@ -101,23 +111,22 @@ function extractProductsFromDOM(doc) {
     return products;
 }
 
-// دالة جديدة: تمرير الصفحة للأسفل لجلب المنتجات المشابهة من نفس الصفحة
+// دالة تمرير الصفحة لجلب المنتجات
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     
-    // نمرر الصفحة للأسفل ببطء لتحفيز تيمو على تحميل المنتجات المشابهة
-    window.scrollBy(0, 1000);
-    await new Promise(r => setTimeout(r, 1500)); 
-    window.scrollBy(0, 1000);
-    await new Promise(r => setTimeout(r, 1500)); 
+    // التمرير للأسفل ببطء لتحفيز تحميل المنتجات
+    window.scrollBy(0, 1500);
+    await new Promise(r => setTimeout(r, 2000)); 
+    window.scrollBy(0, 1500);
+    await new Promise(r => setTimeout(r, 2000)); 
 
-    // استخراج المنتجات
     let products = extractProductsFromDOM(document);
 
-    // إرجاع الصفحة لمكانها الأصلي
+    // العودة لمكانك الأصلي
     window.scrollTo(0, originalScroll);
 
-    // استبعاد المنتج الأساسي من القائمة (حتى لا يظهر مع البدائل)
+    // استبعاد المنتج الأساسي (حتى لا يظهر مع البدائل)
     const currentUrl = window.location.href;
     products = products.filter(p => !currentUrl.includes(p.productId));
 
@@ -255,7 +264,6 @@ function injectWidget() {
                     
                     try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                    // استخدام الدالة الجديدة
                     const topProducts = await getSimilarProductsFromCurrentPage();
                     
                     if (topProducts.length === 0) {
