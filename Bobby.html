@@ -44,59 +44,61 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج الجديدة والمرنة جداً
+// دالة الاستخراج المطورة
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    
-    // نجلب جميع الصور في الصفحة
     const images = Array.from(doc.querySelectorAll('img'));
-    let validImages = 0;
+    let validCount = 0;
 
     for (const img of images) {
         try {
             let src = img.src || img.getAttribute('data-src') || '';
-            if (!src.includes('kwcdn')) continue; // نبحث فقط عن صور تيمو
+            if (!src.includes('kwcdn')) continue;
 
             let title = img.alt || '';
-            if (!title || title.trim().length < 5) continue; // نرفض الصور بدون عنوان
+            if (!title || title.trim().length < 10) continue; 
 
-            validImages++;
-
-            // نبحث عن أي حاوية قريبة (سواء كانت رابط a أو div)
-            let container = img.closest('a') || img.closest('div');
+            // 1. البحث عن الرابط الحقيقي
+            let container = img.closest('a');
+            let href = container ? container.href : '';
             
-            // إذا لم نجد حاوية، نأخذ الأب المباشر
-            if (!container) container = img.parentElement;
-            if (!container) continue;
+            // إذا لم نجد رابطاً، نبحث عن رابط داخل الحاوية الأب
+            if (!href || (!href.includes('/g-') && !href.includes('goods_id'))) {
+                const parent = img.parentElement?.parentElement;
+                if (parent) {
+                    const linkEl = parent.querySelector('a');
+                    if (linkEl && (linkEl.href.includes('/g-') || linkEl.href.includes('goods_id'))) {
+                        href = linkEl.href;
+                        container = parent;
+                    }
+                }
+            }
 
-            // نبحث عن السعر في النص المحيط بالصورة
-            let text = container.innerText || '';
-            // نمط يبحث عن الأرقام متبوعة بـ DA أو DZD أو أي عملة
-            let priceMatch = text.match(/(\d+[.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[.,]?\d*)/i);
-            
+            // إذا لم نجد رابط منتج حقيقي، نتجاهل هذه الصورة (للتخلص من الإعلانات)
+            if (!href || (!href.includes('/g-') && !href.includes('goods_id'))) continue;
+
+            // 2. البحث عن السعر
             let price = '—';
+            let textToSearch = (container ? container.innerText : '') + ' ' + (img.parentElement ? img.parentElement.innerText : '');
+            
+            // نمط يبحث عن السعر (مثل 1,160 DA أو 824 DA)
+            const priceMatch = textToSearch.match(/(\d+[.,]?\d*)\s*(DA|DZD|€|\$|£)/i) || textToSearch.match(/(DA|DZD|€|\$|£)\s*(\d+[.,]?\d*)/i);
+            
             if (priceMatch) {
                 price = priceMatch[0].trim();
             } else {
-                // محاولة أخيرة: إذا وجدنا أي رقم بجانب الصورة، نعتبره سعراً
-                let numMatch = text.match(/\b\d{2,5}[.,]?\d{0,2}\b/);
-                if (numMatch) price = numMatch[0] + ' DA';
+                // إذا لم نجد السعر، نتجاهل المنتج (لأننا نريد منتجات حقيقية فقط)
+                continue;
             }
 
-            // إنشاء رابط المنتج (نستخدم رابط البحث إذا لم نجد رابطاً مباشراً)
-            let href = container.href || (container.querySelector('a') ? container.querySelector('a').href : '');
-            if (!href || href === window.location.href) {
-                href = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0, 20))}`;
-            }
+            validCount++;
 
-            // إنشاء معرف فريد
             let pid = href.match(/(\d{10,})/)?.[1] || src;
-
             if (seen.has(pid)) continue;
 
             if (src.startsWith('//')) src = 'https:' + src;
-            src = src.split('?')[0]; // تنظيف رابط الصورة
+            src = src.split('?')[0];
 
             seen.add(pid);
             products.push({
@@ -112,7 +114,7 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer: Found ${validImages} images, extracted ${products.length} valid products.`);
+    console.log(`Nezzer: Found ${validCount} valid products with prices and links.`);
     return products;
 }
 
@@ -120,14 +122,15 @@ async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     console.log("Nezzer: Scrolling to load products...");
     
-    for (let i = 0; i < 4; i++) {
+    // تمرير أكثر (5 مرات) لجلب منتجات إضافية
+    for (let i = 0; i < 5; i++) {
         window.scrollBy(0, 1500);
         await new Promise(r => setTimeout(r, 2000)); 
     }
 
     let products = extractProductsFromDOM(document);
     
-    // استبعاد المنتج الأساسي
+    // استبعاد المنتج الحالي
     const currentUrl = window.location.href;
     const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
