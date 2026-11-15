@@ -44,48 +44,51 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج الذكية (ترفض الصور الوهمية وتجلب السعر)
+// الاستراتيجية الجديدة: البحث عن الحاويات التي تحتوي على سعر
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    // نجلب جميع الصور في الصفحة
-    const images = Array.from(doc.querySelectorAll('img'));
+    
+    // نبحث عن جميع العناصر (Divs) في الصفحة
+    const allElements = Array.from(doc.querySelectorAll('div'));
+    let potentialCards = 0;
 
-    for (const img of images) {
+    for (const el of allElements) {
         try {
+            // 1. يجب أن يحتوي العنصر على نص (سعر)
+            const text = el.innerText;
+            if (!text || text.length > 500 || text.length < 5) continue; // تجاهل الكتل الضخمة والفارغة
+
+            // 2. نبحث عن السعر (DA أو DZD أو $)
+            const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
+            if (!priceMatch) continue;
+
+            potentialCards++;
+
+            // 3. نبحث بداخل هذه الحاوية عن صورة ورابط
+            const img = el.querySelector('img');
+            const link = el.querySelector('a');
+
+            if (!img) continue;
+
             let src = img.src || img.getAttribute('data-src') || '';
-            // الشرط 1: يجب أن تكون الصورة من سيرفر تيمو
-            if (!src.includes('kwcdn')) continue;
+            if (!src.includes('kwcdn')) continue; // يجب أن تكون صورة من تيمو
 
-            // الشرط 2: يجب أن يكون للصورة عنوان (alt) طويل وليس "image"
+            // 4. استخراج العنوان
             let title = img.alt || '';
-            if (!title || title.trim().length < 5 || title.toLowerCase() === 'image') continue; 
-
-            // البحث عن الحاوية الأقرب (لجلب السعر)
-            let container = img.closest('a') || img.parentElement?.parentElement;
-            if (!container) continue;
-
-            // الشرط 3: البحث عن سعر حقيقي
-            let price = '—';
-            const text = container.innerText || '';
-            const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH|ر\.س)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH|ر\.س)/i);
-            
-            if (priceMatch) {
-                price = priceMatch[0].trim();
-            } else {
-                // إذا لم يجد سعر، ربما يكون إعلاناً، نتجاهله
-                continue; 
+            if (!title || title.length < 5 || title.toLowerCase() === 'image') {
+                // إذا لم نجد alt، نأخذ أول سطر طويل من النص
+                title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
             }
 
-            // البحث عن الرابط
-            let href = container.href || '';
-            if (!href || (!href.includes('-g-') && !href.includes('goods_id'))) {
-                // إذا لم نجد رابطاً حقيقياً، ننشئ رابط بحث ذكي
+            let href = link ? link.href : '';
+            // إذا لم نجد رابطاً، ننشئ رابط بحث
+            if (!href || !href.includes('http')) {
                 href = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0, 20))}`;
             }
 
             if (src.startsWith('//')) src = 'https:' + src;
-            src = src.split('?')[0]; // تنظيف الرابط
+            src = src.split('?')[0];
 
             let pid = href.match(/(\d{10,})/)?.[1] || src;
 
@@ -96,7 +99,7 @@ function extractProductsFromDOM(doc) {
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
                 image: { imgUrl: src },
-                prices: { salePrice: { formattedPrice: price } },
+                prices: { salePrice: { formattedPrice: priceMatch[0].trim() } },
                 evaluation: { starRating: 0 }, 
                 trade: { realTradeCount: 0 }, 
                 _isLocal: true,
@@ -105,7 +108,7 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer: Extracted ${products.length} valid products.`);
+    console.log(`Nezzer Debug: Found ${potentialCards} potential cards. Extracted ${products.length} valid products.`);
     return products;
 }
 
@@ -113,15 +116,22 @@ async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     console.log("Nezzer: Scrolling to load products...");
     
-    // التمرير لتحميل المنتجات
     for (let i = 0; i < 4; i++) {
         window.scrollBy(0, 1500);
         await new Promise(r => setTimeout(r, 2000)); 
     }
 
+    console.log("Nezzer: Scroll finished. Starting extraction...");
     let products = extractProductsFromDOM(document);
     
+    // استبعاد المنتج الأساسي
+    const currentUrl = window.location.href;
+    const currentPidMatch = currentUrl.match(/(\d{10,})/);
+    const currentPid = currentPidMatch ? currentPidMatch[1] : null;
+
+    products = products.filter(p => p.productId !== currentPid);
     window.scrollTo(0, originalScroll);
+    
     return shuffleArray(products).slice(0, 40);
 }
 
