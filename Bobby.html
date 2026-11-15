@@ -1,18 +1,22 @@
-window.NEZZER_DISCLAIMER_TRANSLATIONS = {
-    'en': { 
-        title: 'Nezzer is completely free!', 
-        body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links in the future. Thank you for supporting us in making shopping smarter and cheaper for everyone.', 
-        button: 'Got it, thanks' 
-    },
-    'ar': { 
-        title: 'إضافة Nezzer مجانية بالكامل!', 
-        body: 'لضمان استمرارنا في تقديم هذه الأداة وتطويرها، قد نستخدم روابط تسوق شريكة في المستقبل. شكراً لدعمكم في جعل التسوق أذكى وأرخص للجميع.', 
-        button: 'فهمت، شكراً' 
-    },
-    'fr': { 
-        title: 'Nezzer est entièrement gratuit !', 
-        body: 'Pour continuer à fournir et améliorer cet outil, nous pourrions utiliser des liens d\'affiliation à l\'avenir. Merci de nous soutenir pour rendre le shopping plus intelligent et moins cher pour tous.', 
-        button: 'Compris, merci' 
+// engine.js - Background Script
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'FETCH_ALTERNATIVES') {
+        // بما أن تيمو يمنع الاتصال بالـ API، سنعتمد على البيانات المستخرجة من الصفحة
+        // ونقوم بإرسالها مباشرة للواجهة (Panel)
+        const topProducts = request.products || [];
+        
+        // إرسال الدفعة الأولى للواجهة
+        chrome.tabs.sendMessage(sender.tab.id, {
+            action: 'ALTERNATIVE_BATCH',
+            alternatives: topProducts
+        });
+
+        // إعلام الواجهة بانتهاء الجلب
+        chrome.tabs.sendMessage(sender.tab.id, {
+            action: 'ALTERNATIVES_FINISHED'
+        });
+        
+        sendResponse({ success: true });
     }
-    // أضف باقي اللغات هنا
-};
+    return true;
+});
