@@ -4,19 +4,12 @@ let iframe = null;
 let sidebar = null;
 let darkModeQueryRef = null;
 let darkModeListenerRef = null;
-let isFetchingAlternatives = false;
-let alternativesBuffer = [];
-let alternativesDelivered = 0;
-let currentRoundDelivered = 0;
-let currentRoundTarget = 12;
-const FIRST_ROUND_SIZE = 12;
-const NEXT_ROUND_SIZE = 6;
-const STEP_SIZE = 3;
+let isIframeReady = false; // 💡 للتأكد من أن النافذة جاهزة
 
 const SITE_TRANSLATIONS = {
-    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
-    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ بدائل أفضل' },
-    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page', betterAlternatives: '✨ Meilleures alternatives' }
+    'en': { betterAlternatives: '✨ Better Alternatives' },
+    'ar': { betterAlternatives: '✨ بدائل أفضل' },
+    'fr': { betterAlternatives: '✨ Meilleures alternatives' }
 };
 
 function getSiteLang() {
@@ -34,34 +27,30 @@ const t = (key) => {
     } catch(e) { return key; }
 };
 
-function shuffleArray(array) {
-    let currentIndex = array.length, randomIndex;
-    while (currentIndex != 0) {
-        randomIndex = Math.floor(Math.random() * currentIndex);
-        currentIndex--;
-        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
-    }
-    return array;
-}
-
-// 💡 دالة السحب المخصصة لتيمو
-function scanPageForProducts(sortByPopular = false, randomize = false) {
+// 💡 دالة السحب المحدثة والقوية
+function scanPageForProducts() {
     let products = [];
     const seen = new Set();
-    // البحث عن روابط المنتجات في تيمو (تحتوي على -g-)
-    const links = document.querySelectorAll('a[href*="-g-"]');
+    // البحث عن أي رابط منتج في تيمو (سواء بالصيغة القديمة أو الجديدة)
+    const links = document.querySelectorAll('a[href*="-g-"], a[href*="goods_id="]');
 
     for (const link of links) {
         try {
-            const match = link.href.match(/-g-(\d+)\.html/);
+            // استخراج رقم المنتج
+            const match = link.href.match(/-g-(\d+)\.html/) || link.href.match(/goods_id=(\d+)/);
             if (!match) continue;
             const pid = match[1];
             if (seen.has(pid)) continue;
 
-            let img = link.querySelector('img')?.src || '';
+            // سحب الصورة (مع دعم Lazy Load)
+            let img = '';
+            const imgEl = link.querySelector('img');
+            if (imgEl) {
+                img = imgEl.src || imgEl.getAttribute('data-src') || '';
+            }
             if (img.startsWith('//')) img = 'https:' + img;
             
-            let title = link.querySelector('img')?.alt || link.innerText.split('\n')[0] || 'Temu Product';
+            let title = imgEl?.alt || link.innerText.split('\n')[0] || 'Temu Product';
             title = title.trim().substring(0, 80);
             
             let price = link.innerText.match(/[\d.,]+\s*€|[\d.,]+\s*\$|[\d.,]+\s*£|[\d.,]+\s*د\.ج/i)?.[0] || '—';
@@ -69,7 +58,8 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
 
             let isFreeShipping = link.innerText.toLowerCase().includes('free') || link.innerText.toLowerCase().includes('gratis') || link.innerText.toLowerCase().includes('gratuit') || link.innerText.toLowerCase().includes('مجاني');
 
-            if (img && title && img.includes('kwcdn.com')) {
+            // نتحقق فقط من وجود الصورة والعنوان
+            if (img && title) {
                 seen.add(pid);
                 products.push({
                     productId: pid,
@@ -85,32 +75,15 @@ function scanPageForProducts(sortByPopular = false, randomize = false) {
             }
         } catch(e) {}
     }
-
-    if (randomize) products = shuffleArray(products);
-    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
-    
     return products.slice(0, 21);
 }
 
 function removeWidget() {
     if (widgetWrapper) {
-        if (darkModeQueryRef && darkModeListenerRef) {
-            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
-            else darkModeQueryRef.removeListener(darkModeListenerRef);
-        }
-        darkModeQueryRef = null;
-        darkModeListenerRef = null;
         widgetWrapper.remove();
         widgetWrapper = null;
-        iframeContainer = null;
         iframe = null;
-        sidebar = null;
-        alternativesBuffer = [];
-        alternativesDelivered = 0;
-        currentRoundDelivered = 0;
-        currentRoundTarget = FIRST_ROUND_SIZE;
-        isFetchingAlternatives = false;
-        window._nezzerPendingRequest = false;
+        isIframeReady = false;
     }
 }
 
@@ -118,10 +91,13 @@ function injectWidget() {
     try {
         if (widgetWrapper) return;
 
-        // 💡 التحقق من أننا في صفحة منتج في تيمو
-        const isProductPage = window.location.href.match(/-g-(\d+)\.html/);
+        // 💡 شروط أوسع للتعرف على صفحة المنتج
+        const isProductPage = window.location.href.includes('-g-') || window.location.href.includes('goods_id=');
         if (!isProductPage) return;
 
+        console.log("Nezzer: Product page detected. Initializing widget...");
+
+        // ... (كود الستايل الخاص بك -- احتفظ به كما هو) ...
         const nezzerStyleId = 'nezzer-theme-styles';
         if (!document.getElementById(nezzerStyleId)) {
             const styleEl = document.createElement('style');
@@ -160,8 +136,6 @@ function injectWidget() {
 
         let isOpen = false;
         let currentSide = 'left';
-        let activeSort = 'betterAlternatives'; // نبدأ بالبدائل مباشرة
-        let disclaimerEl = null;
 
         widgetWrapper = document.createElement('div');
         widgetWrapper.id = 'nezzer-widget-wrapper';
@@ -206,6 +180,13 @@ function injectWidget() {
         iframe = document.createElement('iframe');
         iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
         iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        
+        // 💡 التأكد من أن الـ iframe تم تحميله بالكامل قبل إرسال أي بيانات له
+        iframe.onload = () => { 
+            isIframeReady = true; 
+            console.log("Nezzer: Panel iframe is ready."); 
+        };
+        
         iframeContainer.appendChild(iframe);
 
         const dragHandle = document.createElement('div');
@@ -237,29 +218,22 @@ function injectWidget() {
             btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
             btn.className = 'nezzer-sort-btn';
             btn.innerText = text;
-            btn.setAttribute('data-sort', sortValue);
-            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+            
+            // ستايل افتراضي للزر
+            btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; 
+            btn.style.color = 'white'; 
+            btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; 
+            btn.style.border = '1px solid rgba(255,107,53,0.5)';
 
             btn.onclick = (e) => {
                 e.stopPropagation();
-                if (activeSort === sortValue && isOpen) {
+                if (isOpen) {
                     togglePanel(false);
                 } else {
-                    activeSort = sortValue;
-                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
-                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
-                    });
-                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
-                    btn.style.color = 'white';
-                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
-                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
-
                     togglePanel(true);
-
-                    // 💡 تعديل: عند الضغط نقوم بالسحب والعرض مباشرة
-                    if (sortValue === 'betterAlternatives') {
-                        const scraped = scanPageForProducts(false, true);
-                        if (scraped.length > 0 && iframe) {
+                    if (isIframeReady) {
+                        const scraped = scanPageForProducts();
+                        if (scraped.length > 0) {
                             try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
                         }
                     }
@@ -269,11 +243,6 @@ function injectWidget() {
         };
 
         let btnTop = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
-        activeSort = 'betterAlternatives';
-        btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; 
-        btnTop.style.color = 'white'; 
-        btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; 
-        btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
 
         pillContainer.appendChild(dragHandle);
         pillContainer.appendChild(btnTop);
@@ -285,27 +254,31 @@ function injectWidget() {
 
         if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
 
-        // 💡 سر الانبثاق التلقائي بدون استهلاك موارد: MutationObserver
+        // 💡 المراقب الذكي للانبثاق التلقائي
+        let autoPopupTriggered = false;
         let observer = new MutationObserver((mutations, obs) => {
-            // التحقق مما إذا كانت المنتجات قد ظهرت في الصفحة
-            const foundLinks = document.querySelectorAll('a[href*="-g-"]');
+            if (autoPopupTriggered || !isIframeReady) return; // ننتظر حتى يجهز الـ iframe
+
+            // نبحث عن المنتجات
+            const foundLinks = document.querySelectorAll('a[href*="-g-"], a[href*="goods_id="]');
             
-            if (foundLinks.length >= 5) {
-                obs.disconnect(); // إيقاف المراقبة فوراً لتوفير الموارد
+            if (foundLinks.length >= 4) { // خفضنا العدد إلى 4 لضمان السرعة
+                obs.disconnect(); 
+                autoPopupTriggered = true;
                 
+                console.log("Nezzer: Found products, auto-popping panel.");
                 const scraped = scanPageForProducts();
                 if (scraped.length > 0 && iframe) {
                     try {
                         iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*');
-                        togglePanel(true); // فتح النافذة تلقائياً
+                        setTimeout(() => togglePanel(true), 500); // تأخير بسيط لضمان الاستقرار
                     } catch(e) {}
                 }
             }
         });
+        
+        // نبدأ المراقبة
         observer.observe(document.body, { childList: true, subtree: true });
-
-        // خطة احتياطية: إيقاف المراقبة بعد 7 ثوانٍ إذا لم يتم العثور على شيء
-        setTimeout(() => observer.disconnect(), 7000);
 
         // إغلاق عند النقر خارجها
         window.addEventListener('mousedown', (e) => {
@@ -313,6 +286,21 @@ function injectWidget() {
             if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
             togglePanel(false);
         });
+
+        // 💡 خطة احتياطية: إذا لم يتم العثور على منتجات بعد 7 ثوانٍ، نجرب يدوياً
+        setTimeout(() => {
+            if (!autoPopupTriggered && isIframeReady) {
+                observer.disconnect();
+                autoPopupTriggered = true;
+                const scraped = scanPageForProducts();
+                if (scraped.length > 0 && iframe) {
+                    try {
+                        iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*');
+                        togglePanel(true);
+                    } catch(e) {}
+                }
+            }
+        }, 7000);
 
     } catch(err) {
         console.error("Nezzer Error:", err);
@@ -326,6 +314,6 @@ new MutationObserver(() => {
     if (location.href !== lastUrl) {
         lastUrl = location.href;
         removeWidget();
-        setTimeout(injectWidget, 1000);
+        setTimeout(injectWidget, 1500); // وقت أطول قليلاً للصفحات الجديدة
     }
 }).observe(document, {subtree: true, childList: true});
