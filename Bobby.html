@@ -44,48 +44,43 @@ function shuffleArray(array) {
     return array;
 }
 
-// الاستراتيجية الجديدة: البحث عن الحاويات التي تحتوي على سعر
+// دالة الاستخراج الذكية (مع قائمة حظر للإعلانات)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
+    const images = Array.from(doc.querySelectorAll('img'));
     
-    // نبحث عن جميع العناصر (Divs) في الصفحة
-    const allElements = Array.from(doc.querySelectorAll('div'));
-    let potentialCards = 0;
+    // قائمة الكلمات الممنوعة (للتخلص من الإعلانات)
+    const blacklist = ['garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 'compte', 'télécharger', 'app', 'service client', 'panier'];
 
-    for (const el of allElements) {
+    for (const img of images) {
         try {
-            // 1. يجب أن يحتوي العنصر على نص (سعر)
-            const text = el.innerText;
-            if (!text || text.length > 500 || text.length < 5) continue; // تجاهل الكتل الضخمة والفارغة
+            let src = img.src || img.getAttribute('data-src') || '';
+            if (!src.includes('kwcdn')) continue;
 
-            // 2. نبحث عن السعر (DA أو DZD أو $)
-            const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
+            let title = img.alt || '';
+            if (!title || title.trim().length < 10 || title.toLowerCase() === 'image') continue; 
+
+            // فلترة الإعلانات
+            const lowerTitle = title.toLowerCase();
+            if (blacklist.some(word => lowerTitle.includes(word))) continue;
+
+            // البحث عن الحاوية الأقرب
+            let container = img.closest('a') || img.closest('div');
+            if (!container) continue;
+
+            // البحث عن السعر داخل الحاوية
+            let text = container.innerText || '';
+            let priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
+            
             if (!priceMatch) continue;
 
-            potentialCards++;
+            // البحث عن الرابط الحقيقي للمنتج (للتأكد أنه ليس إعلاناً)
+            let linkEl = container.tagName === 'A' ? container : container.querySelector('a');
+            let href = linkEl ? linkEl.href : '';
 
-            // 3. نبحث بداخل هذه الحاوية عن صورة ورابط
-            const img = el.querySelector('img');
-            const link = el.querySelector('a');
-
-            if (!img) continue;
-
-            let src = img.src || img.getAttribute('data-src') || '';
-            if (!src.includes('kwcdn')) continue; // يجب أن تكون صورة من تيمو
-
-            // 4. استخراج العنوان
-            let title = img.alt || '';
-            if (!title || title.length < 5 || title.toLowerCase() === 'image') {
-                // إذا لم نجد alt، نأخذ أول سطر طويل من النص
-                title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA')) || 'Product';
-            }
-
-            let href = link ? link.href : '';
-            // إذا لم نجد رابطاً، ننشئ رابط بحث
-            if (!href || !href.includes('http')) {
-                href = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(title.substring(0, 20))}`;
-            }
+            // إذا لم يجد رابط منتج حقيقي، نتجاهل هذه الصورة
+            if (!href || (!href.includes('/g-') && !href.includes('goods_id'))) continue;
 
             if (src.startsWith('//')) src = 'https:' + src;
             src = src.split('?')[0];
@@ -108,7 +103,7 @@ function extractProductsFromDOM(doc) {
         } catch (e) {}
     }
     
-    console.log(`Nezzer Debug: Found ${potentialCards} potential cards. Extracted ${products.length} valid products.`);
+    console.log(`Nezzer: Extracted ${products.length} valid products after blacklist filtering.`);
     return products;
 }
 
@@ -116,12 +111,12 @@ async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     console.log("Nezzer: Scrolling to load products...");
     
-    for (let i = 0; i < 4; i++) {
+    // تمرير أطول لجلب منتجات أكثر
+    for (let i = 0; i < 6; i++) {
         window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 2000)); 
+        await new Promise(r => setTimeout(r, 1500)); 
     }
 
-    console.log("Nezzer: Scroll finished. Starting extraction...");
     let products = extractProductsFromDOM(document);
     
     // استبعاد المنتج الأساسي
