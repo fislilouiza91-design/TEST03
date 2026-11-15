@@ -49,30 +49,40 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج الجديدة: تعتمد على الصور والنصوص بدلاً من الروابط
+// استراتيجية الصيد الجديدة: البحث عن صور تيمو (kwcdn)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    const anchors = Array.from(doc.querySelectorAll('a'));
-    let logCount = 0;
+    // نبحث عن جميع الصور في الصفحة
+    const images = Array.from(doc.querySelectorAll('img'));
+    let validImagesCount = 0;
 
-    for (const anchor of anchors) {
+    for (const img of images) {
         try {
-            const imgEl = anchor.querySelector('img');
-            if (!imgEl) continue;
+            let src = img.getAttribute('src') || img.getAttribute('data-src') || img.src || '';
+            
+            // الشرط الأول: يجب أن تكون الصورة من سيرفر تيمو
+            if (!src.includes('kwcdn')) continue;
+            validImagesCount++;
 
-            // الشرط الأول: يجب أن تحتوي الصورة على نص بديل (alt) لأنه عنوان المنتج
-            let title = imgEl.getAttribute('alt') || '';
-            // إذا كان النص قصيراً جداً، فهو غالباً شعار أو أيقونة وليس منتجاً
-            if (!title || title.trim().length < 10) continue; 
+            // البحث عن الرابط الأب (المنتج)
+            let anchor = img.closest('a');
+            if (!anchor || !anchor.href) continue;
 
-            let imgSrc = imgEl.getAttribute('src') || imgEl.getAttribute('data-src') || imgEl.src || '';
-            if (!imgSrc || imgSrc.length < 20) continue;
-            if (imgSrc.startsWith('//')) imgSrc = 'https:' + imgSrc;
+            let href = anchor.href;
+            
+            // استخراج العنوان من alt أو من النص المحيط
+            let title = img.alt || '';
+            if (!title || title.trim().length < 10) {
+                const textNode = anchor.innerText || anchor.parentElement?.innerText || '';
+                title = textNode.split('\n').find(line => line.trim().length > 10) || '';
+            }
+            
+            // إذا لم نجد عنواناً، نتجاهل هذه الصورة (غالباً أيقونة أو شعار)
+            if (!title) continue;
 
-            // استخراج رقم المنتج من الرابط (أي رقم طويل)
-            let pid = anchor.href;
-            const pidMatch = anchor.href.match(/(\d{10,})/); 
+            let pid = href;
+            const pidMatch = href.match(/(\d{10,})/);
             if (pidMatch) pid = pidMatch[1];
 
             if (seen.has(pid)) continue;
@@ -83,42 +93,38 @@ function extractProductsFromDOM(doc) {
             const priceMatch = text.match(/([$€£]|US\$|DA|SAR|AED|DH)\s*(\d+[.,]?\d*)/i) || text.match(/(\d+[.,]?\d*)\s*([$€£]|DA|SAR|AED|DH)/i);
             if (priceMatch) price = priceMatch[0].trim();
 
-            // طباعة في الكونسول لنعرف أن الكود يعمل
-            if (logCount < 3) {
-                console.log("✅ Nezzer Found Product:", title.substring(0, 30), "| Price:", price);
-                logCount++;
-            }
+            if (src.startsWith('//')) src = 'https:' + src;
 
             seen.add(pid);
             products.push({
                 productId: pid,
                 title: { displayTitle: title.substring(0, 100) },
-                image: { imgUrl: imgSrc },
+                image: { imgUrl: src.split('?')[0] },
                 prices: { salePrice: { formattedPrice: price } },
-                evaluation: { starRating: 0 },
-                trade: { realTradeCount: 0 },
+                evaluation: { starRating: 0 }, 
+                trade: { realTradeCount: 0 }, 
                 _isLocal: true,
-                url: anchor.href
+                url: href
             });
         } catch (e) {}
     }
+    
+    console.log(`Nezzer Debug: Found ${validImagesCount} Temu images, extracted ${products.length} products.`);
     return products;
 }
 
-// دالة تمرير الصفحة
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
-    console.log("Nezzer: Scrolling down to load products...");
+    console.log("Nezzer: Starting deep scroll...");
     
-    for (let i = 0; i < 3; i++) {
-        window.scrollBy(0, 1500);
-        await new Promise(r => setTimeout(r, 1500)); 
+    // تمرير قوي جداً (5 مرات) لإجبار الموقع على تحميل كل شيء
+    for (let i = 0; i < 5; i++) {
+        window.scrollBy(0, 2000);
+        await new Promise(r => setTimeout(r, 2000)); 
     }
 
     let products = extractProductsFromDOM(document);
-    console.log(`Nezzer: Total valid products extracted: ${products.length}`);
 
-    // استبعاد المنتج الحالي
     const currentUrl = window.location.href;
     const currentPidMatch = currentUrl.match(/(\d{10,})/);
     const currentPid = currentPidMatch ? currentPidMatch[1] : null;
