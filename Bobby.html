@@ -1,7 +1,66 @@
-// محرك فارغ لأننا نعتمد على السحب من الواجهة في injector.js
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'FETCH_ALTERNATIVES') {
-        sendResponse({ products: request.products, host: 'www.temu.com' });
-        return true;
-    }
+let globalProducts = [];
+const AFFILIATE_ID = '4093313497';
+
+// استقبال البيانات من injector.js
+window.addEventListener('message', (event) => {
+  if (event.data && event.data.action === 'RENDER_LOCAL') {
+    globalProducts = event.data.products || [];
+    renderProducts();
+  }
+  if (event.data && event.data.action === 'LOADING_ALTERNATIVES') {
+    document.getElementById('main-grid').innerHTML = `<p style="text-align: center; padding: 20px;">جاري جلب البدائل...</p>`;
+  }
 });
+
+function renderProducts() {
+  const grid = document.getElementById('main-grid');
+  if (!grid) return;
+  grid.innerHTML = ''; 
+
+  if (globalProducts.length === 0) {
+      grid.innerHTML = `<p style="text-align: center; color: red; padding: 20px;">لم يتم العثور على منتجات بديلة.</p>`;
+      return;
+  }
+
+  globalProducts.forEach(p => {
+      const card = createCard(p);
+      if (card) grid.appendChild(card);
+  });
+}
+
+function createCard(p) {
+  let rawImg = p.image?.imgUrl || '';
+  const img = rawImg.startsWith('//') ? 'https:' + rawImg : rawImg;
+  const title = p.title?.displayTitle || 'Temu Product';
+  const price = p.prices?.salePrice?.formattedPrice || '—';
+  const rating = p.evaluation?.starRating || '4.8';
+  const originalUrl = p.url; 
+
+  const a = document.createElement('a');
+  a.href = '#'; // نمنع الفتح الافتراضي
+  a.className = 'product-card';
+
+  // 💡 إضافة الإحالة عند الضغط
+  a.onclick = (e) => {
+      e.preventDefault();
+      try {
+          const urlObj = new URL(originalUrl);
+          urlObj.searchParams.set('affid', AFFILIATE_ID);
+          window.open(urlObj.toString(), '_blank');
+      } catch(err) {
+          window.open(originalUrl, '_blank');
+      }
+  };
+
+  a.innerHTML = `
+    <div class="img-box"><img src="${img}" loading="lazy"></div>
+    <div class="info">
+      <div class="title" title="${title}">${title}</div>
+      <div class="meta-row">
+          <span class="rating"><span class="star">★</span> ${rating}</span>
+      </div>
+      <div class="price">${price}</div>
+    </div>
+  `;
+  return a;
+}
