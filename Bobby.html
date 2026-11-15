@@ -1,34 +1,7 @@
-{
-  "manifest_version": 3,
-  "name": "Timothy Alternatives",
-  "description": "Find similar products on Temu with affiliate links.",
-  "default_locale": "en",
-  "version": "1.0.4",
-  "minimum_chrome_version": "102",
-  "permissions": ["storage", "scripting", "tabs"],
-  "host_permissions": [
-    "*://*.temu.com/*"
-  ],
-  "background": {
-    "service_worker": "background/engine.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.temu.com/*"],
-      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
-      "run_at": "document_idle"
+// محرك فارغ لأننا نعتمد على السحب من الواجهة في injector.js
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'FETCH_ALTERNATIVES') {
+        sendResponse({ products: request.products, host: 'www.temu.com' });
+        return true;
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["panel/panel.html", "panel/panel.js"],
-      "matches": ["*://*.temu.com/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "assets/icons/icon128.png" }
-  },
-  "icons": { "128": "assets/icons/icon128.png" }
-}
+});
