@@ -1,47 +1,18 @@
-document.addEventListener('DOMContentLoaded', () => {
-    let userLang = (navigator.languages && navigator.languages.length > 0) 
-        ? navigator.languages[0] 
-        : (navigator.language || navigator.userLanguage);
-
-    if (!userLang && typeof chrome !== 'undefined' && chrome.i18n) {
-        userLang = chrome.i18n.getUILanguage();
+window.NEZZER_DISCLAIMER_TRANSLATIONS = {
+    'en': { 
+        title: 'Nezzer is completely free!', 
+        body: 'To ensure we can keep providing and improving this tool, we may use affiliate shopping links in the future. Thank you for supporting us in making shopping smarter and cheaper for everyone.', 
+        button: 'Got it, thanks' 
+    },
+    'ar': { 
+        title: 'إضافة Nezzer مجانية بالكامل!', 
+        body: 'لضمان استمرارنا في تقديم هذه الأداة وتطويرها، قد نستخدم روابط تسوق شريكة في المستقبل. شكراً لدعمكم في جعل التسوق أذكى وأرخص للجميع.', 
+        button: 'فهمت، شكراً' 
+    },
+    'fr': { 
+        title: 'Nezzer est entièrement gratuit !', 
+        body: 'Pour continuer à fournir et améliorer cet outil, nous pourrions utiliser des liens d\'affiliation à l\'avenir. Merci de nous soutenir pour rendre le shopping plus intelligent et moins cher pour tous.', 
+        button: 'Compris, merci' 
     }
-        
-    userLang = userLang.split('-')[0].split('_')[0].toLowerCase();
-
-    if (userLang === 'zh') {
-        const fullLang = (navigator.languages && navigator.languages.length > 0) ? navigator.languages[0] : navigator.language;
-        userLang = (fullLang && fullLang.toLowerCase().includes('tw')) ? 'zh_TW' : 'zh_CN';
-    }
-
-    const POPUP_TEXTS = {
-      'en': { title: 'Terms of Use & Disclaimer', intro: 'By using this extension, you agree to the following terms:', li1: 'All product data comes directly from Temu.', li2: 'We do not collect any personal data (such as names, emails, or passwords).', li3: 'Users must do their own research before any purchase.', li4: 'We are not responsible for purchases made based on our recommendations.', li5: 'Product ratings and statistics may change over time.', affiliate: '<strong>Affiliate Disclosure:</strong> This extension may use affiliate links in the future. Your support helps us keep this tool free and improve it for everyone.', btn: 'Browse Temu Now', privacy: 'Privacy Policy', footer: 'Nezzer © 2024 - Thanks for your support' },
-      'ar': { title: 'شروط الاستخدام وإخلاء المسؤولية', intro: 'باستخدامك لهذا الامتداد، فإنك توافق على الشروط التالية:', li1: 'جميع بيانات المنتجات تأتي مباشرة من Temu.', li2: 'نحن لا نجمع أي بيانات شخصية (مثل الأسماء، عناوين البريد الإلكتروني، أو كلمات المرور).', li3: 'يجب على المستخدمين إجراء أبحاثهم الخاصة قبل أي عملية شراء.', li4: 'نحن لسنا مسؤولين عن عمليات الشراء التي تتم بناءً على توصياتنا.', li5: 'قد تتغير تقييمات وإحصائيات المنتجات بمرور الوقت.', affiliate: '<strong>إفصاح عن العمولة:</strong> قد تستخدم هذه الإضافة روابط تسوق شريكة في المستقبل. دعمك يساعدنا في الحفاظ على الأداة مجانية وتطويرها للجميع.', btn: 'تصفح Temu الآن', privacy: 'سياسة الخصوصية', footer: 'Nezzer © 2024 - شكراً لدعمك' },
-      'fr': { title: 'Conditions d\'utilisation et clause de non-responsabilité', intro: 'En utilisant cette extension, vous acceptez les conditions suivantes :', li1: 'Toutes les données des produits proviennent directement de Temu.', li2: 'Nous ne collectons aucune donnée personnelle (telles que noms, e-mails ou mots de passe).', li3: 'Les utilisateurs doivent faire leurs propres recherches avant tout achat.', li4: 'Nous ne sommes pas responsables des achats effectués sur la base de nos recommandations.', li5: 'Les évaluations et statistiques des produits peuvent changer avec le temps.', affiliate: '<strong>Divulgation d\'affiliation :</strong> Cette extension pourrait utiliser des liens d\'affiliation à l\'avenir. Votre soutien nous aide à garder cet outil gratuit et à l\'améliorer pour tous.', btn: 'Parcourir Temu', privacy: 'Politique de confidentialité', footer: 'Nezzer © 2024 - Merci pour votre soutien' }
-      // يمكنك إضافة باقي اللغات هنا بنفس الطريقة وتغيير AliExpress إلى Temu
-    };
-
-    const texts = POPUP_TEXTS[userLang] || POPUP_TEXTS['en'];
-
-    const rtlLangs = ['ar', 'he', 'fa', 'ur'];
-    if (rtlLangs.includes(userLang)) {
-        document.documentElement.dir = 'rtl';
-    } else {
-        document.documentElement.dir = 'ltr';
-    }
-    document.documentElement.lang = userLang;
-
-    document.getElementById('pop-title').textContent = texts.title;
-    document.getElementById('pop-intro').textContent = texts.intro;
-    document.getElementById('pop-li-1').textContent = texts.li1;
-    document.getElementById('pop-li-2').textContent = texts.li2;
-    document.getElementById('pop-li-3').textContent = texts.li3;
-    document.getElementById('pop-li-4').textContent = texts.li4;
-    document.getElementById('pop-li-5').textContent = texts.li5;
-    document.getElementById('pop-affiliate').innerHTML = texts.affiliate;
-    document.getElementById('pop-btn').textContent = texts.btn;
-    document.getElementById('pop-privacy').textContent = texts.privacy;
-    
-    const currentYear = new Date().getFullYear();
-    document.getElementById('pop-footer').textContent = texts.footer.replace('2024', currentYear);
-});
+    // أضف باقي اللغات هنا
+};
