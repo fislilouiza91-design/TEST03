@@ -49,11 +49,10 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة لاستخراج المنتجات من أي صفحة (سواء الحالية أو صفحة بحث تم جلبها في الخلفية)
+// استخراج المنتجات من أي DOM (سواء الحالي أو الذي تم جلبه)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
-    
     const links = doc.querySelectorAll('a[href*="/g-"], a[href*="goods_id="], a[href*=".html"] img');
 
     for (const link of links) {
@@ -102,47 +101,38 @@ function extractProductsFromDOM(doc) {
     return products;
 }
 
-// دالة جديدة: جلب منتجات مشابهة بناءً على عنوان المنتج الحالي
+// جلب منتجات مشابهة بالاعتماد على عنوان المنتج الحالي
 async function fetchSimilarProductsFromProductPage() {
-    // 1. محاولة قراءة عنوان المنتج من الصفحة
     let title = document.querySelector('h1')?.innerText || document.title.split('|')[0].split('-')[0].trim();
-    
-    // تنظيف العنوان ليكون مناسباً للبحث (أخذ أول 5 كلمات)
     let searchQuery = title.split(' ').slice(0, 6).join(' ');
-    if (!searchQuery || searchQuery.length < 3) searchQuery = 'product'; // احتياطي
+    if (!searchQuery || searchQuery.length < 3) searchQuery = 'product';
 
-    console.log("Nezzer: Fetching similar products for:", searchQuery);
-
+    console.log("Nezzer: Trying to fetch search results for:", searchQuery);
     const searchUrl = `https://www.temu.com/search_result.html?search_key=${encodeURIComponent(searchQuery)}`;
     
     try {
-        // 2. جلب صفحة البحث في الخلفية
         const response = await fetch(searchUrl, { credentials: 'include' });
-        const htmlText = await response.text();
+        if (!response.ok) throw new Error('Network response was not ok');
         
-        // 3. تحويل النص إلى DOM وهمي لاستخراج المنتجات
+        const htmlText = await response.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(htmlText, 'text/html');
         
-        // 4. استخراج المنتجات
         let products = extractProductsFromDOM(doc);
         
-        // إذا فشل الجلب (بسبب حماية تيمو)، نعود لاستخراج ما في الصفحة الحالية
-        if (products.length === 0) {
-            console.warn("Nezzer: Fetch returned 0 products, falling back to current page DOM.");
-            products = extractProductsFromDOM(document);
+        if (products.length > 0) {
+            console.log("Nezzer: Fetched from search:", products.length);
+            return shuffleArray(products).slice(0, 40);
         }
-
-        console.log("Nezzer: Successfully extracted similar products:", products.length);
-        return shuffleArray(products).slice(0, 40); // خلط النتائج وإرجاع 40 منتجاً
-
     } catch (error) {
-        console.error("Nezzer: Fetch failed, falling back to current page", error);
-        return extractProductsFromDOM(document);
+        console.warn("Nezzer: Fetch failed (Temu might block it). Scraping current page instead.", error);
     }
-}
 
-// ... (باقي الكود الخاص بـ removeWidget, deliverNextStep, injectWidget يبقى كما هو) ...
+    // خطة بديلة: إذا فشل الجلب، نستخرج المنتجات الموجودة في الصفحة الحالية
+    console.log("Nezzer: Scraping current page DOM.");
+    let currentPageProducts = extractProductsFromDOM(document);
+    return shuffleArray(currentPageProducts).slice(0, 40);
+}
 
 function removeWidget() {
     if (widgetWrapper) {
@@ -172,7 +162,7 @@ function deliverNextStep() {
     alternativesDelivered += nextBatch.length;
     currentRoundDelivered += nextBatch.length;
     
-    const hasMore = alternativesDelivered < alternativesBuffer.length || isFetchingAlternatives;
+    const hasMore = alternativesDelivered < alternativesBuffer.length;
     try { 
         iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: nextBatch, hasMore: hasMore }, '*'); 
     } catch(e) {}
@@ -182,12 +172,10 @@ function injectWidget() {
     try {
         if (widgetWrapper) return;
 
-        // التحقق مما إذا كنا في صفحة منتج
+        // تعمل الإضافة في صفحات المنتجات فقط
         const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.includes('goods_id=');
-        
-        if (!isProductPage) return; // تعمل فقط في صفحات المنتجات
+        if (!isProductPage) return; 
 
-        // ... (كود الـ CSS والواجهة يبقى كما هو تقريباً) ...
         const nezzerStyleId = 'nezzer-theme-styles';
         if (!document.getElementById(nezzerStyleId)) {
             const styleEl = document.createElement('style');
@@ -204,20 +192,18 @@ function injectWidget() {
 
         let isOpen = false;
         let currentSide = 'left';
-        let activeSort = 'betterAlternatives'; // الافتراضي الآن هو المنتجات المشابهة
+        let activeSort = 'betterAlternatives';
         let disclaimerEl = null;
 
         widgetWrapper = document.createElement('div');
         widgetWrapper.id = 'nezzer-widget-wrapper';
         widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
 
-        // ... (باقي كود إنشاء الواجهة sidebar, iframeContainer, pillContainer, dragHandle يبقى كما هو) ...
-        // (لاختصار الكود هنا، تأكد من نسخ هذا الجزء من ملفك القديم، فهو يعمل بشكل سليم)
-
         sidebar = document.createElement('div');
         sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
         const pillContainer = document.createElement('div');
         pillContainer.style.cssText = `background: var(--nezzer-pill-bg); backdrop-filter: blur(10px); padding: 20px 6px; border-radius: 0 40px 40px 0; box-shadow: 5px 0 20px var(--nezzer-side-shadow); display: flex; flex-direction: column; align-items: center; gap: 15px; pointer-events: auto; transition: all 0.3s ease; border: 1px solid var(--nezzer-pill-border); border-left: none;`;
+        
         iframeContainer = document.createElement('div');
         iframeContainer.style.cssText = `position: absolute; top: 50%; left: 60px; width: 620px; max-width: 90vw; height: 98vh; background: var(--nezzer-iframe-bg) !important; border-radius: 16px; box-shadow: 12px 0 40px var(--nezzer-panel-shadow); transform: translateY(-50%) translateX(-105%); opacity: 0; pointer-events: none; visibility: hidden; transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s; display: flex; overflow: hidden; z-index: 5;`;
 
@@ -254,7 +240,6 @@ function injectWidget() {
             btn.className = 'nezzer-sort-btn'; btn.innerText = text; btn.setAttribute('data-sort', sortValue);
             if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
             
-            // التصميم عند الوقوف
             if (activeSort === sortValue) {
                 btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
                 btn.style.color = 'white'; btn.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; btn.style.border = '1px solid rgba(255,107,53,0.5)';
@@ -280,14 +265,18 @@ function injectWidget() {
                     
                     try { iframe.contentWindow.postMessage({ action: 'LOADING_ALTERNATIVES' }, '*'); } catch(e) {}
 
-                    // استدعاء الدالة الجديدة التي تجلب المنتجات المشابهة عبر البحث
                     const topProducts = await fetchSimilarProductsFromProductPage();
                     
                     if (topProducts.length === 0) {
-                        try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: [] }, '*'); } catch(e) {}
+                        try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: 0 }, '*'); } catch(e) {}
                         isFetchingAlternatives = false;
                     } else {
-                        chrome.runtime.sendMessage({ action: 'FETCH_ALTERNATIVES', products: topProducts });
+                        alternativesBuffer = topProducts;
+                        isFetchingAlternatives = false; 
+                        deliverNextStep();
+                        setTimeout(() => {
+                            try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: alternativesBuffer.length - alternativesDelivered }, '*'); } catch(e) {}
+                        }, 500);
                     }
                 }
             };
@@ -304,7 +293,6 @@ function injectWidget() {
         widgetWrapper.appendChild(iframeContainer);
         document.body.appendChild(widgetWrapper);
 
-        // مراقبة إغلاق النافذة عند النقر خارجها
         window.addEventListener('mousedown', (e) => {
             if (!isOpen) return;
             if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
@@ -316,8 +304,7 @@ function injectWidget() {
             if (event.data.action === 'REQUEST_MORE_ALTERNATIVES') {
                 if (currentRoundDelivered >= currentRoundTarget) { currentRoundDelivered = 0; currentRoundTarget = NEXT_ROUND_SIZE; }
                 if (alternativesDelivered < alternativesBuffer.length) deliverNextStep();
-                else if (!isFetchingAlternatives) { try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {} }
-                else { window._nezzerPendingRequest = true; }
+                else { try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {} }
             }
         });
 
@@ -331,23 +318,6 @@ new MutationObserver(() => {
     if (location.href !== lastUrl) {
         lastUrl = location.href;
         removeWidget();
-        setTimeout(injectWidget, 1500); // انتظر قليلاً حتى يتم تحميل العناصر
+        setTimeout(injectWidget, 1500); 
     }
 }).observe(document, {subtree: true, childList: true});
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.action === 'ALTERNATIVE_BATCH') {
-        alternativesBuffer = alternativesBuffer.concat(msg.alternatives || []);
-        deliverNextStep();
-    }
-    if (msg.action === 'ALTERNATIVES_FINISHED') {
-        isFetchingAlternatives = false;
-        if (window._nezzerPendingRequest) {
-            window._nezzerPendingRequest = false;
-            if (alternativesDelivered < alternativesBuffer.length) deliverNextStep();
-            else { try { iframe.contentWindow.postMessage({ action: 'APPEND_LOCAL', products: [], hasMore: false }, '*'); } catch(e) {} }
-        } else {
-            try { iframe.contentWindow.postMessage({ action: 'ALTERNATIVES_FINISHED', remaining: alternativesBuffer.length - alternativesDelivered }, '*'); } catch(e) {}
-        }
-    }
-});
