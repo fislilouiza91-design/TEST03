@@ -44,7 +44,6 @@ function shuffleArray(array) {
     return array;
 }
 
-// دالة الاستخراج النهائية (دقيقة جداً)
 function extractProductsFromDOM(doc) {
     let products = [];
     const seen = new Set();
@@ -52,7 +51,6 @@ function extractProductsFromDOM(doc) {
     const allElements = Array.from(doc.querySelectorAll('div'));
     let potentialCards = 0;
 
-    // قائمة حظر قوية جداً
     const blacklist = [
         'garantie', 'livraison', 'retour', 'politique', 'aide', 'sécurisé', 'paiement', 
         'compte', 'télécharger', 'app', 'service client', 'panier', 'vendeur vedette', 
@@ -62,36 +60,29 @@ function extractProductsFromDOM(doc) {
     for (const el of allElements) {
         try {
             const text = el.innerText;
-            // تجاهل الكتل الفارغة أو الضخمة جداً
             if (!text || text.length > 400 || text.length < 5) continue;
 
-            // 1. البحث عن السعر
             const priceMatch = text.match(/(\d+[\s.,]?\d*)\s*(DA|DZD|\$|€|£)/i) || text.match(/(\$|€|£|DA|DZD)\s*(\d+[\s.,]?\d*)/i);
             if (!priceMatch) continue;
 
-            // 2. البحث عن صورة
             const img = el.querySelector('img');
             if (!img) continue;
 
             let src = img.src || img.getAttribute('data-src') || '';
             if (!src.includes('kwcdn')) continue;
 
-            // 3. تنظيف العنوان
             let title = img.alt || '';
             title = title.replace(/photo de l'article\s*/i, '').replace(/photo de l’article\s*/i, '').trim();
             
-            // إذا كان العنوان فارغاً أو وهمياً، نبحث في النص
             if (!title || title.length < 5 || title.toLowerCase() === 'image' || title.toLowerCase() === 'product') {
                 title = text.split('\n').find(line => line.trim().length > 10 && !line.includes('DA') && !line.includes('$')) || '';
                 title = title.replace(/photo de l'article\s*/i, '').trim();
             }
 
-            // إذا لم نجد عنواناً حقيقياً، نتجاهل هذا العنصر (لتجنب أيقونات الصح والاستفهام)
             if (!title || title.length < 5 || title.toLowerCase() === 'product') continue;
 
             title = title.charAt(0).toUpperCase() + title.slice(1);
 
-            // 4. تطبيق فلتر الحظر
             const lowerTitle = title.toLowerCase();
             if (blacklist.some(word => lowerTitle.includes(word))) continue;
 
@@ -128,15 +119,20 @@ function extractProductsFromDOM(doc) {
     return products;
 }
 
+// دالة التمرير المعدلة لجلب المزيد من المنتجات
 async function getSimilarProductsFromCurrentPage() {
     let originalScroll = window.scrollY;
     console.log("Nezzer: Deep scrolling to load 20+ products...");
     
-    for (let i = 0; i < 8; i++) {
-        window.scrollBy(0, 1000);
+    // زيادة عدد مرات التمرير إلى 12 مرة
+    for (let i = 0; i < 12; i++) {
+        window.scrollBy(0, 1500);
+        // انتظار ثانية كاملة بين كل تمريرة ليتنفس الموقع ويحمل المنتجات
         await new Promise(r => setTimeout(r, 1000)); 
     }
     
+    // التمرير إلى أقصى قاع الصفحة لضمان تحميل كل شيء
+    window.scrollTo(0, document.body.scrollHeight);
     await new Promise(r => setTimeout(r, 2000));
 
     let products = extractProductsFromDOM(document);
