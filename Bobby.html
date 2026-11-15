@@ -5,11 +5,50 @@ let sidebar = null;
 let darkModeQueryRef = null;
 let darkModeListenerRef = null;
 let isFetchingAlternatives = false;
+let alternativesBuffer = [];
+let alternativesDelivered = 0;
+let currentRoundDelivered = 0;
+let currentRoundTarget = 12;
+const FIRST_ROUND_SIZE = 12;
+const NEXT_ROUND_SIZE = 6;
+const STEP_SIZE = 3;
 
-// دالة سحب المنتجات المطابقة من صفحة تيمو
-function scanTemuPage() {
+const SITE_TRANSLATIONS = {
+    'en': { cheapest: 'Cheapest', popular: 'Best Selling', rating: 'Best Rated', thisPage: '🛍️ This Page', betterAlternatives: '✨ Better Alternatives' },
+    'ar': { cheapest: 'الأرخص', popular: 'الأكثر مبيعاً', rating: 'الأعلى تقييماً', thisPage: '🛍️ هذه الصفحة', betterAlternatives: '✨ بدائل أفضل' },
+    'fr': { cheapest: 'Moins cher', popular: 'Plus vendu', rating: 'Mieux noté', thisPage: '🛍️ Cette page', betterAlternatives: '✨ Meilleures alternatives' }
+};
+
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || 'en';
+        lang = lang.toLowerCase().split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
+
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function shuffleArray(array) {
+    let currentIndex = array.length, randomIndex;
+    while (currentIndex != 0) {
+        randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+        [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+    }
+    return array;
+}
+
+// 💡 دالة السحب المخصصة لتيمو
+function scanPageForProducts(sortByPopular = false, randomize = false) {
     let products = [];
     const seen = new Set();
+    // البحث عن روابط المنتجات في تيمو (تحتوي على -g-)
     const links = document.querySelectorAll('a[href*="-g-"]');
 
     for (const link of links) {
@@ -25,8 +64,10 @@ function scanTemuPage() {
             let title = link.querySelector('img')?.alt || link.innerText.split('\n')[0] || 'Temu Product';
             title = title.trim().substring(0, 80);
             
-            let price = link.innerText.match(/[\d.,]+\s*€|[\d.,]+\s*\$|[\d.,]+\s*£/)?.[0] || '—';
+            let price = link.innerText.match(/[\d.,]+\s*€|[\d.,]+\s*\$|[\d.,]+\s*£|[\d.,]+\s*د\.ج/i)?.[0] || '—';
             if(price !== '—') price = price.replace(/\s/g, '');
+
+            let isFreeShipping = link.innerText.toLowerCase().includes('free') || link.innerText.toLowerCase().includes('gratis') || link.innerText.toLowerCase().includes('gratuit') || link.innerText.toLowerCase().includes('مجاني');
 
             if (img && title && img.includes('kwcdn.com')) {
                 seen.add(pid);
@@ -38,19 +79,38 @@ function scanTemuPage() {
                     evaluation: { starRating: (Math.random() * (5.0 - 4.0) + 4.0).toFixed(1) },
                     trade: { realTradeCount: Math.floor(Math.random() * 5000) + 100 },
                     _isLocal: true,
+                    _isFreeShipping: isFreeShipping,
                     url: link.href
                 });
             }
         } catch(e) {}
     }
-    return products.slice(0, 20); // جلب أول 20 منتج فقط
+
+    if (randomize) products = shuffleArray(products);
+    if (sortByPopular) products.sort((a, b) => b.trade.realTradeCount - a.trade.realTradeCount);
+    
+    return products.slice(0, 21);
 }
 
 function removeWidget() {
     if (widgetWrapper) {
+        if (darkModeQueryRef && darkModeListenerRef) {
+            if (darkModeQueryRef.removeEventListener) darkModeQueryRef.removeEventListener('change', darkModeListenerRef);
+            else darkModeQueryRef.removeListener(darkModeListenerRef);
+        }
+        darkModeQueryRef = null;
+        darkModeListenerRef = null;
         widgetWrapper.remove();
         widgetWrapper = null;
+        iframeContainer = null;
         iframe = null;
+        sidebar = null;
+        alternativesBuffer = [];
+        alternativesDelivered = 0;
+        currentRoundDelivered = 0;
+        currentRoundTarget = FIRST_ROUND_SIZE;
+        isFetchingAlternatives = false;
+        window._nezzerPendingRequest = false;
     }
 }
 
@@ -58,46 +118,201 @@ function injectWidget() {
     try {
         if (widgetWrapper) return;
 
-        // التحقق من أننا في صفحة منتج في تيمو
-        const isProductPage = window.location.href.match(/-g-\d+\.html/);
+        // 💡 التحقق من أننا في صفحة منتج في تيمو
+        const isProductPage = window.location.href.match(/-g-(\d+)\.html/);
         if (!isProductPage) return;
 
-        // ... (كود الستايل والـ iframe والـ sidebar الخاص بك يبقى كما هو) ...
-        // سأفترض أنك تحتفظ بالكود الخاص بتصميم الـ Widget والـ iframe هنا
-
-        // دالة فتح النافذة الجانبية
-        function openPanel() {
-            iframeContainer.style.visibility = 'visible';
-            iframeContainer.style.opacity = '1';
-            iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-            iframeContainer.style.pointerEvents = 'auto';
+        const nezzerStyleId = 'nezzer-theme-styles';
+        if (!document.getElementById(nezzerStyleId)) {
+            const styleEl = document.createElement('style');
+            styleEl.id = nezzerStyleId;
+            styleEl.textContent = `
+                #nezzer-widget-wrapper {
+                    --nezzer-pill-bg: rgba(255, 255, 255, 0.95);
+                    --nezzer-pill-border: #f1f5f9;
+                    --nezzer-btn-color: #64748b;
+                    --nezzer-drag-color: #64748b;
+                    --nezzer-drag-bg: rgba(100, 116, 139, 0.08);
+                    --nezzer-drag-color-hover: #475569;
+                    --nezzer-drag-bg-hover: rgba(100, 116, 139, 0.18);
+                    --nezzer-iframe-bg: #ffffff;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.1);
+                    --nezzer-panel-shadow: rgba(15, 23, 42, 0.15);
+                }
+                #nezzer-widget-wrapper.nezzer-dark {
+                    --nezzer-pill-bg: rgba(22, 22, 28, 0.92);
+                    --nezzer-pill-border: #2a2a33;
+                    --nezzer-btn-color: #94a3b8;
+                    --nezzer-drag-color: #94a3b8;
+                    --nezzer-drag-bg: rgba(148, 163, 184, 0.1);
+                    --nezzer-drag-color-hover: #cbd5e1;
+                    --nezzer-drag-bg-hover: rgba(148, 163, 184, 0.22);
+                    --nezzer-iframe-bg: #16161c;
+                    --nezzer-side-shadow: rgba(0, 0, 0, 0.5);
+                    --nezzer-panel-shadow: rgba(0, 0, 0, 0.6);
+                }
+                #nezzer-widget-wrapper .nezzer-sort-btn { color: var(--nezzer-btn-color); }
+                #nezzer-widget-wrapper #nezzer-drag-handle { color: var(--nezzer-drag-color); background: var(--nezzer-drag-bg); }
+                #nezzer-widget-wrapper #nezzer-drag-handle:hover { color: var(--nezzer-drag-color-hover); background: var(--nezzer-drag-bg-hover); }
+            `;
+            document.head.appendChild(styleEl);
         }
 
-        // 💡 الحل الذكي: مراقبة الصفحة بدون استهلاك موارد
+        let isOpen = false;
+        let currentSide = 'left';
+        let activeSort = 'betterAlternatives'; // نبدأ بالبدائل مباشرة
+        let disclaimerEl = null;
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        darkModeQueryRef = window.matchMedia('(prefers-color-scheme: dark)');
+        darkModeListenerRef = () => {
+            if (!widgetWrapper) return;
+            widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+        };
+        if (darkModeQueryRef.addEventListener) darkModeQueryRef.addEventListener('change', darkModeListenerRef);
+        else darkModeQueryRef.addListener(darkModeListenerRef);
+        widgetWrapper.classList.toggle('nezzer-dark', darkModeQueryRef.matches);
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `
+            background: var(--nezzer-pill-bg); backdrop-filter: blur(10px);
+            padding: 20px 6px; border-radius: 0 40px 40px 0;
+            box-shadow: 5px 0 20px var(--nezzer-side-shadow);
+            display: flex; flex-direction: column; align-items: center; gap: 15px;
+            pointer-events: auto; transition: all 0.3s ease;
+            border: 1px solid var(--nezzer-pill-border); border-left: none;
+        `;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `
+            position: absolute; top: 50%; left: 60px;
+            width: 620px; max-width: 90vw; height: 98vh;
+            background: var(--nezzer-iframe-bg) !important; border-radius: 16px;
+            box-shadow: 12px 0 40px var(--nezzer-panel-shadow);
+            transform: translateY(-50%) translateX(-105%);
+            opacity: 0; pointer-events: none; visibility: hidden;
+            transition: transform 0.75s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.6s ease-out, visibility 0.75s;
+            display: flex; overflow: hidden; z-index: 5;
+        `;
+
+        const siteLang = getSiteLang();
+
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none; background: var(--nezzer-iframe-bg);`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.id = 'nezzer-drag-handle';
+        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; transition: all 0.2s ease; margin-bottom: 10px; border-radius: 10px;`;
+        dragHandle.innerHTML = '⋮⋮';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                if (currentSide === 'right') iframeContainer.style.transform = 'translateY(-50%) translateX(105%)';
+                else iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 750);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: transparent; border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; user-select: none; letter-spacing: 1px; border: 1px solid transparent;`;
+            btn.className = 'nezzer-sort-btn';
+            btn.innerText = text;
+            btn.setAttribute('data-sort', sortValue);
+            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                if (activeSort === sortValue && isOpen) {
+                    togglePanel(false);
+                } else {
+                    activeSort = sortValue;
+                    pillContainer.querySelectorAll('div[data-sort]').forEach(b => {
+                        b.style.background = 'transparent'; b.style.color = ''; b.style.boxShadow = 'none'; b.style.border = '1px solid transparent'; b.style.opacity = '1';
+                    });
+                    btn.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)';
+                    btn.style.color = 'white';
+                    btn.style.boxShadow = '0 0 15px rgba(255, 71, 71, 0.8)';
+                    btn.style.border = '1px solid rgba(255,107,53,0.5)';
+
+                    togglePanel(true);
+
+                    // 💡 تعديل: عند الضغط نقوم بالسحب والعرض مباشرة
+                    if (sortValue === 'betterAlternatives') {
+                        const scraped = scanPageForProducts(false, true);
+                        if (scraped.length > 0 && iframe) {
+                            try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*'); } catch(e) {}
+                        }
+                    }
+                }
+            };
+            return btn;
+        };
+
+        let btnTop = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+        activeSort = 'betterAlternatives';
+        btnTop.style.background = 'linear-gradient(135deg, #ff6b35, #ff4747)'; 
+        btnTop.style.color = 'white'; 
+        btnTop.style.boxShadow = '0 4px 12px rgba(255,71,71,0.3)'; 
+        btnTop.style.border = '1px solid rgba(255,107,53,0.5)';
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btnTop);
+
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+        if (sidebar) sidebar.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+
+        // 💡 سر الانبثاق التلقائي بدون استهلاك موارد: MutationObserver
         let observer = new MutationObserver((mutations, obs) => {
-            // التحقق مما إذا كانت المنتجات قد ظهرت في الصفحة (نبحث عن 5 منتجات على الأقل)
+            // التحقق مما إذا كانت المنتجات قد ظهرت في الصفحة
             const foundLinks = document.querySelectorAll('a[href*="-g-"]');
             
             if (foundLinks.length >= 5) {
-                // 1. أوقف المراقبة فوراً لتوفير الموارد
-                obs.disconnect(); 
+                obs.disconnect(); // إيقاف المراقبة فوراً لتوفير الموارد
                 
-                // 2. اجلب المنتجات وافتح النافذة
-                const scraped = scanTemuPage();
+                const scraped = scanPageForProducts();
                 if (scraped.length > 0 && iframe) {
                     try {
                         iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: scraped }, '*');
-                        openPanel(); // فتح النافذة تلقائياً
+                        togglePanel(true); // فتح النافذة تلقائياً
                     } catch(e) {}
                 }
             }
         });
-
-        // بدء المراقبة: نراقب إضافة العقد (Nodes) إلى الصفحة
         observer.observe(document.body, { childList: true, subtree: true });
 
-        // خطة احتياطية: إذا لم تظهر المنتجات خلال 7 ثوانٍ، نفصل المراقبة لتوفير الموارد
+        // خطة احتياطية: إيقاف المراقبة بعد 7 ثوانٍ إذا لم يتم العثور على شيء
         setTimeout(() => observer.disconnect(), 7000);
+
+        // إغلاق عند النقر خارجها
+        window.addEventListener('mousedown', (e) => {
+            if (!isOpen) return;
+            if (iframeContainer.contains(e.target) || sidebar.contains(e.target)) return;
+            togglePanel(false);
+        });
 
     } catch(err) {
         console.error("Nezzer Error:", err);
@@ -106,12 +321,11 @@ function injectWidget() {
 
 injectWidget();
 
-// مراقبة تغيير الروابط في تيمو (لأنها تطبيق SPA)
 let lastUrl = location.href;
 new MutationObserver(() => {
     if (location.href !== lastUrl) {
         lastUrl = location.href;
         removeWidget();
-        setTimeout(injectWidget, 1000); // انتظار بسيط لتهيئة الصفحة الجديدة
+        setTimeout(injectWidget, 1000);
     }
 }).observe(document, {subtree: true, childList: true});
