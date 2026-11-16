@@ -1,215 +1,65 @@
-let widgetWrapper = null;
-let iframeContainer = null;
-let iframe = null;
-let sidebar = null;
-let isOpen = false;
-let apiCallCounter = 0;
+// هذا السكريبت يعمل في بيئة الصفحة (Main World)
+(function() {
+    'use strict';
 
-const SITE_TRANSLATIONS = {
-    'en': { betterAlternatives: '✨ Better Alternatives' },
-    'ar': { betterAlternatives: '✨ بدائل أفضل' },
-    'fr': { betterAlternatives: '✨ Meilleures alternatives' }
-};
+    const API_PATTERN = "api/poppy/v1/goods_detail";
+    const SCENE_ORIGINAL = "goods_detail_like";
+    const SCENE_SIMILAR = "goods_detail_sold_out_similar";
 
-function getSiteLang() {
-    try {
-        let lang = document.documentElement.lang || 'en';
-        lang = lang.toLowerCase().split('-')[0].split('_')[0];
-        return SITE_TRANSLATIONS[lang] ? lang : 'en';
-    } catch(e) { return 'en'; }
-}
-
-const t = (key) => {
-    try {
-        const lang = getSiteLang();
-        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
-    } catch(e) { return key; }
-};
-
-function injectTemuApiScript() {
-    if (document.getElementById('timothy-temu-api')) return;
-    const script = document.createElement('script');
-    script.id = 'timothy-temu-api';
-    script.src = chrome.runtime.getURL('content/temu-api.js');
-    (document.head || document.documentElement).appendChild(script);
-}
-
-function removeWidget() {
-    if (widgetWrapper) {
-        widgetWrapper.remove();
-        widgetWrapper = null; iframeContainer = null; iframe = null; sidebar = null;
-    }
-}
-
-function injectWidget() {
-    try {
-        if (widgetWrapper) return;
-        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.match(/goods_id=(\d+)/);
-        if (!isProductPage) return;
-
-        injectTemuApiScript();
-        let currentSide = 'left';
-
-        widgetWrapper = document.createElement('div');
-        widgetWrapper.id = 'nezzer-widget-wrapper';
-        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
-
-        sidebar = document.createElement('div');
-        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
-
-        const pillContainer = document.createElement('div');
-        pillContainer.style.cssText = `background: #ffffff; padding: 20px 6px; border-radius: 0 40px 40px 0; box-shadow: 5px 0 20px rgba(0,0,0,0.1); display: flex; flex-direction: column; align-items: center; gap: 15px; pointer-events: auto; border: 1px solid #f1f5f9; border-left: none;`;
-
-        iframeContainer = document.createElement('div');
-        iframeContainer.style.cssText = `position: absolute; top: 50%; left: 60px; width: 620px; max-width: 90vw; height: 98vh; background: #fff; border-radius: 16px; box-shadow: 12px 0 40px rgba(0,0,0,0.15); transform: translateY(-50%) translateX(-105%); opacity: 0; pointer-events: none; visibility: hidden; transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1); display: flex; overflow: hidden; z-index: 5;`;
-
-        const siteLang = getSiteLang();
-        iframe = document.createElement('iframe');
-        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
-        iframe.style.cssText = `width: 100%; height: 100%; border: none;`;
-        iframeContainer.appendChild(iframe);
-
-        const dragHandle = document.createElement('div');
-        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; margin-bottom: 10px; border-radius: 10px; color: #64748b;`;
-        dragHandle.innerHTML = '⋮⋮';
-
-        function togglePanel(forceOpen = null) {
-            if (forceOpen === true) isOpen = true;
-            else if (forceOpen === false) isOpen = false;
-            else isOpen = !isOpen;
-
-            if (isOpen) {
-                iframeContainer.style.visibility = 'visible';
-                iframeContainer.style.opacity = '1';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
-                iframeContainer.style.pointerEvents = 'auto';
-            } else {
-                iframeContainer.style.opacity = '0';
-                iframeContainer.style.pointerEvents = 'none';
-                iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
-                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 600);
-            }
+    // 💡 اعتراض طلبات XHR
+    const original_open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+        this._original_url = url;
+        if (url.includes(API_PATTERN) && url.includes(SCENE_ORIGINAL)) {
+            this._is_target_request = true;
+            url = url.replace(SCENE_ORIGINAL, SCENE_SIMILAR);
         }
+        return original_open.call(this, method, url, ...args);
+    };
 
-        const createSortBtn = (text, sortValue) => {
-            const btn = document.createElement('div');
-            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: linear-gradient(135deg, #ff6b35, #ff4747); border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; color: white; border: 1px solid rgba(255,107,53,0.5);`;
-            btn.innerText = text;
-            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
-
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                if (isOpen) {
-                    togglePanel(false);
-                } else {
-                    togglePanel(true);
-                    try { iframe.contentWindow.postMessage({ action: 'SHOW_LOADING' }, '*'); } catch(e) {}
-
-                    const match = window.location.href.match(/-g-(\d+)\.html/) || window.location.href.match(/goods_id=(\d+)/);
-                    const productId = match ? match[1] : null;
-                    let img = document.querySelector('img[src*="kwcdn.com"]');
-                    const imageUrl = img ? img.src : "";
-
-                    if (productId) {
-                        const callId = 'call_' + (++apiCallCounter);
-                        const findSimParams = { id: productId, image: imageUrl };
-                        
-                        window.postMessage({
-                            type: 'TIMOTHY_FIND_SIM_REQUEST',
-                            callId: callId,
-                            findSimParams: findSimParams
-                        }, '*');
-                    } else {
-                        try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
+    const original_send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+        if (this._is_target_request && body) {
+            try {
+                const body_obj = JSON.parse(body);
+                if (body_obj.scene === SCENE_ORIGINAL) {
+                    // تعديل الطلب
+                    body_obj.scene = SCENE_SIMILAR;
+                    if (body_obj.listId && body_obj.listId.includes("_recommend")) {
+                        body_obj.listId = body_obj.listId.replace("_recommend", "_sold_out_similar");
                     }
+                    delete body_obj.optId;
+                    delete body_obj.optType;
+                    body = JSON.stringify(body_obj);
                 }
-            };
-            return btn;
-        };
-
-        let btn = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
-
-        pillContainer.appendChild(dragHandle);
-        pillContainer.appendChild(btn);
-        sidebar.appendChild(pillContainer);
-        widgetWrapper.appendChild(sidebar);
-        widgetWrapper.appendChild(iframeContainer);
-        document.body.appendChild(widgetWrapper);
-
-    } catch(err) { console.error(err); }
-}
-
-// 💡 دالة استخراج المنتجات العميقة (تبحث في أي مكان بالـ JSON)
-function extractProductsDeep(obj, foundProducts = []) {
-    if (!obj) return foundProducts;
-    
-    if (Array.isArray(obj)) {
-        obj.forEach(item => extractProductsDeep(item, foundProducts));
-    } else if (typeof obj === 'object') {
-        // التحقق مما إذا كان هذا الكائن يشبه المنتج
-        const id = obj.goodsId || obj.goods_id || obj.productId || obj.product_id;
-        const img = obj.imgUrl || obj.image || obj.hdThumbUrl || (obj.image && obj.image.imgUrl);
-        
-        if (id && img) {
-            foundProducts.push({
-                productId: String(id),
-                title: { displayTitle: obj.title?.displayTitle || obj.title || obj.goodsName || obj.titleName || 'Temu Product' },
-                image: { imgUrl: typeof img === 'string' ? img : (img.imgUrl || img.url || '') },
-                prices: { salePrice: { formattedPrice: obj.prices?.salePrice?.formattedPrice || obj.priceStr || obj.price || '—' } },
-                evaluation: { starRating: obj.evaluation?.starRating || obj.starRating || 4.8 },
-                trade: { realTradeCount: obj.trade?.realTradeCount || obj.soldQuantity || 100 },
-                url: `https://www.temu.com/goods.html?goods_id=${id}`
-            });
-        } else {
-            // البحث بشكل أعمق داخل الكائن
-            Object.values(obj).forEach(val => extractProductsDeep(val, foundProducts));
-        }
-    }
-    return foundProducts;
-}
-
-window.addEventListener('message', (event) => {
-    if (event.source !== window || !event.data) return;
-
-    if (event.data.type === 'TIMOTHY_FIND_SIM_RESPONSE') {
-        if (event.data.error) {
-            console.error("[Timothy Injector] Error from API:", event.data.error);
-            try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
-            return;
-        }
-
-        try {
-            const result = event.data.result;
-            console.log("[Timothy Injector] Raw result received:", result);
-            
-            // البحث العميق عن المنتجات
-            let products = extractProductsDeep(result);
-            
-            // إزالة التكرار بناءً على الـ ID
-            const uniqueProducts = Array.from(new Map(products.map(p => [p.productId, p])).values());
-
-            console.log("[Timothy Injector] Products extracted:", uniqueProducts.length);
-
-            if (uniqueProducts.length > 0) {
-                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: uniqueProducts }, '*'); } catch(e) {}
-            } else {
-                try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
+            } catch (error) {
+                console.error("Timothy XHR: Failed to parse body", error);
             }
-
-        } catch(e) {
-            console.error("[Timothy Injector] Parsing error:", e);
-            try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
         }
-    }
-});
+        return original_send.call(this, body);
+    };
 
-injectWidget();
+    // 💡 اعتراض الرد (Response) لاستخراج البيانات
+    const original_onreadystatechange = XMLHttpRequest.prototype.onreadystatechange;
+    // لا يمكننا بسهولة اعتراض onreadystatechange مباشرة، لذا سنستخدم addEventListener
+    // ولكننا سنحتاج إلى اعتراض الرد قبل أن يصل إلى كود تيمو.
+    // الطريقة الأسهل هي الاعتراض عبر 'load' ثم إرسال البيانات.
+    
+    // نضيف مستمعًا لأي طلب XHR
+    XMLHttpRequest.prototype.addEventListener('load', function() {
+        if (this._is_target_request && this.status === 200) {
+            try {
+                const response = JSON.parse(this.responseText);
+                // إرسال البيانات إلى injector.js
+                window.postMessage({
+                    type: 'TIMOTHY_XHR_RESPONSE',
+                    data: response
+                }, '*');
+            } catch (e) {
+                console.error("Timothy XHR: Failed to parse response", e);
+            }
+        }
+    });
 
-let lastUrl = location.href;
-new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-        removeWidget();
-        setTimeout(injectWidget, 1000);
-    }
-}).observe(document, {subtree: true, childList: true});
+    console.log("[Timothy XHR] Interceptor injected.");
+})();
