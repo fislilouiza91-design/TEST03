@@ -17,12 +17,15 @@
             url = url.replace(SCENE_ORIGINAL, SCENE_SIMILAR);
         }
         
-        // 💡 إضافة المستمع هنا بشكل صحيح داخل الـ Instance
         this.addEventListener('load', function() {
             if (this._is_target_request && this.status === 200) {
                 try {
                     console.log("🟢 [Timothy XHR] Response received from API!");
                     const response = JSON.parse(this.responseText);
+                    
+                    // 💡 طباعة البيانات في الكونسول لنعرف شكلها
+                    console.log("📦 DATA FROM TEMU:", response); 
+                    
                     window.postMessage({
                         type: 'TIMOTHY_XHR_RESPONSE',
                         data: response
