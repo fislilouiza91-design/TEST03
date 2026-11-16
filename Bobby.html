@@ -1,38 +1,58 @@
-{
-  "manifest_version": 3,
-  "name": "Timothy - Temu Alternatives",
-  "description": "Find similar products on Temu with affiliate links.",
-  "default_locale": "en",
-  "version": "1.0.5",
-  "minimum_chrome_version": "102",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.temu.com/*"
-  ],
-  "background": {
-    "service_worker": "background/engine.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.temu.com/*"],
-      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "panel/panel.html", 
-        "panel/panel.js", 
-        "content/temu-xhr-interceptor.js"
-      ],
-      "matches": ["*://*.temu.com/*"]
-    }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "assets/icons/icon128.png" }
-  },
-  "icons": { "128": "assets/icons/icon128.png" }
-}
+(function() {
+    'use strict';
+
+    console.log("🟢 [Timothy XHR] Interceptor Script Injected Successfully!");
+
+    const API_PATTERN = "api/poppy/v1/goods_detail";
+    const SCENE_ORIGINAL = "goods_detail_like";
+    const SCENE_SIMILAR = "goods_detail_sold_out_similar";
+
+    const original_open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+        this._original_url = url;
+        
+        if (url.includes(API_PATTERN) && url.includes(SCENE_ORIGINAL)) {
+            console.log("🔵 [Timothy XHR] Found target request, modifying URL...");
+            this._is_target_request = true;
+            url = url.replace(SCENE_ORIGINAL, SCENE_SIMILAR);
+        }
+        
+        // 💡 إضافة المستمع هنا بشكل صحيح داخل الـ Instance
+        this.addEventListener('load', function() {
+            if (this._is_target_request && this.status === 200) {
+                try {
+                    console.log("🟢 [Timothy XHR] Response received from API!");
+                    const response = JSON.parse(this.responseText);
+                    window.postMessage({
+                        type: 'TIMOTHY_XHR_RESPONSE',
+                        data: response
+                    }, '*');
+                } catch (e) {
+                    console.error("Error parsing XHR response", e);
+                }
+            }
+        });
+
+        return original_open.call(this, method, url, ...args);
+    };
+
+    const original_send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+        if (this._is_target_request && body) {
+            try {
+                const body_obj = JSON.parse(body);
+                if (body_obj.scene === SCENE_ORIGINAL) {
+                    console.log("🔵 [Timothy XHR] Modifying request body...");
+                    body_obj.scene = SCENE_SIMILAR;
+                    if (body_obj.listId && body_obj.listId.includes("_recommend")) {
+                        body_obj.listId = body_obj.listId.replace("_recommend", "_sold_out_similar");
+                    }
+                    delete body_obj.optId;
+                    delete body_obj.optType;
+                    body = JSON.stringify(body_obj);
+                }
+            } catch (error) {}
+        }
+        return original_send.call(this, body);
+    };
+})();
