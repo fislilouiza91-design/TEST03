@@ -1,4 +1,59 @@
-https://www.temu.com/dz-fr/ciseaux-de-coupe-de-cheveux-tondeuse-%C3%A0-cheveux-%C3%A9lectrique-rechargeable-par-usb-facile-%C3%A0-nettoyer-ciseaux-de-coupe-de-cheveux-pour-cr%C3%A2ne-d%C3%A9garni-g-601099610947448.html?_oak_mp_inf=EPj%2Bo8am1ogBGhZnb29kc185cml4N2VfcmVjb21tZW5kINC0q5yeNA%3D%3D&top_gallery_url=https%3A%2F%2Fimg.kwcdn.com%2Fproduct%2Ffancy%2F18d930c9-9929-435b-a1d5-b928f886f6c9.jpg&spec_gallery_id=7980&refer_page_sn=10032&freesia_scene=11&_oak_freesia_scene=11&_oak_rec_ext_1=NzQzMDA&_oak_gallery_order=1755795204&refer_page_el_sn=200444&ab_scene=1&_x_ns_irclickid=3eKSjlX3GxyZTSzQFp3F0VBuUkrUzkz9JXPWQU0&_x_ads_account=18350&_x_ads_id=1580294&_x_ns_iradname=Online%20Tracking%20Link&_x_ns_iradsize=&_x_ns_prodsku=&_x_ns_irmptype=mediapartner&_x_ns_sharedid=&_x_ns_ts=1794818879224&_x_ns_randint=844091&_x_ns_adtype=ONLINE_TRACKING_LINK&_x_ns_irmpgroupname=%22ay%22&_x_ads_channel=impact&_x_ns_mp_value2=&_x_ns_mp_value3=&_x_ns_irmpname=VoucherDiscount1&_x_ns_irpid=4904513&_x_vst_scene=adg&_x_sessn_id=jzr2shtpqh&refer_page_name=goods&refer_page_id=10032_1794818887441_b2qlv4ez9y&is_back=1
+(function() {
+    'use strict';
 
+    console.log("🟢 [Timothy Spy] Universal Interceptor Injected. Watching fetch & XHR...");
 
-https://www.temu.com/dz-fr/hub-usb-c-3-0-7-en-1-g-601099613712568.html?_oak_mp_inf=ELjhzMem1ogBGhZnb29kc19heWtwcGVfcmVjb21tZW5kIPjAwZyeNA%3D%3D&top_gallery_url=https%3A%2F%2Fimg.kwcdn.com%2Fproduct%2Falgo_framework%2FImageCm2InAlgo%2F87b610fe-fc50-11f0-8390-0a580aae50ca.jpg&spec_gallery_id=7251&refer_page_sn=10032&freesia_scene=11&_oak_freesia_scene=11&_oak_rec_ext_1=NzMzMDA&_oak_gallery_order=1459801165%2C1392776124%2C1190925218%2C1756078483%2C1621591130&refer_page_el_sn=200444&ab_scene=1&_x_ns_irclickid=3eKSjlX3GxyZTSzQFp3F0VBuUkrUzkz9JXPWQU0&_x_ads_account=18350&_x_ads_id=1580294&_x_ns_iradname=Online%20Tracking%20Link&_x_ns_iradsize=&_x_ns_prodsku=&_x_ns_irmptype=mediapartner&_x_ns_sharedid=&_x_ns_ts=1794818879224&_x_ns_randint=844091&_x_ns_adtype=ONLINE_TRACKING_LINK&_x_ns_irmpgroupname=%22ay%22&_x_ads_channel=impact&_x_ns_mp_value2=&_x_ns_mp_value3=&_x_ns_irmpname=VoucherDiscount1&_x_ns_irpid=4904513&_x_vst_scene=adg&_x_sessn_id=jzr2shtpqh&refer_page_name=goods&refer_page_id=10032_1794819249317_xwt3e1xl45
+    // 💡 1. اعتراض طلبات Fetch (الطريقة الحديثة)
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const url = args[0] instanceof Request ? args[0].url : args[0];
+        
+        // مراقبة الطلبات التي قد تحتوي على منتجات
+        if (typeof url === 'string' && (url.includes("goods") || url.includes("recommend") || url.includes("similar") || url.includes("list"))) {
+            console.log("🌐 [Timothy Spy] Spotted Fetch Request:", url);
+        }
+
+        const response = await originalFetch.apply(this, args);
+        const clone = response.clone();
+        
+        clone.text().then(text => {
+            // إذا كان الرد يحتوي على بيانات منتجات
+            if (text.includes('goodsId') || text.includes('goods_id')) {
+                try {
+                    const data = JSON.parse(text);
+                    console.log("📦 [Timothy Spy] DATA FOUND IN FETCH RESPONSE!");
+                    window.postMessage({
+                        type: 'TIMOTHY_XHR_RESPONSE',
+                        data: data
+                    }, '*');
+                } catch (e) {}
+            }
+        }).catch(() => {});
+
+        return response;
+    };
+
+    // 💡 2. اعتراض طلبات XHR (الطريقة القديمة - للاحتياط)
+    const original_open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, ...args) {
+        if (url.includes("goods") || url.includes("recommend") || url.includes("similar")) {
+            console.log("🌐 [Timothy Spy] Spotted XHR Request:", url);
+            this._is_target = true;
+        }
+
+        this.addEventListener('load', function() {
+            if (this.status === 200 && this.responseText && this.responseText.includes('goodsId')) {
+                try {
+                    const data = JSON.parse(this.responseText);
+                    console.log("📦 [Timothy Spy] DATA FOUND IN XHR RESPONSE!");
+                    window.postMessage({
+                        type: 'TIMOTHY_XHR_RESPONSE',
+                        data: data
+                    }, '*');
+                } catch (e) {}
+            }
+        });
+
+        return original_open.call(this, method, url, ...args);
+    };
+})();
