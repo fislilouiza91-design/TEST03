@@ -1,92 +1,215 @@
-// هذا الكود يعمل في بيئة الصفحة (Main World) ليخترق Webpack الخاص بتيمو
-(function() {
-    'use strict';
+let widgetWrapper = null;
+let iframeContainer = null;
+let iframe = null;
+let sidebar = null;
+let isOpen = false;
+let apiCallCounter = 0;
 
-    if (window.__TIMOTHY_SEARCH_INJECTED__) return;
-    window.__TIMOTHY_SEARCH_INJECTED__ = true;
+const SITE_TRANSLATIONS = {
+    'en': { betterAlternatives: '✨ Better Alternatives' },
+    'ar': { betterAlternatives: '✨ بدائل أفضل' },
+    'fr': { betterAlternatives: '✨ Meilleures alternatives' }
+};
 
-    console.log("[Timothy API] Script injected into Main World.");
+function getSiteLang() {
+    try {
+        let lang = document.documentElement.lang || 'en';
+        lang = lang.toLowerCase().split('-')[0].split('_')[0];
+        return SITE_TRANSLATIONS[lang] ? lang : 'en';
+    } catch(e) { return 'en'; }
+}
 
-    function hookWebpackRequire() {
-        if (window.__realWebpackRequire__) return true;
-        if (!window.__LOADABLE_LOADED_CHUNKS__) {
-            console.error('[Timothy API] Webpack (__LOADABLE_LOADED_CHUNKS__) not found!');
-            return false;
-        }
-        window.__LOADABLE_LOADED_CHUNKS__.push([[Math.random()], {}, function (req) {
-            window.__realWebpackRequire__ = req;
-            console.log("[Timothy API] Webpack hooked successfully!");
-        }]);
-        return true;
+const t = (key) => {
+    try {
+        const lang = getSiteLang();
+        return SITE_TRANSLATIONS[lang] ? SITE_TRANSLATIONS[lang][key] : SITE_TRANSLATIONS['en'][key];
+    } catch(e) { return key; }
+};
+
+function injectTemuApiScript() {
+    if (document.getElementById('timothy-temu-api')) return;
+    const script = document.createElement('script');
+    script.id = 'timothy-temu-api';
+    script.src = chrome.runtime.getURL('content/temu-api.js');
+    (document.head || document.documentElement).appendChild(script);
+}
+
+function removeWidget() {
+    if (widgetWrapper) {
+        widgetWrapper.remove();
+        widgetWrapper = null; iframeContainer = null; iframe = null; sidebar = null;
     }
+}
 
-    function findModuleExportByCodeMatch(moduleKeyword, exportKeyword = moduleKeyword) {
-        if (!window.__realWebpackRequire__) return null;
+function injectWidget() {
+    try {
+        if (widgetWrapper) return;
+        const isProductPage = window.location.href.match(/-g-\d+\.html/) || window.location.href.match(/goods_id=(\d+)/);
+        if (!isProductPage) return;
 
-        for (const chunk of window.__LOADABLE_LOADED_CHUNKS__) {
-            const modules = chunk[1];
-            if (!modules) continue;
-            for (const [moduleId, moduleFn] of Object.entries(modules)) {
-                try {
-                    const codeStr = moduleFn.toString();
-                    if (codeStr.includes(moduleKeyword)) {
-                        const mod = window.__realWebpackRequire__(moduleId);
-                        for (const [exportKey, exportValue] of Object.entries(mod || {})) {
-                            if (typeof exportValue === "function" && exportValue.toString().includes(exportKeyword)) {
-                                return exportValue;
-                            }
-                        }
+        injectTemuApiScript();
+        let currentSide = 'left';
+
+        widgetWrapper = document.createElement('div');
+        widgetWrapper.id = 'nezzer-widget-wrapper';
+        widgetWrapper.style.cssText = `position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483647;`;
+
+        sidebar = document.createElement('div');
+        sidebar.style.cssText = `position: absolute; top: 50%; left: 0; transform: translateY(-50%); pointer-events: none; z-index: 10;`;
+
+        const pillContainer = document.createElement('div');
+        pillContainer.style.cssText = `background: #ffffff; padding: 20px 6px; border-radius: 0 40px 40px 0; box-shadow: 5px 0 20px rgba(0,0,0,0.1); display: flex; flex-direction: column; align-items: center; gap: 15px; pointer-events: auto; border: 1px solid #f1f5f9; border-left: none;`;
+
+        iframeContainer = document.createElement('div');
+        iframeContainer.style.cssText = `position: absolute; top: 50%; left: 60px; width: 620px; max-width: 90vw; height: 98vh; background: #fff; border-radius: 16px; box-shadow: 12px 0 40px rgba(0,0,0,0.15); transform: translateY(-50%) translateX(-105%); opacity: 0; pointer-events: none; visibility: hidden; transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1); display: flex; overflow: hidden; z-index: 5;`;
+
+        const siteLang = getSiteLang();
+        iframe = document.createElement('iframe');
+        iframe.src = chrome.runtime.getURL('panel/panel.html') + '?siteLang=' + siteLang;
+        iframe.style.cssText = `width: 100%; height: 100%; border: none;`;
+        iframeContainer.appendChild(iframe);
+
+        const dragHandle = document.createElement('div');
+        dragHandle.style.cssText = `cursor: grab; font-size: 22px; line-height: 10px; padding: 12px 10px; user-select: none; margin-bottom: 10px; border-radius: 10px; color: #64748b;`;
+        dragHandle.innerHTML = '⋮⋮';
+
+        function togglePanel(forceOpen = null) {
+            if (forceOpen === true) isOpen = true;
+            else if (forceOpen === false) isOpen = false;
+            else isOpen = !isOpen;
+
+            if (isOpen) {
+                iframeContainer.style.visibility = 'visible';
+                iframeContainer.style.opacity = '1';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(0)';
+                iframeContainer.style.pointerEvents = 'auto';
+            } else {
+                iframeContainer.style.opacity = '0';
+                iframeContainer.style.pointerEvents = 'none';
+                iframeContainer.style.transform = 'translateY(-50%) translateX(-105%)';
+                setTimeout(() => { if (!isOpen) iframeContainer.style.visibility = 'hidden'; }, 600);
+            }
+        }
+
+        const createSortBtn = (text, sortValue) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `writing-mode: vertical-rl; text-orientation: mixed; padding: 18px 5px; background: linear-gradient(135deg, #ff6b35, #ff4747); border-radius: 20px; cursor: pointer; font-weight: 700; font-size: 13px; transition: all 0.2s ease; color: white; border: 1px solid rgba(255,107,53,0.5);`;
+            btn.innerText = text;
+            if (currentSide === 'left') btn.style.transform = 'rotate(180deg)';
+
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                if (isOpen) {
+                    togglePanel(false);
+                } else {
+                    togglePanel(true);
+                    try { iframe.contentWindow.postMessage({ action: 'SHOW_LOADING' }, '*'); } catch(e) {}
+
+                    const match = window.location.href.match(/-g-(\d+)\.html/) || window.location.href.match(/goods_id=(\d+)/);
+                    const productId = match ? match[1] : null;
+                    let img = document.querySelector('img[src*="kwcdn.com"]');
+                    const imageUrl = img ? img.src : "";
+
+                    if (productId) {
+                        const callId = 'call_' + (++apiCallCounter);
+                        const findSimParams = { id: productId, image: imageUrl };
+                        
+                        window.postMessage({
+                            type: 'TIMOTHY_FIND_SIM_REQUEST',
+                            callId: callId,
+                            findSimParams: findSimParams
+                        }, '*');
+                    } else {
+                        try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
                     }
-                } catch (e) {}
-            }
-        }
-        return null;
-    }
+                }
+            };
+            return btn;
+        };
 
-    async function findSimilar(params) {
-        hookWebpackRequire();
-        const fn = findModuleExportByCodeMatch("window_find_sim_img");
+        let btn = createSortBtn(t('betterAlternatives'), 'betterAlternatives');
+
+        pillContainer.appendChild(dragHandle);
+        pillContainer.appendChild(btn);
+        sidebar.appendChild(pillContainer);
+        widgetWrapper.appendChild(sidebar);
+        widgetWrapper.appendChild(iframeContainer);
+        document.body.appendChild(widgetWrapper);
+
+    } catch(err) { console.error(err); }
+}
+
+// 💡 دالة استخراج المنتجات العميقة (تبحث في أي مكان بالـ JSON)
+function extractProductsDeep(obj, foundProducts = []) {
+    if (!obj) return foundProducts;
+    
+    if (Array.isArray(obj)) {
+        obj.forEach(item => extractProductsDeep(item, foundProducts));
+    } else if (typeof obj === 'object') {
+        // التحقق مما إذا كان هذا الكائن يشبه المنتج
+        const id = obj.goodsId || obj.goods_id || obj.productId || obj.product_id;
+        const img = obj.imgUrl || obj.image || obj.hdThumbUrl || (obj.image && obj.image.imgUrl);
         
-        if (fn) {
-            console.log("[Timothy API] Found window_find_sim_img function! Executing...");
-            try {
-                const result = await fn(params);
-                console.log("[Timothy API] API Response:", result);
-                return result;
-            } catch (error) {
-                console.error("[Timothy API] Execution Error:", error);
-                throw new Error("Failed to execute search: " + error.message);
-            }
+        if (id && img) {
+            foundProducts.push({
+                productId: String(id),
+                title: { displayTitle: obj.title?.displayTitle || obj.title || obj.goodsName || obj.titleName || 'Temu Product' },
+                image: { imgUrl: typeof img === 'string' ? img : (img.imgUrl || img.url || '') },
+                prices: { salePrice: { formattedPrice: obj.prices?.salePrice?.formattedPrice || obj.priceStr || obj.price || '—' } },
+                evaluation: { starRating: obj.evaluation?.starRating || obj.starRating || 4.8 },
+                trade: { realTradeCount: obj.trade?.realTradeCount || obj.soldQuantity || 100 },
+                url: `https://www.temu.com/goods.html?goods_id=${id}`
+            });
         } else {
-            console.error("[Timothy API] window_find_sim_img NOT found. Temu code changed.");
-            throw new Error("window_find_sim_img not found.");
+            // البحث بشكل أعمق داخل الكائن
+            Object.values(obj).forEach(val => extractProductsDeep(val, foundProducts));
         }
     }
+    return foundProducts;
+}
 
-    // الاستماع للطلب القادم من injector.js
-    window.addEventListener('message', function (event) {
-        if (event.source !== window || !event.data) return;
+window.addEventListener('message', (event) => {
+    if (event.source !== window || !event.data) return;
 
-        if (event.data.type === 'TIMOTHY_FIND_SIM_REQUEST') {
-            const { callId, findSimParams } = event.data;
-            
-            findSimilar(findSimParams)
-                .then(result => {
-                    window.postMessage({
-                        type: 'TIMOTHY_FIND_SIM_RESPONSE',
-                        callId: callId,
-                        result: result // نرسل الرد كما هو دون تعديل
-                    }, '*');
-                })
-                .catch(error => {
-                    window.postMessage({
-                        type: 'TIMOTHY_FIND_SIM_RESPONSE',
-                        callId: callId,
-                        error: error.message
-                    }, '*');
-                });
+    if (event.data.type === 'TIMOTHY_FIND_SIM_RESPONSE') {
+        if (event.data.error) {
+            console.error("[Timothy Injector] Error from API:", event.data.error);
+            try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
+            return;
         }
-    });
 
-    window.postMessage({ type: 'TIMOTHY_PAGE_CONTEXT_READY' }, '*');
-})();
+        try {
+            const result = event.data.result;
+            console.log("[Timothy Injector] Raw result received:", result);
+            
+            // البحث العميق عن المنتجات
+            let products = extractProductsDeep(result);
+            
+            // إزالة التكرار بناءً على الـ ID
+            const uniqueProducts = Array.from(new Map(products.map(p => [p.productId, p])).values());
+
+            console.log("[Timothy Injector] Products extracted:", uniqueProducts.length);
+
+            if (uniqueProducts.length > 0) {
+                try { iframe.contentWindow.postMessage({ action: 'RENDER_LOCAL', products: uniqueProducts }, '*'); } catch(e) {}
+            } else {
+                try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
+            }
+
+        } catch(e) {
+            console.error("[Timothy Injector] Parsing error:", e);
+            try { iframe.contentWindow.postMessage({ action: 'SHOW_EMPTY' }, '*'); } catch(e) {}
+        }
+    }
+});
+
+injectWidget();
+
+let lastUrl = location.href;
+new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        removeWidget();
+        setTimeout(injectWidget, 1000);
+    }
+}).observe(document, {subtree: true, childList: true});
