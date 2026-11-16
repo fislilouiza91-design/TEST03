@@ -1,34 +1,84 @@
-{
-  "manifest_version": 3,
-  "name": "Timothy - Temu Alternatives",
-  "description": "Find similar products on Temu with affiliate links.",
-  "default_locale": "en",
-  "version": "1.0.5",
-  "minimum_chrome_version": "102",
-  "permissions": ["storage", "scripting", "tabs", "cookies"],
-  "host_permissions": [
-    "*://*.temu.com/*"
-  ],
-  "background": {
-    "service_worker": "background/engine.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://*.temu.com/*"],
-      "js": ["content/disclaimer-i18n.js", "content/injector.js"],
-      "run_at": "document_idle"
+// هذا الكود يعمل في بيئة الصفحة (Main World) ليخترق Webpack الخاص بتيمو
+(function() {
+    'use strict';
+
+    if (window.__TIMOTHY_SEARCH_INJECTED__) return;
+    window.__TIMOTHY_SEARCH_INJECTED__ = true;
+
+    function hookWebpackRequire() {
+        if (window.__realWebpackRequire__) return;
+        if (!window.__LOADABLE_LOADED_CHUNKS__) {
+            console.error('[Timothy] Webpack not found.');
+            return;
+        }
+        window.__LOADABLE_LOADED_CHUNKS__.push([[Math.random()], {}, function (req) {
+            window.__realWebpackRequire__ = req;
+        }]);
     }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["panel/panel.html", "panel/panel.js", "content/temu-api.js"],
-      "matches": ["*://*.temu.com/*"]
+
+    function findModuleExportByCodeMatch(moduleKeyword, exportKeyword = moduleKeyword) {
+        if (!window.__realWebpackRequire__) return null;
+
+        for (const chunk of window.__LOADABLE_LOADED_CHUNKS__) {
+            const modules = chunk[1];
+            if (!modules) continue;
+            for (const [moduleId, moduleFn] of Object.entries(modules)) {
+                try {
+                    const codeStr = moduleFn.toString();
+                    if (codeStr.includes(moduleKeyword)) {
+                        const mod = window.__realWebpackRequire__(moduleId);
+                        for (const [exportKey, exportValue] of Object.entries(mod || {})) {
+                            if (typeof exportValue === "function" && exportValue.toString().includes(exportKeyword)) {
+                                return exportValue;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
+        return null;
     }
-  ],
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_icon": { "128": "assets/icons/icon128.png" }
-  },
-  "icons": { "128": "assets/icons/icon128.png" }
-}
+
+    async function findSimilar(params) {
+        hookWebpackRequire();
+        const fn = findModuleExportByCodeMatch("window_find_sim_img");
+        
+        if (fn) {
+            try {
+                const result = await fn(params);
+                return result;
+            } catch (error) {
+                throw new Error("Failed to execute search: " + error.message);
+            }
+        } else {
+            throw new Error("window_find_sim_img not found. Temu may have updated their code.");
+        }
+    }
+
+    // الاستماع للطلب القادم من injector.js
+    window.addEventListener('message', function (event) {
+        if (event.source !== window || !event.data) return;
+
+        if (event.data.type === 'TIMOTHY_FIND_SIM_REQUEST') {
+            const { callId, findSimParams } = event.data;
+            
+            findSimilar(findSimParams)
+                .then(result => {
+                    window.postMessage({
+                        type: 'TIMOTHY_FIND_SIM_RESPONSE',
+                        callId: callId,
+                        result: JSON.parse(JSON.stringify(result))
+                    }, '*');
+                })
+                .catch(error => {
+                    window.postMessage({
+                        type: 'TIMOTHY_FIND_SIM_RESPONSE',
+                        callId: callId,
+                        error: error.message
+                    }, '*');
+                });
+        }
+    });
+
+    window.postMessage({ type: 'TIMOTHY_PAGE_CONTEXT_READY' }, '*');
+})();
