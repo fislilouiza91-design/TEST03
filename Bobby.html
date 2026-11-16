@@ -41,18 +41,33 @@ function removeWidget() {
     }
 }
 
+// 💡 دالة دقيقة جداً للتحقق من أننا في صفحة منتج واحد فقط
+function isSingleProductPage() {
+    // 1. البحث عن وسم الميتا الذي تضعه تيمو في صفحات المنتجات فقط
+    const ogType = document.querySelector('meta[property="og:type"]');
+    if (ogType && ogType.content === 'product') return true;
+    
+    // 2. أو البحث عن رابط المنتج الكلاسيكي
+    if (window.location.href.match(/-g-\d+\.html/) || window.location.href.match(/goods_id=(\d+)/)) return true;
+
+    // 3. أو البحث عن زر "أضف إلى السلة" (Ajouter au panier) كدليل قاطع
+    const buttons = document.querySelectorAll('button, div[role="button"]');
+    for (let btn of buttons) {
+        const text = (btn.innerText || '').toLowerCase();
+        if (text.includes('ajouter au panier') || text.includes('add to cart') || text.includes('أضف إلى السلة')) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function injectWidget() {
     try {
         if (widgetWrapper) return;
         
-        // 💡 تعديل ذكي: نتحقق فقط من أننا في موقع تيمو ولسنا في الصفحة الرئيسية أو صفحة بحث
-        const isTemu = window.location.href.includes('temu.com');
-        const isSearch = window.location.href.includes('search_result');
-        const isCategory = window.location.href.includes('/c/');
-        const isHome = window.location.pathname === '/' || window.location.pathname === '/dz-fr/' || window.location.pathname === '/fr/';
-        
-        // إذا لم تكن صفحة منتج، لا تفعل شيئاً
-        if (!isTemu || isSearch || isCategory || isHome) return;
+        // 💡 استخدام الدالة الدقيقة للتحقق
+        if (!isSingleProductPage()) return;
 
         injectXhrInterceptor();
         let currentSide = 'left';
